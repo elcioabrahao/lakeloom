@@ -23,7 +23,10 @@ NAMES = ("customers", "products", "orders", "invoices")
 
 
 class FakeOM:
-    def __init__(self, known: set[str] | None = None, down: bool = False) -> None:
+    def __init__(
+        self, known: set[str] | None = None, down: bool = False, boom: bool = False
+    ) -> None:
+        self.boom = boom
         self.known = known or set()
         self.down = down
         self.calls: list[str] = []
@@ -32,6 +35,8 @@ class FakeOM:
         self.calls.append(fqn)
         if self.down:
             raise OMUnavailable("secret-url down")
+        if self.boom:
+            raise RuntimeError("boom")
         if fqn in self.known:
             return OMTable.model_validate({"id": "om-1", "fullyQualifiedName": fqn})
         return None
@@ -205,6 +210,29 @@ async def test_nfr_perf_02_100_tables_under_60s(repo: ScanRepository, tmp_path: 
     start = time.monotonic()
     rec = await svc.scan("big", principal=_principal(), client=None)
     elapsed = time.monotonic() - start
-    print(f"perf: 100 tables scanned in {elapsed:.2f}s")
     assert rec.status == "completed" and len(rec.tables) == 100
-    assert elapsed < 60
+    assert elapsed < 60, f"100 tables took {elapsed:.2f}s"
+
+
+async def test_om_unexpected_exception_does_not_fail_scan(repo: ScanRepository) -> None:
+    svc = _service(repo, _config(om_service="svc"), FakeOM(boom=True))
+    rec = await svc.scan("fixture", principal=_principal(), client=None)
+    assert rec.status == "completed"
+    assert len(rec.warnings) == 4 and all("upstream_error" in w for w in rec.warnings)
+    assert (await repo.get(rec.id)).id == rec.id
+
+
+async def test_fr_src_10_mixed_catalog_and_catalogless_tables(repo: ScanRepository) -> None:
+    cfg = DeltaSourceConfig(
+        type="delta",
+        name="fixture",
+        tables=[
+            DeltaTableEntry(uri=(FIXTURE / "orders").as_uri(), catalog="retail", schema="sales"),
+            DeltaTableEntry(uri=(FIXTURE / "customers").as_uri(), schema="flat"),
+        ],
+    )
+    svc = _service(repo, cfg)
+    rec = await svc.scan("fixture", principal=_principal(), client=None)
+    assert sorted(t.ref.name for t in rec.tables) == ["customers", "orders"]
+    rec = await svc.scan("fixture", catalogs=["retail"], principal=_principal(), client=None)
+    assert [t.ref.name for t in rec.tables] == ["orders"]

@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 
 from lakeloom.config import Settings
 from lakeloom.errors import LakeloomError
-from lakeloom.om.client import OMClient, OMError, OMUnavailable
+from lakeloom.om.client import OMClient, OMUnavailable
 from lakeloom.om.fqn import build_fqn
 from lakeloom.server.auth import Principal
 from lakeloom.sources.base import LakeSource, ProfilePolicy
@@ -60,9 +60,18 @@ class ScanService:
         tables: list[str] | None,
         warnings: list[str],
     ) -> list[TableRef]:
-        cats: list[str | None] = [*(await src.list_catalogs())] or [None]
+        named = await src.list_catalogs()
+        cats: list[str | None] = [*named]
+        if not named:
+            cats = [None]
+        else:
+            try:  # catalog-less tables alongside catalogs must not be dropped
+                if await src.list_schemas(None):
+                    cats.append(None)
+            except LakeloomError:
+                pass
         if catalogs is not None:
-            cats = [c for c in cats if c in catalogs]
+            cats = [c for c in cats if c is not None and c in catalogs]  # filter excludes None
         found: list[TableRef] = []
         seen_schemas: set[str] = set()
         for cat in cats:
@@ -97,7 +106,7 @@ class ScanService:
         fqn = build_fqn(*parts)
         try:
             table = await self._om.get_table_by_fqn(fqn)
-        except OMError as exc:
+        except Exception as exc:
             reason = "upstream_unavailable" if isinstance(exc, OMUnavailable) else "upstream_error"
             warnings.append(f"OpenMetadata lookup failed for {ref.full_name}: {reason}")
             return
