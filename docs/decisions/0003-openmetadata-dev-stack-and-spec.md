@@ -198,3 +198,22 @@ idle (1 GB heap cap). Fits the 8 GB minimum with room for Lakeloom (Task 8).
 - The OM bot token in `om-secrets` is written `10001:10001`, mode 0440 (Lakeloom runs as
   uid 10001, read-only root filesystem, `/tmp` tmpfs, state in the `lakeloom-data` volume).
 - Image pins: `ghcr.io/astral-sh/uv:0.11.12`, `python:3.12.14-slim-trixie`.
+
+## Appendix (M1a Task 5): fixture seeding and table lookup
+
+- `om-seed` (one-shot, same image as `lakeloom`, read-only root, `/tmp` tmpfs) runs
+  `scripts/seed_om_fixture.py` after `om-bootstrap`; `lakeloom` waits for it. The image now
+  installs the `delta` extra (the script reuses the Delta connector instead of re-parsing).
+- Entities are created with PUT create-or-update (`/v1/services/databaseServices`,
+  `/v1/databases`, `/v1/databaseSchemas`, `/v1/tables`), so reruns keep the same ids.
+- Service type: `UnityCatalog` (present in the 2.1.0-rc1 `serviceType` enum), no connection
+  block. FQNs follow `lakeloom_fixture.retail.sales.<table>`.
+- Types map onto OM `dataType`: bigint to BIGINT, string to STRING, decimal(p,s) to DECIMAL
+  with precision/scale, timestamp to TIMESTAMP, date to DATE. PK and FK become
+  `tableConstraints` (FK `referredColumns` use column FQNs; tables are created in
+  dependency order).
+- Tags: OM's built-in `PII` classification only has `Sensitive` and `NonSensitive`, so the
+  fixture's `PII.Email` / `PII.Name` column tags are seeded as `PII.Sensitive`. Table tags
+  (`Domain.*`) are not OM classifications and are not seeded.
+- Lookup: `GET /v1/tables/name/{fqn}` with `fields`; the FQN segment is percent-encoded
+  (`/` included). A 404 returns `None`.

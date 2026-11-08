@@ -451,6 +451,32 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # One-shot: seed the fixture lake's tables into OpenMetadata (idempotent PUT upserts).
+  om-seed:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: lakeloom:dev
+    entrypoint: []
+    command:
+      - python
+      - /opt/lakeloom/scripts/seed_om_fixture.py
+      - --om-url
+      - http://openmetadata-server:8585
+      - --lake
+      - /opt/lakeloom/fixtures/lake
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ../../scripts:/opt/lakeloom/scripts:ro
+      - ../../tests/fixtures/lake:/opt/lakeloom/fixtures/lake:ro
+      - om-secrets:/secrets:ro
+    depends_on:
+      om-bootstrap:
+        condition: service_completed_successfully
+    restart: "no"
+
   # --- Lakeloom itself (built from the repo root) -------------------------------------------
   lakeloom:
     build:
@@ -487,4 +513,6 @@ services:
       om-bootstrap:
         condition: service_completed_successfully
       gitea-init:
+        condition: service_completed_successfully
+      om-seed:
         condition: service_completed_successfully

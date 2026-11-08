@@ -14,10 +14,10 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /src
 # Dependencies first (cache layer), then the project itself (non-editable).
 COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev --no-editable --no-install-project
+RUN uv sync --frozen --no-dev --no-editable --extra delta --no-install-project
 COPY README.md LICENSE NOTICE ./
 COPY src ./src
-RUN uv sync --frozen --no-dev --no-editable
+RUN uv sync --frozen --no-dev --no-editable --extra delta
 
 FROM python:3.12.15-slim-trixie AS runtime
 LABEL org.opencontainers.image.title="Lakeloom" \
