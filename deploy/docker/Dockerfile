@@ -22,7 +22,10 @@ FROM python:3.12.14-slim-trixie AS runtime
 LABEL org.opencontainers.image.title="Lakeloom" \
       org.opencontainers.image.source="https://github.com/elcioabrahao/lakeloom" \
       org.opencontainers.image.licenses="Apache-2.0"
+# Upgrade base packages first so fixed Debian security updates land in the image even
+# before the python tag is refreshed (NFR-SEC-17: Trivy CRITICAL/HIGH gate).
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 lakeloom \
