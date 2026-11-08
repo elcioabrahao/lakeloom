@@ -1,0 +1,31 @@
+{
+    "catalogs": [
+        {
+            "name": "retail",
+            "comment": "Lakeloom fixture lake",
+            "properties": {},
+            "owner": null,
+            "created_at": 1794171588711,
+            "created_by": null,
+            "updated_at": 1794171588711,
+            "updated_by": null,
+            "id": "e4f28ebb-35aa-48d6-b0ea-6d7c90a25de2",
+            "storage_root": null,
+            "storage_location": null
+        },
+        {
+            "name": "unity",
+            "comment": "Main catalog",
+            "properties": {},
+            "owner": null,
+            "created_at": 1721241605334,
+            "created_by": null,
+            "updated_at": null,
+            "updated_by": null,
+            "id": "f029b870-9468-4f10-badc-630b41e5690d",
+            "storage_root": null,
+            "storage_location": null
+        }
+    ],
+    "next_page_token": null
+}

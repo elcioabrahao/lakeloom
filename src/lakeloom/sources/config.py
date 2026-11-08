@@ -75,6 +75,9 @@ class UnityCatalogSourceConfig(_Base):
     token_env: str | None = None
     catalogs: list[str] | None = None
     read_storage: bool = False
+    # Rewrites storage_location prefixes before delta-rs opens them, e.g.
+    # {"file:///lake": "/home/me/lake"} when Lakeloom sees the data at another path than UC.
+    storage_root_map: dict[str, str] = {}
     om_service: str | None = None
 
 

@@ -217,3 +217,17 @@ idle (1 GB heap cap). Fits the 8 GB minimum with room for Lakeloom (Task 8).
   (`Domain.*`) are not OM classifications and are not seeded.
 - Lookup: `GET /v1/tables/name/{fqn}` with `fields`; the FQN segment is percent-encoded
   (`/` included). A 404 returns `None`.
+
+## Appendix (M1a Task 7): Unity Catalog OSS
+
+- `unitycatalog` runs `unitycatalog/unitycatalog:v0.7.0` (listens on 8080 inside the
+  container), published on `127.0.0.1:8081`. No auth (server default), embedded H2 state
+  inside the container, so it is rebuilt by `uc-init` whenever the container is recreated.
+  Healthcheck: `wget --spider` on `/api/2.1/unity-catalog/catalogs`. Idle memory about
+  400 MiB (JVM).
+- The fixture lake is mounted read-only at `/lake` in `unitycatalog`, `uc-init` and
+  `lakeloom`. Tables are registered as EXTERNAL DELTA at `file:///lake/<table>`.
+- `uc-init` (one-shot, lakeloom image) runs `scripts/seed_uc_fixture.py`: waits for UC,
+  creates catalog `retail` / schema `sales`, then deletes and recreates the four tables with
+  columns read from the Delta fixtures. Re-running is safe. `lakeloom` waits for it.
+- Contract tests reach UC at `http://localhost:8081` (override `LAKELOOM_TEST_UC_URL`).

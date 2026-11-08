@@ -1,0 +1,20 @@
+{
+    "schemas": [
+        {
+            "name": "sales",
+            "catalog_name": "retail",
+            "comment": null,
+            "properties": {},
+            "full_name": "retail.sales",
+            "owner": null,
+            "created_at": 1794171588723,
+            "created_by": null,
+            "updated_at": 1794171588723,
+            "updated_by": null,
+            "schema_id": "d147705b-d6f0-4589-89c2-faeab662acea",
+            "storage_root": null,
+            "storage_location": null
+        }
+    ],
+    "next_page_token": null
+}

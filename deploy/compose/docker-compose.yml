@@ -477,6 +477,51 @@ services:
         condition: service_completed_successfully
     restart: "no"
 
+  # --- Unity Catalog OSS (lake source for contract tests; FR-SRC-02, ADR 0003/0008) ---------
+  # The fixture lake is mounted read-only at /lake; tables are registered as EXTERNAL DELTA
+  # at file:///lake/<table>. The image has no auth by default and keeps its H2 state inside
+  # the container (recreated with it), so uc-init re-registers the tables on every `up`.
+  unitycatalog:
+    image: unitycatalog/unitycatalog:v0.7.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8081:8080"
+    volumes:
+      - ../../tests/fixtures/lake:/lake:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/api/2.1/unity-catalog/catalogs"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+  # One-shot: register catalog retail / schema sales / four EXTERNAL DELTA tables (idempotent).
+  uc-init:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: lakeloom:dev
+    entrypoint: []
+    command:
+      - python
+      - /opt/lakeloom/scripts/seed_uc_fixture.py
+      - --uc-url
+      - http://unitycatalog:8080
+      - --lake
+      - /lake
+      - --storage-root
+      - file:///lake
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - ../../scripts:/opt/lakeloom/scripts:ro
+      - ../../tests/fixtures/lake:/lake:ro
+    depends_on:
+      unitycatalog:
+        condition: service_healthy
+    restart: "no"
+
   # --- Lakeloom itself (built from the repo root) -------------------------------------------
   lakeloom:
     build:
@@ -503,6 +548,7 @@ services:
     volumes:
       - lakeloom-data:/data
       - om-secrets:/secrets:ro
+      - ../../tests/fixtures/lake:/lake:ro
     depends_on:
       postgresql:
         condition: service_healthy
@@ -515,4 +561,6 @@ services:
       gitea-init:
         condition: service_completed_successfully
       om-seed:
+        condition: service_completed_successfully
+      uc-init:
         condition: service_completed_successfully

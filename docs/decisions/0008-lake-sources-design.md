@@ -68,6 +68,33 @@ scans of table metadata and profiles.
   are ignored rather than failing the table. Delta types are rendered Spark-style (`long`
   becomes `bigint`, `integer` becomes `int`).
 
+- **Unity Catalog REST contract (FR-SRC-02).** Verified against Unity Catalog OSS v0.7.0
+  (`unitycatalog/unitycatalog:v0.7.0`, OpenAPI at
+  `https://github.com/unitycatalog/unitycatalog/blob/v0.7.0/api/all.yaml`, and by running
+  the image). Base path `/api/2.1/unity-catalog`: `GET /catalogs`,
+  `GET /schemas?catalog_name=`, `GET /tables?catalog_name=&schema_name=`,
+  `GET /tables/{full_name}`; lists return `next_page_token` (followed with `page_token`);
+  a missing object is HTTP 404 with `{"error_code": "TABLE_NOT_FOUND", ...}`. Recorded
+  responses live in `tests/fixtures/uc/`. Mapping:
+  - `columns[].type_text` -> data type, `partition_index` -> partition columns,
+    `comment` -> `UntrustedText(source="unity_catalog:<source name>")`, `owner` -> owners,
+    `storage_location` kept as is.
+  - OSS v0.7.0 has no tag or constraint API and no `table_constraints`. The connector
+    therefore reads the same `lakeloom.*` conventions as the Delta connector from table
+    `properties`: `lakeloom.tags`, `lakeloom.owners`, `lakeloom.primaryKey`,
+    `lakeloom.foreignKey.<column>` (`<schema>.<table>.<column>`) and
+    `lakeloom.columnTags.<column>` (comma-separated). Declared `table_constraints`
+    (Databricks-hosted UC) take precedence over the properties.
+  - `read_storage: true` makes `get_table_version` / `profile_table` delegate to
+    `DeltaStorageSource` for DELTA tables at `file://`, `s3://`, `abfss://` or `gs://`
+    locations (UC column tags are passed on as overlay so the sensitive-tag rule holds).
+    Anything else yields `TableVersion(None, None)` and a `validation_error` on profiling.
+    `storage_root_map` (`{"file:///lake": "/host/path"}`, prefix rewrite) lets Lakeloom
+    reach data at a different path than UC reports; the contract tests use it.
+  - The bearer token is `os.environ[token_env]` when set, sent only in the Authorization
+    header, never logged or put in errors. 404 is `not_found`; 401/403 `forbidden` (hint
+    names `token_env`); 5xx, timeouts and connect errors `upstream_unavailable`.
+
 - **Profiling and privacy (FR-SRC-08, FR-SRC-09).** Profiles stream record batches once
   (`profile_arrow_dataset`); the table is never materialised. Rules:
   - `null_rate` = nulls / rows (`None` for an empty table).

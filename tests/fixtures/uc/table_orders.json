@@ -1,0 +1,90 @@
+{
+    "name": "orders",
+    "catalog_name": "retail",
+    "schema_name": "sales",
+    "table_type": "EXTERNAL",
+    "data_source_format": "DELTA",
+    "columns": [
+        {
+            "name": "order_id",
+            "type_text": "bigint",
+            "type_json": "{\"name\": \"order_id\", \"type\": \"long\", \"nullable\": false, \"metadata\": {}}",
+            "type_name": "LONG",
+            "type_precision": null,
+            "type_scale": null,
+            "type_interval_type": null,
+            "position": 0,
+            "comment": "Unique order identifier",
+            "nullable": false,
+            "partition_index": null
+        },
+        {
+            "name": "customer_id",
+            "type_text": "bigint",
+            "type_json": "{\"name\": \"customer_id\", \"type\": \"long\", \"nullable\": true, \"metadata\": {}}",
+            "type_name": "LONG",
+            "type_precision": null,
+            "type_scale": null,
+            "type_interval_type": null,
+            "position": 1,
+            "comment": "Customer who placed the order",
+            "nullable": true,
+            "partition_index": null
+        },
+        {
+            "name": "order_date",
+            "type_text": "date",
+            "type_json": "{\"name\": \"order_date\", \"type\": \"date\", \"nullable\": true, \"metadata\": {}}",
+            "type_name": "DATE",
+            "type_precision": null,
+            "type_scale": null,
+            "type_interval_type": null,
+            "position": 2,
+            "comment": "Calendar date the order was placed",
+            "nullable": true,
+            "partition_index": null
+        },
+        {
+            "name": "status",
+            "type_text": "string",
+            "type_json": "{\"name\": \"status\", \"type\": \"string\", \"nullable\": true, \"metadata\": {}}",
+            "type_name": "STRING",
+            "type_precision": null,
+            "type_scale": null,
+            "type_interval_type": null,
+            "position": 3,
+            "comment": "Fulfilment status of the order",
+            "nullable": true,
+            "partition_index": 0
+        },
+        {
+            "name": "total_amount",
+            "type_text": "decimal(12,2)",
+            "type_json": "{\"name\": \"total_amount\", \"type\": \"decimal(12,2)\", \"nullable\": true, \"metadata\": {}}",
+            "type_name": "DECIMAL",
+            "type_precision": 12,
+            "type_scale": 2,
+            "type_interval_type": null,
+            "position": 4,
+            "comment": "Order total including tax",
+            "nullable": true,
+            "partition_index": null
+        }
+    ],
+    "storage_location": "file:///lake/orders",
+    "comment": "Customer orders, one row per order",
+    "properties": {
+        "lakeloom.owners": "data-platform@example.com",
+        "lakeloom.foreignKey.customer_id": "sales.customers.customer_id",
+        "lakeloom.primaryKey": "order_id",
+        "lakeloom.tags": "Domain.Sales"
+    },
+    "owner": null,
+    "created_at": 1794171589074,
+    "created_by": null,
+    "updated_at": 1794171589074,
+    "updated_by": null,
+    "table_id": "e5fa1b2e-b9f8-4acd-8c87-e53d055d5d0a",
+    "view_definition": null,
+    "view_dependencies": null
+}

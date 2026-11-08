@@ -1,0 +1,10 @@
+{
+    "error_code": "TABLE_NOT_FOUND",
+    "details": [
+        {
+            "reason": "TABLE_NOT_FOUND",
+            "@type": "type.googleapis.com/google.rpc.ErrorInfo"
+        }
+    ],
+    "message": "Table not found: retail.sales.zzz"
+}
