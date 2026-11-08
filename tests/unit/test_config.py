@@ -151,3 +151,38 @@ def test_nfr_sec_11_validation_errors_do_not_echo_secrets(
         assert "supersecret" not in text
         assert "gitsecret" not in text
         assert "filesecret" not in text
+
+
+def test_nfr_sec_11_db_url_and_git_remote_not_in_repr(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LAKELOOM_DB_URL", "postgresql://u:hunter2@h/db")
+    monkeypatch.setenv("LAKELOOM_GIT_REMOTE", "https://bot:gitpass@git.test/o/r.git")
+
+    s = Settings()
+
+    assert s.db_url == "postgresql://u:hunter2@h/db"  # still a plain str for callers
+    for text in (repr(s), str(s)):
+        assert "hunter2" not in text
+        assert "gitpass" not in text
+
+
+def test_nfr_sec_11_db_url_from_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    f = tmp_path / "db_url"
+    f.write_text("postgresql://u:hunter2@h/db\n")
+    monkeypatch.setenv("LAKELOOM_DB_URL_FILE", str(f))
+
+    assert Settings().db_url == "postgresql://u:hunter2@h/db"
+
+
+def test_nfr_sec_11_db_url_and_file_both_set_is_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    f = tmp_path / "db_url"
+    f.write_text("postgresql://u:fromfile@h/db\n")
+    monkeypatch.setenv("LAKELOOM_DB_URL_FILE", str(f))
+    monkeypatch.setenv("LAKELOOM_DB_URL", "postgresql://u:hunter2@h/db")
+
+    with pytest.raises(ValidationError, match="LAKELOOM_DB_URL and LAKELOOM_DB_URL_FILE") as exc:
+        Settings()
+    text = str(exc.value) + repr(exc.value)
+    assert "hunter2" not in text
+    assert "fromfile" not in text

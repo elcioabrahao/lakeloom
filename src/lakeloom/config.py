@@ -1,10 +1,12 @@
 """Runtime configuration (REQUIREMENTS.md §10, NFR-DEP-03, NFR-SEC-11).
 
 All settings come from ``LAKELOOM_*`` environment variables; no ``.env`` file is read.
-Secrets (``om_bot_token``, ``git_token``) may instead be supplied as
-``LAKELOOM_<NAME>_FILE`` pointing at a file (Docker/Kubernetes secrets). Trailing
-whitespace is stripped from the file content, and setting both forms is an error.
-Secrets are ``SecretStr`` so they never appear in ``repr`` or ``model_dump``.
+Secrets (``om_bot_token``, ``git_token``) and ``db_url`` (which may embed a password) may
+instead be supplied as ``LAKELOOM_<NAME>_FILE`` pointing at a file (Docker/Kubernetes
+secrets). Trailing whitespace is stripped from the file content, and setting both forms is
+an error. Secrets are ``SecretStr`` so they never appear in ``repr`` or ``model_dump``;
+``db_url`` and ``git_remote`` stay plain ``str`` (callers use them as URLs) but are
+excluded from ``repr``.
 """
 
 import json
@@ -12,12 +14,12 @@ import os
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import AnyHttpUrl, SecretStr, ValidationError, field_validator, model_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, ValidationError, field_validator, model_validator
 from pydantic_core import InitErrorDetails, PydanticCustomError
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 ENV_PREFIX = "LAKELOOM_"
-SECRET_FILE_FIELDS = ("om_bot_token", "git_token")
+SECRET_FILE_FIELDS = ("om_bot_token", "git_token", "db_url")
 
 
 class ConfigError(Exception):
@@ -72,8 +74,9 @@ class Settings(BaseSettings):
     oidc_audience: str = "lakeloom"
     oidc_token_exchange: bool = True
     scope_group_map: dict[str, list[str]] = {}
-    db_url: str = "sqlite:////data/lakeloom.db"
-    git_remote: str | None = None
+    # May embed credentials: kept out of repr (NFR-SEC-11).
+    db_url: str = Field(default="sqlite:////data/lakeloom.db", repr=False)
+    git_remote: str | None = Field(default=None, repr=False)
     git_branch: str = "main"
     git_mode: Literal["direct", "pull_request"] = "pull_request"
     git_ssh_key_file: Path | None = None

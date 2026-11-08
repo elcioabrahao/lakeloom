@@ -35,3 +35,6 @@ validated as required in `Settings`; the dependency builder fails fast instead, 
 Operators get a few more variables to document in `.env.example` and the README.
 Secrets read from `*_FILE` are stripped of surrounding whitespace; setting both
 `X` and `X_FILE` is a startup error.
+`*_FILE` is accepted for `om_bot_token`, `git_token` and `db_url` (which may embed a
+database password). `db_url` and `git_remote` stay plain strings but are excluded from
+`repr(settings)` (NFR-SEC-11).
