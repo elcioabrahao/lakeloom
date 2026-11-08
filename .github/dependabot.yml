@@ -12,3 +12,7 @@ updates:
     directory: /deploy/docker
     schedule:
       interval: weekly
+    ignore:
+      # Python is pinned to 3.12 (.python-version, pyright, CI matrix); move minor versions deliberately.
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
