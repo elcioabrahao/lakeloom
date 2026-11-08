@@ -469,7 +469,7 @@ services:
       LAKELOOM_OIDC_ISSUER: http://localhost:8180/realms/lakeloom
       LAKELOOM_OIDC_JWKS_URL: http://keycloak:8080/realms/lakeloom/protocol/openid-connect/certs
       LAKELOOM_PUBLIC_URL: http://localhost:8000
-      LAKELOOM_SCOPE_GROUP_MAP: '{"ontology-reviewers":["lakeloom:read","lakeloom:review"],"data-engineers":["lakeloom:read","lakeloom:propose"],"lakeloom-admins":["lakeloom:admin"]}'
+      LAKELOOM_SCOPE_GROUP_MAP: '{"ontology-reviewers":["lakeloom:read","lakeloom:review"],"data-engineers":["lakeloom:read","lakeloom:propose"],"lakeloom-admins":["lakeloom:read","lakeloom:admin"]}'
       LAKELOOM_GIT_REMOTE: http://gitea:3000/lakeloom-admin/ontologies.git
       LAKELOOM_FORGE: gitea
       # Development only: role + database from lakeloom-db-init.sql.
