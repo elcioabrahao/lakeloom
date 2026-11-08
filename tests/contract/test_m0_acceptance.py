@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 import pytest
-from conftest import KEYCLOAK_URL, server_info
+from conftest import KEYCLOAK_URL, server_info, token_scopes
 
 pytestmark = pytest.mark.contract
 
@@ -33,10 +33,22 @@ async def test_nfr_sec_01_keycloak_agent_token_accepted(
 async def test_nfr_sec_03_keycloak_human_token_is_human(
     lakeloom_url: str, human_token: str
 ) -> None:
+    # The token's own scope claim lacks review: it can only come from the group map.
+    assert "lakeloom:review" not in token_scopes(human_token)
     info = await server_info(lakeloom_url, human_token)
     caller: Any = info["caller"]
     assert caller["type"] == "human"
     assert "lakeloom:review" in caller["scopes"]
+
+
+async def test_nfr_sec_06_group_map_grants_propose_to_data_engineers(
+    lakeloom_url: str, bob_token: str
+) -> None:
+    assert "lakeloom:propose" not in token_scopes(bob_token)
+    info = await server_info(lakeloom_url, bob_token)
+    caller: Any = info["caller"]
+    assert "lakeloom:propose" in caller["scopes"]
+    assert "lakeloom:review" not in caller["scopes"]
 
 
 async def test_nfr_sec_01_wrong_audience_rejected(

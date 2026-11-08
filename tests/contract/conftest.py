@@ -4,6 +4,8 @@ Tokens come from the dev Keycloak realm (ADR 0003). The OM bot token is read fro
 ``OM_BOT_TOKEN`` or from the ``om-secrets`` volume; it is never printed.
 """
 
+import base64
+import json
 import os
 import subprocess
 from collections.abc import AsyncIterator
@@ -59,17 +61,34 @@ def agent_token() -> str:
     )
 
 
-@pytest.fixture(scope="session")
-def human_token() -> str:
+def _human_token(username: str) -> str:
+    # Deliberately no lakeloom:review / :propose: those must come from the group map.
     return _token(
         {
             "grant_type": "password",
             "client_id": "lakeloom-dev-cli",
-            "username": "alice",
-            "password": "alice",
-            "scope": "openid lakeloom:read lakeloom:review",
+            "username": username,
+            "password": username,
+            "scope": "openid lakeloom:read",
         }
     )
+
+
+@pytest.fixture(scope="session")
+def human_token() -> str:
+    return _human_token("alice")
+
+
+@pytest.fixture(scope="session")
+def bob_token() -> str:
+    return _human_token("bob")
+
+
+def token_scopes(token: str) -> set[str]:
+    """Scope claim of a JWT, decoded without verification (test inspection only)."""
+    payload = token.split(".")[1]
+    claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    return set(str(claims.get("scope", "")).split())
 
 
 @pytest.fixture(scope="session")
