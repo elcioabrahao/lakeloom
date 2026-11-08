@@ -21,7 +21,7 @@
 - Licence **Apache-2.0**; `LICENSE` + `NOTICE`. (NFR-OSS-01)
 - Package name `lakeloom`; PyPI already holds placeholder `0.0.1`, so start at `0.1.0.dev0`. Repo URL `https://github.com/elcioabrahao/lakeloom`.
 - Conventional Commits, every commit signed off (`git commit -s`), requirement IDs in commit messages, docstrings of implementing modules, and test names (`test_nfr_sec_01_...`). (§0.2, NFR-OSS-04)
-- No cloud-provider SDK in the base dependencies; connectors are extras (empty extras `databricks`, `snowflake`, `delta` declared now). Postgres driver is extra `postgres` (asyncpg). (TC-7, TC-11)
+- No cloud-provider SDK in the base dependencies; connectors are extras (empty extras `databricks`, `snowflake`, `delta` declared now). **PostgreSQL is the default database for both OpenMetadata and Lakeloom** in the dev stack, CI and docs (owner decision 2026-11-08); `asyncpg` is a base dependency (the `postgres` extra stays as an empty alias for compatibility). SQLite stays supported and remains the code-level fallback default of `LAKELOOM_DB_URL` (spec §10) for unit tests and single-node use. (TC-7, TC-9, TC-11)
 - Secrets come from env vars or `*_FILE` files, use `SecretStr`, never logged, never returned. (NFR-SEC-11)
 - No web UI. (§0.7)
 - Ambiguity: pick the simplest option, write `docs/decisions/NNNN-title.md`, continue. (§0.6)
@@ -226,14 +226,14 @@ Prerequisite: a Docker-compatible engine with ≥ 8 GB memory. The owner's dev m
   - Metric `lakeloom_http_requests_total{method,route,status}` (counter), `lakeloom_tool_calls_total{tool,outcome}` (counter, used in T7), `lakeloom_om_request_seconds` (histogram, observed in `OMClient` — small edit to T4's client).
 
 - [ ] **Step 1: Write failing tests**:
-  - `test_to_async_url` (three cases), `test_ping_sqlite_in_tmp_path`.
+  - `test_to_async_url` (three cases), `test_ping_sqlite_in_tmp_path`, `test_ping_postgres` (marked `contract`; uses `LAKELOOM_TEST_DB_URL`, default the dev-stack Lakeloom Postgres URL from ADR 0003).
   - `test_nfr_ops_01_readyz_all_green` (stub checks) → 200; `test_nfr_ops_01_readyz_reports_failing_check` → 503 and the failing entry has `name=="openmetadata"`, `ok is False`; `test_check_timeout_marks_failed`.
   - `test_git_workspace_check_unwritable_dir` (chmod 0o500 tmp dir; skip if running as root) → `ok is False`, detail mentions "not writable".
   - `test_nfr_ops_01_healthz_no_auth`, `test_metrics_exposes_request_counter`, `test_request_id_echoed`, `test_protected_route_requires_token` (any non-public path → 401).
   - `test_nfr_ops_03_json_log_line_has_request_id`.
   - `test_nfr_sec_11_bot_token_not_in_logs`: run a request with `caplog`; the token string never appears.
 - [ ] **Step 2:** Run → FAIL.
-- [ ] **Step 3:** Implement.
+- [ ] **Step 3:** Implement. Move `asyncpg` from the `postgres` extra into base dependencies (`uv add asyncpg`; keep `postgres = []`).
 - [ ] **Step 4:** Tests pass; pyright strict clean.
 - [ ] **Step 5:** ADR `0006-observability-scope-m0.md`: M0 ships JSON logs + Prometheus; OpenTelemetry traces/OTLP (NFR-OPS-02) go in M1 behind `LAKELOOM_OTEL_EXPORTER_OTLP_ENDPOINT`; Alembic arrives with the first table (scan records, M1).
 - [ ] **Step 6: Commit** `feat(server): HTTP app with health, readiness, metrics and JSON logs (NFR-OPS-01, NFR-OPS-02, NFR-OPS-03)`.
@@ -281,7 +281,7 @@ Prerequisite: a Docker-compatible engine with ≥ 8 GB memory. The owner's dev m
 - Produces: image `ghcr.io/elcioabrahao/lakeloom` (local tag `lakeloom:dev`); entrypoint `lakeloom serve`; `EXPOSE 8000`; `VOLUME /data`; user `10001:10001`.
 
 - [ ] **Step 1:** Multi-stage Dockerfile: builder `ghcr.io/astral-sh/uv:<pinned>` + `python:3.12-slim` running `uv sync --frozen --no-dev` into `/app/.venv`; runtime `python:3.12-slim` with `git` installed (`--no-install-recommends`), non-root user 10001, `/data` owned by it, `PYTHONDONTWRITEBYTECODE=1`, `HEALTHCHECK` hitting `/healthz` with Python's stdlib urllib (no curl), OCI labels (`org.opencontainers.image.source=https://github.com/elcioabrahao/lakeloom`, `licenses=Apache-2.0`).
-- [ ] **Step 2:** Compose `lakeloom` service: build from repo root, port `8000:8000`, `read_only: true`, `tmpfs: [/tmp]`, volume `lakeloom-data:/data`, `om-secrets:/secrets:ro`, env `LAKELOOM_OM_URL=http://openmetadata-server:8585`, `LAKELOOM_OM_BOT_TOKEN_FILE=/secrets/om_bot_token`, `LAKELOOM_OIDC_ISSUER=http://localhost:8180/realms/lakeloom`, `LAKELOOM_OIDC_JWKS_URL=http://keycloak:8080/realms/lakeloom/protocol/openid-connect/certs`, `LAKELOOM_PUBLIC_URL=http://localhost:8000`, `LAKELOOM_SCOPE_GROUP_MAP={"ontology-reviewers":["lakeloom:read","lakeloom:review"],"data-engineers":["lakeloom:read","lakeloom:propose"],"lakeloom-admins":["lakeloom:admin"]}`, `LAKELOOM_GIT_REMOTE=http://gitea:3000/lakeloom-admin/ontologies.git`, `LAKELOOM_FORGE=gitea`; `depends_on` om-bootstrap `service_completed_successfully`, keycloak healthy.
+- [ ] **Step 2:** Compose `lakeloom` service: build from repo root, port `8000:8000`, `read_only: true`, `tmpfs: [/tmp]`, volume `lakeloom-data:/data`, `om-secrets:/secrets:ro`, env `LAKELOOM_OM_URL=http://openmetadata-server:8585`, `LAKELOOM_OM_BOT_TOKEN_FILE=/secrets/om_bot_token`, `LAKELOOM_OIDC_ISSUER=http://localhost:8180/realms/lakeloom`, `LAKELOOM_OIDC_JWKS_URL=http://keycloak:8080/realms/lakeloom/protocol/openid-connect/certs`, `LAKELOOM_PUBLIC_URL=http://localhost:8000`, `LAKELOOM_SCOPE_GROUP_MAP={"ontology-reviewers":["lakeloom:read","lakeloom:review"],"data-engineers":["lakeloom:read","lakeloom:propose"],"lakeloom-admins":["lakeloom:admin"]}`, `LAKELOOM_GIT_REMOTE=http://gitea:3000/lakeloom-admin/ontologies.git`, `LAKELOOM_FORGE=gitea`, `LAKELOOM_DB_URL=<Lakeloom Postgres URL from ADR 0003>`; `depends_on` the Lakeloom Postgres healthy, om-bootstrap `service_completed_successfully`, keycloak healthy.
 - [ ] **Step 3: Verify:** `docker build -f deploy/docker/Dockerfile -t lakeloom:dev .` succeeds; `docker run --rm lakeloom:dev lakeloom version` prints the version; `docker run --rm --read-only --tmpfs /tmp -v ll:/data lakeloom:dev id -u` → `10001`.
 - [ ] **Step 4: Verify:** `docker compose -f deploy/compose/docker-compose.yml up -d --wait` → all services healthy; `curl -fsS localhost:8000/readyz | jq` → `status: ok`, all three checks `ok: true`.
 - [ ] **Step 5: Commit** `build(docker): non-root read-only-compatible image and compose service (NFR-DEP-01, NFR-DEP-04, NFR-DEP-05)`.
@@ -298,7 +298,7 @@ Prerequisite: a Docker-compatible engine with ≥ 8 GB memory. The owner's dev m
 - Produces: fixtures `agent_token` (client credentials `lakeloom-agent`/`dev-agent-secret`), `human_token` (password grant on `lakeloom-dev-cli`, user `alice`), `wrong_audience_token` (client credentials `other-app`); base URLs from env `LAKELOOM_TEST_URL` (default `http://localhost:8000`), `KEYCLOAK_URL` (default `http://localhost:8180`), `OM_URL` (default `http://localhost:8585`). All tests marked `pytest.mark.contract`; the module skips with a clear message if `/healthz` is unreachable.
 
 - [ ] **Step 1: Write the tests**:
-  - `test_nfr_ops_01_readyz_green`: 200, all checks ok.
+  - `test_nfr_ops_01_readyz_green`: 200, all checks ok (the `state_store` check is running against PostgreSQL).
   - `test_nfr_sec_01_keycloak_agent_token_accepted`: MCP `get_server_info` with `agent_token` succeeds; `caller.type == "agent"`.
   - `test_nfr_sec_03_keycloak_human_token_is_human`: same with `human_token`; `caller.type == "human"`; scopes include `lakeloom:review` (from group map).
   - `test_nfr_sec_01_wrong_audience_rejected`: `wrong_audience_token` → HTTP 401 on `/mcp` with `WWW-Authenticate` containing `resource_metadata=`.
