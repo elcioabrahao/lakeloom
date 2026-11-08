@@ -25,7 +25,7 @@ def _secret_file_error(field: str, message: str) -> ValidationError:
         "Settings",
         [
             InitErrorDetails(
-                type=PydanticCustomError("secret_file", message),
+                type=PydanticCustomError("secret_file", "{message}", {"message": message}),
                 loc=(field,),
                 input=None,
             )
