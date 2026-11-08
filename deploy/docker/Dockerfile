@@ -2,7 +2,7 @@
 # Lakeloom container image (NFR-DEP-01, NFR-DEP-04). Build from the repo root:
 #   docker build -f deploy/docker/Dockerfile -t lakeloom:dev .
 
-FROM ghcr.io/astral-sh/uv:0.11.12 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.7 AS uv
 
 FROM python:3.12.14-slim-trixie AS builder
 COPY --from=uv /uv /uvx /bin/
