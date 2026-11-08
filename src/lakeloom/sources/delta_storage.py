@@ -83,6 +83,23 @@ def _wrap(exc: BaseException, entry: DeltaTableEntry) -> LakeloomError:
     )
 
 
+def _profile(
+    entry: DeltaTableEntry, description: TableDescription, policy: ProfilePolicy
+) -> TableProfile:
+    from lakeloom.sources.profiling import profile_arrow_dataset
+
+    deltalake = _require_deltalake()
+    try:
+        dataset = deltalake.DeltaTable(
+            entry.uri, storage_options=entry.storage_options or None
+        ).to_pyarrow_dataset()
+        return profile_arrow_dataset(dataset, description, policy)
+    except LakeloomError:
+        raise
+    except Exception as exc:
+        raise _wrap(exc, entry) from None
+
+
 def _read_table(entry: DeltaTableEntry, ref: TableRef, source_name: str) -> TableDescription:
     deltalake = _require_deltalake()
     try:
@@ -222,11 +239,10 @@ class DeltaStorageSource:
         return (await self.describe_table(ref)).version
 
     async def profile_table(self, ref: TableRef, policy: ProfilePolicy) -> TableProfile:
-        raise LakeloomError(
-            "validation_error",
-            "profiling not implemented yet",
-            hint="profiling arrives with the profiling module; scan without profile for now",
-        )
+        """Stream the table through delta-rs and aggregate in place (FR-SRC-08)."""
+        entry = self._entry(ref)
+        description = await self.describe_table(ref)
+        return await asyncio.to_thread(_profile, entry, description, policy)
 
     async def aclose(self) -> None:
         return None

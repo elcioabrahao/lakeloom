@@ -108,13 +108,22 @@ async def test_non_delta_dir_not_found(tmp_path: Path) -> None:
     assert exc.value.code == "not_found"
 
 
-async def test_profile_table_placeholder() -> None:
+async def test_fr_src_08_profile_table_via_source() -> None:
     from lakeloom.sources.base import ProfilePolicy
 
     policy = ProfilePolicy.from_settings(Settings())
+    profile = await DeltaStorageSource(_config()).profile_table(_ref("orders"), policy)
+    assert profile.row_count == 1000
+
+
+async def test_fr_src_08_profile_missing_table_is_not_found(tmp_path: Path) -> None:
+    from lakeloom.sources.base import ProfilePolicy
+
+    policy = ProfilePolicy.from_settings(Settings())
+    source = DeltaStorageSource(_config(tmp_path, ("nope",)))
     with pytest.raises(LakeloomError) as exc:
-        await DeltaStorageSource(_config()).profile_table(_ref("orders"), policy)
-    assert exc.value.code == "validation_error"
+        await source.profile_table(_ref("nope"), policy)
+    assert exc.value.code == "not_found"
 
 
 def test_missing_deltalake_extra_hint(monkeypatch: pytest.MonkeyPatch) -> None:

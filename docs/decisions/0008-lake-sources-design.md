@@ -68,6 +68,23 @@ scans of table metadata and profiles.
   are ignored rather than failing the table. Delta types are rendered Spark-style (`long`
   becomes `bigint`, `integer` becomes `int`).
 
+- **Profiling and privacy (FR-SRC-08, FR-SRC-09).** Profiles stream record batches once
+  (`profile_arrow_dataset`); the table is never materialised. Rules:
+  - `null_rate` = nulls / rows (`None` for an empty table).
+  - Distinct values are tracked exactly up to `low_cardinality + 1` per column; past that
+    the column reports `distinct_count=None` meaning "more than `low_cardinality`" and no
+    `top_k`. This bounds memory.
+  - A column is sensitive when any tag matches a `sensitive_tags` glob (`fnmatch`).
+    Sensitive columns report no `top_k` and no min/max of any type (a numeric min/max of
+    a PII column such as a birth year is still a sample); `values_withheld="sensitive"`.
+  - With `samples` off (default) `top_k` is `None` and string min/max are withheld
+    (`values_withheld="samples_disabled"`). Numeric, date and timestamp min/max of
+    non-sensitive columns are aggregates and are always reported.
+  - `top_k` orders by count desc then value asc, excludes nulls, renders values as strings
+    (ISO for dates/timestamps) truncated to `value_max_length` plus `…`.
+  - Settings: `LAKELOOM_PROFILE_TOPK` (10), `LAKELOOM_PROFILE_LOW_CARDINALITY` (50),
+    `LAKELOOM_PROFILE_VALUE_MAX_LENGTH` (64).
+
 ## Consequences
 
 New connectors need no core changes. The base install runs without the `delta` extra; the
