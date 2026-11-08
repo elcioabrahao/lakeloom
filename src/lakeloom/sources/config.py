@@ -45,6 +45,14 @@ class DeltaTableEntry(_Base):
     schema_: str = Field(alias="schema")
     name: str | None = None
     storage_options: dict[str, str] = {}
+    # Operator overlay (ADR 0008): takes precedence over conventions in the Delta log.
+    description: str | None = None
+    tags: list[str] | None = None
+    owners: list[str] | None = None
+    primary_key: list[str] | None = None
+    foreign_keys: dict[str, str] = {}
+    column_tags: dict[str, list[str]] = {}
+    column_comments: dict[str, str] = {}
 
     @model_validator(mode="after")
     def _default_name(self) -> "DeltaTableEntry":

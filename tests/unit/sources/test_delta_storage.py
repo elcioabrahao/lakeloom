@@ -137,3 +137,106 @@ def test_missing_deltalake_extra_hint(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_fr_src_06_registry_builds_delta_source() -> None:
     built = build_sources(SourcesConfig(sources=[_config()]), Settings())
     assert isinstance(built["fixture"], DeltaStorageSource)
+
+
+def _plain_table(root: Path) -> None:
+    import pyarrow as pa
+    from deltalake import write_deltalake
+
+    write_deltalake(
+        str(root / "plain"),
+        pa.table({"id": [1, 2], "ref": [1, 2], "email": ["a", "b"]}),
+        description="log description",
+    )
+
+
+def _overlay_source(root: Path, **overlay: object) -> DeltaStorageSource:
+    entry = DeltaTableEntry.model_validate(
+        {"uri": (root / "plain").as_uri(), "catalog": "c", "schema": "s", **overlay}
+    )
+    return DeltaStorageSource(DeltaSourceConfig(type="delta", name="ov", tables=[entry]))
+
+
+async def test_overlay_adds_conventions_to_plain_table(tmp_path: Path) -> None:
+    _plain_table(tmp_path)
+    source = _overlay_source(
+        tmp_path,
+        tags=["Domain.X"],
+        owners=["me@example.com"],
+        primary_key=["id"],
+        foreign_keys={"ref": "s.other.id"},
+        column_tags={"email": ["PII.Email"]},
+        column_comments={"id": "Row id"},
+    )
+    desc = await source.describe_table(TableRef(catalog="c", schema="s", name="plain"))
+    assert desc.tags == ["Domain.X"]
+    assert desc.owners == ["me@example.com"]
+    assert [c.columns for c in desc.constraints if c.kind == "primary_key"] == [["id"]]
+    fk = next(c for c in desc.constraints if c.kind == "foreign_key")
+    assert fk.columns == ["ref"] and fk.ref_table is not None and fk.ref_table.name == "other"
+    cols = {c.name: c for c in desc.columns}
+    assert cols["email"].tags == ["PII.Email"]
+    assert cols["id"].comment is not None
+    assert cols["id"].comment.text == "Row id"
+    assert cols["id"].comment.source == "config:ov"
+    assert desc.comment is not None and desc.comment.text == "log description"
+
+
+async def test_overlay_overrides_log_values() -> None:
+    entry = DeltaTableEntry.model_validate(
+        {
+            "uri": (FIXTURE / "customers").as_uri(),
+            "catalog": "retail",
+            "schema": "sales",
+            "description": "operator text",
+            "primary_key": ["email"],
+            "column_tags": {"email": []},
+            "tags": [],
+        }
+    )
+    source = DeltaStorageSource(DeltaSourceConfig(type="delta", name="ov", tables=[entry]))
+    desc = await source.describe_table(_ref("customers"))
+    assert desc.comment is not None
+    assert (desc.comment.text, desc.comment.source) == ("operator text", "config:ov")
+    assert [c.columns for c in desc.constraints] == [["email"]]
+    assert {c.name: c.tags for c in desc.columns}["email"] == []
+    assert desc.tags == []
+
+
+async def test_overlay_unknown_column_validation_error(tmp_path: Path) -> None:
+    _plain_table(tmp_path)
+    source = _overlay_source(tmp_path, column_tags={"ghost": ["X"]})
+    with pytest.raises(LakeloomError) as exc:
+        await source.describe_table(TableRef(catalog="c", schema="s", name="plain"))
+    assert exc.value.code == "validation_error"
+    assert "ghost" in exc.value.hint
+
+
+def test_overlay_yaml_round_trip(tmp_path: Path) -> None:
+    from lakeloom.sources.config import load_sources_config
+
+    path = tmp_path / "s.yaml"
+    path.write_text(
+        """
+sources:
+  - type: delta
+    name: lake
+    tables:
+      - uri: file:///x/t
+        schema: s
+        description: d
+        tags: [A.B]
+        owners: [o@x]
+        primary_key: [id]
+        foreign_keys: {ref: s.t.id}
+        column_tags: {email: [PII.Email]}
+        column_comments: {id: row id}
+"""
+    )
+    cfg = load_sources_config(path).sources[0]
+    assert isinstance(cfg, DeltaSourceConfig)
+    e = cfg.tables[0]
+    assert (e.description, e.tags, e.owners, e.primary_key) == ("d", ["A.B"], ["o@x"], ["id"])
+    assert e.foreign_keys == {"ref": "s.t.id"}
+    assert e.column_tags == {"email": ["PII.Email"]}
+    assert e.column_comments == {"id": "row id"}

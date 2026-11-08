@@ -83,7 +83,7 @@ def _wrap(exc: BaseException, entry: DeltaTableEntry) -> LakeloomError:
     )
 
 
-def _read_table(entry: DeltaTableEntry, ref: TableRef) -> TableDescription:
+def _read_table(entry: DeltaTableEntry, ref: TableRef, source_name: str) -> TableDescription:
     deltalake = _require_deltalake()
     try:
         table = deltalake.DeltaTable(entry.uri, storage_options=entry.storage_options or None)
@@ -95,27 +95,52 @@ def _read_table(entry: DeltaTableEntry, ref: TableRef) -> TableDescription:
         raise _wrap(exc, entry) from None
     conf: dict[str, str] = dict(meta.configuration or {})
     source = f"delta:{entry.uri}"
+    config_source = f"config:{source_name}"
+    known = {field.name for field in schema.fields}
+    for overlay_column in (
+        *entry.foreign_keys,
+        *entry.column_tags,
+        *entry.column_comments,
+        *(entry.primary_key or []),
+    ):
+        if overlay_column not in known:
+            raise LakeloomError(
+                "validation_error",
+                f"overlay for {ref.full_name!r} names unknown column {overlay_column!r}",
+                hint=f"fix or remove column {overlay_column!r} in the source config "
+                f"(LAKELOOM_CONFIG_FILE); columns are {sorted(known)}",
+            )
     columns: list[ColumnInfo] = []
     for position, field in enumerate(schema.fields):
         field_meta: dict[str, Any] = dict(field.metadata or {})
-        comment = field_meta.get("comment")
+        comment: UntrustedText | None = None
+        if field.name in entry.column_comments:
+            comment = UntrustedText(text=entry.column_comments[field.name], source=config_source)
+        elif field_meta.get("comment"):
+            comment = UntrustedText(text=str(field_meta["comment"]), source=source)
+        tags = entry.column_tags.get(field.name)
         columns.append(
             ColumnInfo(
                 name=field.name,
                 data_type=_spark_type(field.type),
                 nullable=field.nullable,
-                comment=UntrustedText(text=str(comment), source=source) if comment else None,
-                tags=_split(field_meta.get("lakeloom.tags")),
+                comment=comment,
+                tags=list(tags) if tags is not None else _split(field_meta.get("lakeloom.tags")),
                 position=position,
             )
         )
     constraints: list[Constraint] = []
-    if pk := _split(conf.get("lakeloom.primaryKey")):
-        constraints.append(Constraint(kind="primary_key", columns=pk))
+    pk = (
+        entry.primary_key
+        if entry.primary_key is not None
+        else _split(conf.get("lakeloom.primaryKey"))
+    )
+    if pk:
+        constraints.append(Constraint(kind="primary_key", columns=list(pk)))
     prefix = "lakeloom.foreignKey."
-    for key, target in sorted(conf.items()):
-        if not key.startswith(prefix):
-            continue
+    fks = {k[len(prefix) :]: v for k, v in conf.items() if k.startswith(prefix)}
+    fks.update(entry.foreign_keys)
+    for fk_column, target in sorted(fks.items()):
         parts = target.split(".")
         if len(parts) != 3:
             continue  # malformed convention value: ignore rather than fail the table
@@ -123,7 +148,7 @@ def _read_table(entry: DeltaTableEntry, ref: TableRef) -> TableDescription:
         constraints.append(
             Constraint(
                 kind="foreign_key",
-                columns=[key[len(prefix) :]],
+                columns=[fk_column],
                 ref_table=TableRef(catalog=ref.catalog, schema=schema_name, name=table_name),
                 ref_columns=[column],
             )
@@ -131,14 +156,21 @@ def _read_table(entry: DeltaTableEntry, ref: TableRef) -> TableDescription:
     committed_at: datetime | None = None
     if history and isinstance(history[0].get("timestamp"), int | float):
         committed_at = datetime.fromtimestamp(history[0]["timestamp"] / 1000, tz=UTC)
+    description: UntrustedText | None = None
+    if entry.description:
+        description = UntrustedText(text=entry.description, source=config_source)
+    elif meta.description:
+        description = UntrustedText(text=meta.description, source=source)
     return TableDescription(
         ref=ref,
-        comment=UntrustedText(text=meta.description, source=source) if meta.description else None,
+        comment=description,
         columns=columns,
         partition_columns=list(meta.partition_columns),
         constraints=constraints,
-        tags=_split(conf.get("lakeloom.tags")),
-        owners=_split(conf.get("lakeloom.owners")),
+        tags=list(entry.tags) if entry.tags is not None else _split(conf.get("lakeloom.tags")),
+        owners=(
+            list(entry.owners) if entry.owners is not None else _split(conf.get("lakeloom.owners"))
+        ),
         properties={k: v for k, v in conf.items() if not k.startswith("lakeloom.")},
         storage_location=entry.uri,
         version=TableVersion(version=version, committed_at=committed_at),
@@ -184,7 +216,7 @@ class DeltaStorageSource:
 
     async def describe_table(self, ref: TableRef) -> TableDescription:
         entry = self._entry(ref)
-        return await asyncio.to_thread(_read_table, entry, ref)
+        return await asyncio.to_thread(_read_table, entry, ref, self.name)
 
     async def get_table_version(self, ref: TableRef) -> TableVersion:
         return (await self.describe_table(ref)).version

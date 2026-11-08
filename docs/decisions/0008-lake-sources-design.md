@@ -36,9 +36,17 @@ scans of table metadata and profiles.
   | `LAKELOOM_PROFILE_VALUE_MAX_LENGTH` | 64 (characters) |
   | `LAKELOOM_SCAN_CONCURRENCY` | 8 |
 
-- **Delta key/tag conventions.** Delta has no native tags, owners or constraints, so
-  Lakeloom reads these conventions from standard Delta metadata (a table written by Spark,
-  delta-rs or any other engine can follow them):
+- **Delta tags, owners and constraints.** Delta has no native tags, owners or constraints.
+  Lakeloom resolves them from two mechanisms, in precedence order:
+
+  1. **Operator overlay** in the source YAML, per table entry: `description`, `tags`,
+     `owners`, `primary_key`, `foreign_keys` (column to `<schema>.<table>.<column>`),
+     `column_tags`, `column_comments`. It needs no write access to the lake, so it works
+     for read-only lakes, delta-rs-only pipelines and third-party tables, and stays
+     operator-controlled (NFR-SEC-13). Overlay column names are validated against the table
+     schema at describe time (unknown column gives `validation_error`). Overlay text is
+     still `UntrustedText` (source `config:<source>`).
+  2. **Conventions in the Delta log** (used when the overlay does not set the value):
 
   | Concept | Where | Format |
   |---|---|---|
@@ -50,11 +58,15 @@ scans of table metadata and profiles.
   | Foreign key | configuration `lakeloom.foreignKey.<column>` | `<schema>.<table>.<column>`, resolved in the same catalog |
   | Owners | configuration `lakeloom.owners` | comma-separated |
 
-  Comments and descriptions are returned as `UntrustedText` (NFR-SEC-14). Malformed foreign
-  key values are ignored rather than failing the table. Delta types are rendered Spark-style
-  (`long` becomes `bigint`, `integer` becomes `int`). The fixture generator patches the
-  `lakeloom.*` keys into commit 0 of the log because delta-rs 1.6 (delta-kernel) rejects
-  unknown table properties on write while readers accept them.
+  The log conventions are settable by Spark/Databricks (`ALTER TABLE ... SET TBLPROPERTIES`
+  for table keys; field metadata needs a schema rewrite). delta-rs 1.6 (delta-kernel)
+  cannot write `lakeloom.*` table properties (it rejects unknown properties) although it
+  reads them, so delta-rs-only pipelines should use the overlay. The fixture generator
+  patches the keys into commit 0 of the log to exercise the log path.
+
+  Comments and descriptions are `UntrustedText` (NFR-SEC-14). Malformed foreign key values
+  are ignored rather than failing the table. Delta types are rendered Spark-style (`long`
+  becomes `bigint`, `integer` becomes `int`).
 
 ## Consequences
 
