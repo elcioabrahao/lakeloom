@@ -127,3 +127,27 @@ def test_get_settings_reads_environment(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("LAKELOOM_PORT", "9001")
 
     assert get_settings().port == 9001
+
+
+def test_nfr_sec_11_validation_errors_do_not_echo_secrets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("LAKELOOM_GIT_TOKEN", "gitsecret")
+    monkeypatch.setenv("LAKELOOM_OM_BOT_TOKEN", "supersecret")
+    monkeypatch.setenv("LAKELOOM_OM_BOT_TOKEN_FILE", "/nonexistent/secret")
+
+    with pytest.raises(ValidationError) as unreadable:
+        Settings()
+    assert "LAKELOOM_OM_BOT_TOKEN" in str(unreadable.value)
+
+    f = tmp_path / "tok"
+    f.write_text("filesecret\n")
+    monkeypatch.setenv("LAKELOOM_OM_BOT_TOKEN_FILE", str(f))
+    with pytest.raises(ValidationError) as both:
+        Settings()
+
+    for exc in (unreadable, both):
+        text = str(exc.value) + repr(exc.value) + str(exc.value.errors())
+        assert "supersecret" not in text
+        assert "gitsecret" not in text
+        assert "filesecret" not in text

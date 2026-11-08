@@ -12,17 +12,52 @@ import os
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import AnyHttpUrl, SecretStr, field_validator, model_validator
+from pydantic import AnyHttpUrl, SecretStr, ValidationError, field_validator, model_validator
+from pydantic_core import InitErrorDetails, PydanticCustomError
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 ENV_PREFIX = "LAKELOOM_"
 SECRET_FILE_FIELDS = ("om_bot_token", "git_token")
 
 
+def _secret_file_error(field: str, message: str) -> ValidationError:
+    return ValidationError.from_exception_data(
+        "Settings",
+        [
+            InitErrorDetails(
+                type=PydanticCustomError("secret_file", message),
+                loc=(field,),
+                input=None,
+            )
+        ],
+    )
+
+
+def _with_secret_files(values: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(values)
+    for name in SECRET_FILE_FIELDS:
+        var = f"{ENV_PREFIX}{name}".upper()
+        file_var = f"{var}_FILE"
+        path = os.environ.get(file_var)
+        if not path:
+            continue
+        if merged.get(name) is not None or os.environ.get(var):
+            raise _secret_file_error(name, f"{var} and {file_var} are both set; set only one")
+        try:
+            merged[name] = Path(path).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise _secret_file_error(
+                name, f"cannot read {file_var} ({path}): {exc.strerror}"
+            ) from None
+    return merged
+
+
 class Settings(BaseSettings):
     """Lakeloom settings. ``Settings()`` with an empty environment always succeeds."""
 
-    model_config = SettingsConfigDict(env_prefix=ENV_PREFIX, extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix=ENV_PREFIX, extra="ignore", hide_input_in_errors=True
+    )
 
     env: Literal["development", "production"] = "development"
     config_file: Path | None = None
@@ -58,25 +93,10 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"  # noqa: S104 - container service binds all interfaces
     port: int = 8000
 
-    @model_validator(mode="before")
-    @classmethod
-    def _load_secret_files(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        merged: dict[str, Any] = dict(data)  # pyright: ignore[reportUnknownArgumentType]
-        for name in SECRET_FILE_FIELDS:
-            var = f"{ENV_PREFIX}{name}".upper()
-            file_var = f"{var}_FILE"
-            path = os.environ.get(file_var)
-            if not path:
-                continue
-            if merged.get(name) is not None or os.environ.get(var):
-                raise ValueError(f"{var} and {file_var} are both set; set only one")
-            try:
-                merged[name] = Path(path).read_text(encoding="utf-8").strip()
-            except OSError as exc:
-                raise ValueError(f"cannot read {file_var} ({path}): {exc.strerror}") from None
-        return merged
+    def __init__(self, **values: Any) -> None:
+        # *_FILE resolution happens before validation so that errors never carry the
+        # raw input (which holds plaintext secrets) -- NFR-SEC-11.
+        super().__init__(**_with_secret_files(values))
 
     @field_validator("sensitive_tags", mode="before")
     @classmethod
