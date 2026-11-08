@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+.env
+.superpowers
+pypi_files
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.hypothesis
+/data
+tests
+docs
+deploy/compose/.secrets

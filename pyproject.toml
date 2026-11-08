@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lakeloom"
+version = "0.1.0.dev0"
+description = "Agent-first ontologies for your lakehouse: link Delta Lake data products to OpenMetadata Ontology Studio, version them in Git, and serve them to AI agents over MCP."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Elcio Abrahão" }]
+keywords = ["ontology", "delta-lake", "lakehouse", "openmetadata", "mcp", "semantic-web", "owl", "skos", "ai-agents"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "fastapi>=0.162.2",
+    "httpx>=0.28.1",
+    "mcp>=2.3.0",
+    "prometheus-client>=0.26.0",
+    "pydantic>=2",
+    "pydantic-settings>=2.16.2",
+    "pyjwt[crypto]>=2.15.1",
+    "sqlalchemy[asyncio]>=2",
+    "typer>=0.28.0",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.optional-dependencies]
+postgres = [
+    "asyncpg>=0.32.0",
+]
+databricks = []
+snowflake = []
+delta = []
+
+[project.urls]
+Homepage = "https://github.com/elcioabrahao/lakeloom"
+Repository = "https://github.com/elcioabrahao/lakeloom"
+Issues = "https://github.com/elcioabrahao/lakeloom/issues"
+
+[project.scripts]
+lakeloom = "lakeloom.cli:app"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.170.15",
+    "pip-audit>=2.10.1",
+    "pyright>=1.1.414",
+    "pytest>=9.2.0",
+    "pytest-asyncio>=1.4.1.post1",
+    "respx>=0.23.1",
+    "ruff>=0.17.4",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lakeloom"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "S", "ASYNC", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.pyright]
+include = ["src", "tests"]
+strict = ["src"]
+pythonVersion = "3.12"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-m 'not contract'"
+markers = ["contract: needs the docker compose dev stack"]
