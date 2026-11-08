@@ -47,3 +47,19 @@ error bodies differ from the typed errors the HTTP API returns (FR-AGT-05).
 - Not checked (yet): RFC 9068 `typ: at+jwt` (Keycloak does not emit it by default) and
   the discovery document's `issuer` member. If the app is mounted under a
   `root_path`, the public paths must be given with that prefix.
+
+## Addendum (2026-11-08): the PRM `resource` is the origin, not `/mcp`
+
+The RFC 9728 document at `/.well-known/oauth-protected-resource` (NFR-SEC-02) publishes
+`resource` = `LAKELOOM_PUBLIC_URL` (the origin, no trailing slash), not
+`<public_url>/mcp`, and is served at the root well-known path rather than a
+path-suffixed `/.well-known/oauth-protected-resource/mcp`.
+
+Rationale: Lakeloom is one resource server for both the HTTP API and the MCP endpoint;
+both accept the same tokens with the same audience (`LAKELOOM_OIDC_AUDIENCE`), so a
+single resource identifier describes them. The `WWW-Authenticate` challenge on every
+`401`, including `/mcp`, points at this one document.
+
+Revisit if a strict RFC 8707 / MCP client rejects metadata whose `resource` does not
+equal the URL it connected to (`.../mcp`); the fix would be a second, path-suffixed
+PRM document for `/mcp`, not a change of token audience.

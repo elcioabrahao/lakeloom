@@ -18,14 +18,14 @@ the real OM API rather than the docs (§0.4). On 2026-11-08 the newest 2.1 tag i
 
 | Service | Image (pinned) | Host port | Notes |
 |---|---|---|---|
-| `postgresql` | `docker.getcollate.io/openmetadata/postgresql:2.1.0-rc1` | none | OM DB **and** the Lakeloom DB (see below) |
+| `postgresql` | `docker.getcollate.io/openmetadata/postgresql:2.1.0-rc1` | 127.0.0.1:5432 | OM DB **and** the Lakeloom DB (see below); host port for `LAKELOOM_TEST_DB_URL` |
 | `elasticsearch` | `docker.elastic.co/elasticsearch/elasticsearch:9.3.0` | none | 1 GB heap, as upstream |
 | `execute-migrate-all` | `docker.getcollate.io/openmetadata/server:2.1.0-rc1` | — | one-shot migrations |
-| `openmetadata-server` | `docker.getcollate.io/openmetadata/server:2.1.0-rc1` | 8585, 8586 | |
+| `openmetadata-server` | `docker.getcollate.io/openmetadata/server:2.1.0-rc1` | 127.0.0.1:8585 | admin port 8586 not published |
 | `om-bootstrap` | `alpine:3.22.8` (+ `apk add curl jq`) | — | one-shot, writes bot token |
 | `fuseki` (profile `rdf`) | built from `github.com/open-metadata/OpenMetadata.git#2.1.0-rc1-release:docker/rdf-store` (Fuseki 6.2.0), tagged `lakeloom-dev/openmetadata-fuseki:2.1.0-rc1` | none | optional |
-| `keycloak` | `quay.io/keycloak/keycloak:26.8.2` | 8180→8080 | `start-dev --import-realm` |
-| `gitea` | `gitea/gitea:1.27.3` | 3000 | SQLite, `INSTALL_LOCK=true` |
+| `keycloak` | `quay.io/keycloak/keycloak:26.8.2` | 127.0.0.1:8180→8080 | `start-dev --import-realm` |
+| `gitea` | `gitea/gitea:1.27.3` | 127.0.0.1:3000 | SQLite, `INSTALL_LOCK=true` |
 | `gitea-init` | `gitea/gitea:1.27.3` | — | one-shot: admin + repo |
 
 Start: `docker compose -f deploy/compose/docker-compose.yml up -d` (≈50 s warm).

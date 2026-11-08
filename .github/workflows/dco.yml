@@ -21,10 +21,18 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
         run: |
           bad=0
+          bot='dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>'
           for sha in $(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA"); do
             author=$(git log -1 --format='%an <%ae>' "$sha")
+            # Dependabot cannot sign off; exempt its commits, but only on PRs it opened
+            # (an author name alone is trivially spoofed).
+            if [ "$PR_USER" = "dependabot[bot]" ] && [ "$author" = "$bot" ]; then
+              echo "Skipping Dependabot commit $sha"
+              continue
+            fi
             if ! git log -1 --format=%B "$sha" | grep -qxF "Signed-off-by: $author"; then
               echo "::error::Commit $sha is missing 'Signed-off-by: $author'"
               git log -1 --format='  %h %s' "$sha"
