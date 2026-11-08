@@ -9,8 +9,10 @@ import hashlib
 import hmac
 import json
 import time
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from pathlib import Path
+from typing import Any, Protocol
 
 import httpx
 import jwt
@@ -18,6 +20,13 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from jwt.algorithms import ECAlgorithm, RSAAlgorithm
+from pydantic import SecretStr
+
+from lakeloom.config import Settings
+from lakeloom.om.client import OMClient
+from lakeloom.server.auth import TokenValidator
+from lakeloom.server.http_app import AppDeps
+from lakeloom.state.db import create_engine
 
 ISSUER = "https://idp.test/realms/lakeloom"
 AUDIENCE = "lakeloom"
@@ -199,3 +208,63 @@ class Clock:
 @pytest.fixture
 def clock() -> Clock:
     return Clock()
+
+
+# --- App dependencies with a fake OpenMetadata (Task 7: get_server_info / MCP) ---
+
+OM_BOT_TOKEN = "om-bot-token-should-never-leak"  # noqa: S105
+
+
+def om_up(request: httpx.Request) -> httpx.Response:
+    """Fake OM 2.1.0 with RDF enabled."""
+    if request.url.path == "/api/v1/system/version":
+        return httpx.Response(200, json={"version": "2.1.0", "revision": "abc"})
+    if request.url.path == "/api/v1/rdf/status":
+        return httpx.Response(200, json={"enabled": True, "storageType": "FUSEKI"})
+    return httpx.Response(404)
+
+
+def om_down(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError("connection refused", request=request)
+
+
+class DepsFactory(Protocol):
+    def __call__(
+        self,
+        om_handler: Callable[[httpx.Request], httpx.Response] = ...,
+        **settings: Any,
+    ) -> AppDeps: ...
+
+
+@pytest.fixture
+async def make_deps(tmp_path: Path, http: httpx.AsyncClient) -> AsyncIterator[DepsFactory]:
+    """Build ``AppDeps`` with a fake OM and a validator backed by the fake IdP."""
+    created: list[AppDeps] = []
+
+    def factory(
+        om_handler: Callable[[httpx.Request], httpx.Response] = om_up, **settings: Any
+    ) -> AppDeps:
+        values: dict[str, Any] = {
+            "om_url": "http://om.test:8585",
+            "om_bot_token": SecretStr(OM_BOT_TOKEN),
+            "oidc_issuer": ISSUER,
+            "public_url": "https://lakeloom.test",
+            "db_url": f"sqlite:///{tmp_path}/l.db",
+            "data_dir": tmp_path,
+            **settings,
+        }
+        s = Settings(**values)
+        om_http = httpx.AsyncClient(transport=httpx.MockTransport(om_handler))
+        validator = TokenValidator(issuer=ISSUER, audience=AUDIENCE, http=http, jwks_url=JWKS_URL)
+        deps = AppDeps(
+            settings=s,
+            om=OMClient(str(s.om_url), s.om_bot_token, http=om_http),
+            engine=create_engine(s.db_url),
+            validator=validator,
+        )
+        created.append(deps)
+        return deps
+
+    yield factory
+    for deps in created:
+        await deps.engine.dispose()

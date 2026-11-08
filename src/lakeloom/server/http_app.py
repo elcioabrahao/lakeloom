@@ -1,16 +1,17 @@
 """FastAPI app: health, readiness, metrics, request ids, bearer auth (NFR-OPS-01..03).
 
 Middleware order (outermost first): request id + metrics + access log, then bearer auth.
-CORS is deliberately not added (NFR-SEC-15). Mounts such as the MCP app are passed in via
-``extra_mounts`` and sit behind the same auth. Startup/shutdown lives in one ``lifespan``
-so later tasks can extend it.
+CORS is deliberately not added (NFR-SEC-15). Sub-applications sit behind the same auth:
+``endpoints`` are served at exactly one path (the MCP endpoint ``/mcp``), ``extra_mounts``
+under a path prefix. Startup/shutdown lives in one ``lifespan``; ``lifespans`` (such as
+the MCP session manager) are entered inside it and exited before dependencies close.
 """
 
 import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator, Sequence
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Callable, Sequence
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 
 import httpx
@@ -18,7 +19,7 @@ from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.ext.asyncio import AsyncEngine
-from starlette.routing import Mount
+from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from lakeloom.config import ConfigError, Settings
@@ -87,7 +88,8 @@ def build_deps(settings: Settings) -> AppDeps:
 class RequestContextMiddleware:
     """Pure ASGI: request id (accept/generate/echo), request counter, access log.
 
-    Never logs headers. The route label is the route template, or ``unmatched``.
+    Never logs headers. The route label is the route template, the mount prefix for
+    mounted sub-applications, or ``unmatched``.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -115,9 +117,7 @@ class RequestContextMiddleware:
         try:
             await self.app(scope, receive, send_wrapper)
         finally:
-            route = scope.get("route")
-            template = getattr(route, "path", None)
-            label = template if isinstance(template, str) and not isinstance(route, Mount) else None
+            label = _route_label(scope)
             HTTP_REQUESTS.labels(
                 method=scope["method"], route=label or "unmatched", status=str(status)
             ).inc()
@@ -133,6 +133,13 @@ class RequestContextMiddleware:
             request_id_var.reset(token)
 
 
+def _route_label(scope: Scope) -> str | None:
+    # Starlette sets scope["route"] to the matched route; for a Mount that is the Mount,
+    # whose ``path`` is the prefix, unless the mounted app routes again and overwrites it.
+    template = getattr(scope.get("route"), "path", None)
+    return template if isinstance(template, str) and template else None
+
+
 def _clean_request_id(raw: bytes | None) -> str | None:
     if not raw:
         return None
@@ -146,9 +153,16 @@ def create_app(
     deps: AppDeps,
     *,
     extra_mounts: Sequence[tuple[str, ASGIApp]] = (),
+    endpoints: Sequence[tuple[str, ASGIApp]] = (),
+    lifespans: Sequence[Callable[[], AbstractAsyncContextManager[None]]] = (),
     checks: Sequence[Check] | None = None,
 ) -> FastAPI:
-    """Build the app. ``checks`` overrides the default readiness checks (tests)."""
+    """Build the app. ``checks`` overrides the default readiness checks (tests).
+
+    ``endpoints`` are ASGI apps served at exactly their path (all methods); a Starlette
+    ``Mount`` cannot serve its bare prefix without a redirect, which MCP clients must
+    not need to follow. ``lifespans`` run for the lifetime of the app.
+    """
     settings = deps.settings
     resource_metadata_url = f"{settings.public_base_url}{PRM_PATH}"
     readiness: Sequence[Check] = (
@@ -164,7 +178,10 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
         try:
-            yield
+            async with AsyncExitStack() as stack:
+                for factory in lifespans:
+                    await stack.enter_async_context(factory())
+                yield
         finally:
             if deps.idp_http is not None:
                 await deps.idp_http.aclose()
@@ -195,6 +212,8 @@ def create_app(
     async def prm() -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
         return protected_resource_metadata(settings)
 
+    for path, endpoint in endpoints:
+        app.router.routes.append(Route(path, endpoint=endpoint))
     for path, mounted in extra_mounts:
         app.mount(path, mounted)
 

@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -184,3 +185,19 @@ async def test_build_deps_and_lifespan_close(tmp_path: Path) -> None:
     async with app.router.lifespan_context(app):
         pass
     assert deps.validator is not None
+
+
+async def test_lifespans_run_inside_app_lifespan(deps: AppDeps) -> None:
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def hook() -> AsyncIterator[None]:
+        events.append("enter")
+        yield
+        events.append("exit")
+
+    app = create_app(deps, lifespans=[hook])
+    assert events == []
+    async with app.router.lifespan_context(app):
+        assert events == ["enter"]
+    assert events == ["enter", "exit"]
