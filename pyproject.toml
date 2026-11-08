@@ -83,5 +83,7 @@ pythonVersion = "3.12"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# macOS: uv can flag the editable .pth as hidden, which Python then skips; keep tests independent of it.
+pythonpath = ["src"]
 addopts = "-m 'not contract'"
 markers = ["contract: needs the docker compose dev stack"]
