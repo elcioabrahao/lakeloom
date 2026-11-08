@@ -150,3 +150,13 @@ def test_profile_streams_batches() -> None:
     assert p.row_count == n
     assert calls == [1000]
     assert _col(p, "g").distinct_count == 7
+
+
+@pytest.mark.parametrize("tag", ["pii.email", "Pii.Email", " PII.Email ", "PII.EMAIL"])
+def test_fr_src_09_sensitive_tag_match_is_case_and_space_insensitive(tag: str) -> None:
+    table = pa.table({"e": ["a@x.com", "b@x.com"]})
+    desc = _desc([ColumnInfo(name="e", data_type="string", nullable=True, tags=[tag], position=0)])
+    policy = ProfilePolicy.from_settings(Settings()).model_copy(update={"samples": True})
+    c = profile_arrow_dataset(ds.dataset(table), desc, policy).columns[0]
+    assert c.values_withheld == "sensitive"
+    assert c.top_k is None and c.min is None and c.max is None

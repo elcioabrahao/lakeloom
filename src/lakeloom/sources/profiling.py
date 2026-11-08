@@ -91,7 +91,8 @@ class _ColumnState:
 
 
 def _matches(tags: list[str], patterns: list[str]) -> bool:
-    return any(fnmatchcase(tag, pattern) for tag in tags for pattern in patterns)
+    folded = [p.strip().casefold() for p in patterns]
+    return any(fnmatchcase(tag.strip().casefold(), pat) for tag in tags for pat in folded)
 
 
 def profile_arrow_dataset(
