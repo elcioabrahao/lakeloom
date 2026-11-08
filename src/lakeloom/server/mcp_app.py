@@ -11,7 +11,7 @@ no side effects).
 """
 
 from contextlib import AbstractAsyncContextManager
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI
@@ -22,6 +22,7 @@ from starlette.requests import Request
 
 import lakeloom
 from lakeloom.config import Settings
+from lakeloom.errors import ErrorCode, LakeloomError
 from lakeloom.metrics import TOOL_CALLS
 from lakeloom.server.auth import Principal
 from lakeloom.server.http_app import AppDeps, create_app
@@ -31,15 +32,6 @@ __all__ = ["MCP_PATH", "create_mcp", "create_server_app", "transport_security"]
 
 MCP_PATH = "/mcp"
 READ_SCOPE = "lakeloom:read"
-
-ErrorCode = Literal[
-    "not_found",
-    "forbidden",
-    "conflict",
-    "validation_error",
-    "upstream_unavailable",
-    "rate_limited",
-]
 
 GET_SERVER_INFO_DESCRIPTION = """\
 Describe this Lakeloom server: its version and environment, the connected OpenMetadata \
@@ -58,9 +50,10 @@ Requires scope `lakeloom:read`; without it the call fails with error code `forbi
 
 def tool_error(code: ErrorCode, message: str, hint: str) -> CallToolResult:
     """A typed tool error (FR-AGT-05): ``{"error": {"code", "message", "hint"}}``."""
+    error = LakeloomError(code, message, hint)
     return CallToolResult(
         content=[TextContent(type="text", text=f"Error `{code}`: {message}. Hint: {hint}.")],
-        structured_content={"error": {"code": code, "message": message, "hint": hint}},
+        structured_content=error.to_dict(),
         is_error=True,
     )
 

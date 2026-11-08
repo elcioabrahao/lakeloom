@@ -86,6 +86,11 @@ class Settings(BaseSettings):
     # JSON list or comma-separated string.
     sensitive_tags: Annotated[list[str], NoDecode] = ["PII.*"]
     max_proposal_ops: int = 50
+    # M1a additions (docs/decisions/0008-lake-sources-design.md)
+    profile_topk: int = 10
+    profile_low_cardinality: int = 50
+    profile_value_max_length: int = 64
+    scan_concurrency: int = 8
     triplestore_enabled: bool = False
     # None means "auto": False in production, True in development (resolved after validation).
     stdio_enabled: bool | None = None
