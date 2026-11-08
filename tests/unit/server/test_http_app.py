@@ -201,3 +201,10 @@ async def test_lifespans_run_inside_app_lifespan(deps: AppDeps) -> None:
     async with app.router.lifespan_context(app):
         assert events == ["enter"]
     assert events == ["enter", "exit"]
+
+
+def test_no_web_ui_docs_routes(deps: AppDeps) -> None:
+    # Spec §0.7: no web UI. /openapi.json stays (FR-PUB-08 groundwork), behind auth.
+    paths = {getattr(r, "path", None) for r in create_app(deps).routes}
+    assert "/openapi.json" in paths
+    assert not paths & {"/docs", "/docs/oauth2-redirect", "/redoc"}

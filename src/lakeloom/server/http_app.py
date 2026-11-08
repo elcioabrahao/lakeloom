@@ -207,7 +207,8 @@ def create_app(
             await deps.om.aclose()
             await deps.engine.dispose()
 
-    app = FastAPI(title="Lakeloom", lifespan=lifespan)
+    # No web UI (spec §0.7): Swagger/ReDoc pages off; /openapi.json stays, behind auth.
+    app = FastAPI(title="Lakeloom", lifespan=lifespan, docs_url=None, redoc_url=None)
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:  # pyright: ignore[reportUnusedFunction]
