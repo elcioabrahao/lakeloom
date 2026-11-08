@@ -38,3 +38,45 @@ def test_fr_src_06_unknown_type_names_type(monkeypatch: pytest.MonkeyPatch) -> N
     cfg = SourcesConfig(sources=[PluginSourceConfig(type="fake2", name="x", options={})])
     with pytest.raises(ConfigError, match="fake2"):
         build_sources(cfg, Settings())
+
+
+class BrokenLoadEntryPoint:
+    name = "boom"
+
+    def load(self) -> Any:
+        raise ImportError("no module named secret_dep")
+
+
+class BrokenFactoryEntryPoint:
+    name = "boom2"
+
+    def load(self) -> Any:
+        def factory(cfg: PluginSourceConfig, settings: Settings) -> Any:
+            raise RuntimeError("bad options")
+
+        return factory
+
+
+def test_fr_src_06_plugin_load_failure_is_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(importlib.metadata, "entry_points", lambda **_: [BrokenLoadEntryPoint()])
+    cfg = SourcesConfig(sources=[PluginSourceConfig(type="boom", name="x", options={})])
+    with pytest.raises(ConfigError, match=r"'boom' failed to load.*secret_dep"):
+        build_sources(cfg, Settings())
+
+
+def test_fr_src_06_plugin_factory_failure_is_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(importlib.metadata, "entry_points", lambda **_: [BrokenFactoryEntryPoint()])
+    cfg = SourcesConfig(sources=[PluginSourceConfig(type="boom2", name="x", options={})])
+    with pytest.raises(ConfigError, match=r"'boom2' failed to load.*bad options"):
+        build_sources(cfg, Settings())
+
+
+def test_builtin_without_build_source_is_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    import types
+
+    monkeypatch.setattr(importlib, "import_module", lambda _name: types.ModuleType("m"))
+    from lakeloom.sources.config import DeltaSourceConfig
+
+    cfg = SourcesConfig(sources=[DeltaSourceConfig(type="delta", name="d", tables=[])])
+    with pytest.raises(ConfigError, match="'delta' failed to load"):
+        build_sources(cfg, Settings())

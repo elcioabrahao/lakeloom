@@ -21,18 +21,27 @@ _BUILTIN_MODULES = {
 }
 
 
+def _failed(kind: str, exc: BaseException) -> ConfigError:
+    return ConfigError(f"source {kind!r} failed to load: {exc}")
+
+
 def _builtin_factory(kind: str) -> Callable[[Any, Settings], LakeSource]:
     try:
         module = importlib.import_module(_BUILTIN_MODULES[kind])
+        return module.build_source
     except ImportError as exc:
         raise ConfigError(f"source type {kind!r} is not available: {exc}") from None
-    return module.build_source
+    except Exception as exc:
+        raise _failed(kind, exc) from None
 
 
 def _plugin_factory(kind: str) -> Callable[[PluginSourceConfig, Settings], LakeSource]:
     for entry_point in importlib.metadata.entry_points(group=ENTRY_POINT_GROUP):
         if entry_point.name == kind:
-            return entry_point.load()
+            try:
+                return entry_point.load()
+            except Exception as exc:
+                raise _failed(kind, exc) from None
     raise ConfigError(
         f"unknown source type {kind!r}: not built in and no '{ENTRY_POINT_GROUP}' "
         "entry point provides it"
@@ -43,8 +52,15 @@ def build_sources(config: SourcesConfig, settings: Settings) -> dict[str, LakeSo
     """Instantiate every configured source, keyed by its unique name."""
     built: dict[str, LakeSource] = {}
     for source in config.sources:
-        if isinstance(source, PluginSourceConfig):
-            built[source.name] = _plugin_factory(source.type)(source, settings)
-        else:
-            built[source.name] = _builtin_factory(source.type)(source, settings)
+        factory: Callable[[Any, Settings], LakeSource] = (
+            _plugin_factory(source.type)
+            if isinstance(source, PluginSourceConfig)
+            else _builtin_factory(source.type)
+        )
+        try:
+            built[source.name] = factory(source, settings)
+        except ConfigError:
+            raise
+        except Exception as exc:
+            raise _failed(source.type, exc) from None
     return built

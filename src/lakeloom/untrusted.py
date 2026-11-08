@@ -37,5 +37,8 @@ def quote_untrusted(text: str, *, source: str) -> str:
         text = text[: MAX_QUOTED_CHARS - 1] + "…"
     safe_source = _escape(" ".join(source.split()))
     lines = [f"> [untrusted text from {safe_source}]"]
-    lines.extend(f"> {line}" for line in _escape(text.replace("\r\n", "\n")).split("\n"))
+    # splitlines() breaks on every line boundary a renderer might honour (\r, \v, \f,
+    # \x1c-\x1e, U+0085, U+2028, U+2029), so no line can start outside the quote.
+    body = _escape(text).splitlines() or [""]
+    lines.extend(f"> {line}" for line in body)
     return "\n".join(lines)
