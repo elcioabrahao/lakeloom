@@ -6,7 +6,8 @@ FROM ghcr.io/astral-sh/uv:0.11.12 AS uv
 
 FROM python:3.12.14-slim-trixie AS builder
 COPY --from=uv /uv /uvx /bin/
-ENV UV_COMPILE_BYTECODE=0 \
+# Precompile .pyc at build time: the container runs with a read-only root filesystem.
+ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
     UV_PROJECT_ENVIRONMENT=/app/.venv
