@@ -49,6 +49,7 @@ class LakeSource(Protocol):
     name: str
     kind: str
     capabilities: SourceCapabilities
+    om_service: str | None  # OpenMetadata service name for FQN lookup (FR-SRC-07)
 
     async def list_catalogs(self) -> list[str]: ...
 

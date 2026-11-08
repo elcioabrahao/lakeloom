@@ -202,6 +202,7 @@ class DeltaStorageSource:
     def __init__(self, config: DeltaSourceConfig) -> None:
         _require_deltalake()
         self.name = config.name
+        self.om_service = config.om_service
         self.capabilities = SourceCapabilities(profiling=True, versions=True, constraints=True)
         self._entries: dict[tuple[str | None, str, str], DeltaTableEntry] = {}
         for entry in config.tables:

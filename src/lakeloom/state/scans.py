@@ -54,6 +54,7 @@ class ScanRecord(BaseModel):
     client: str | None = None
     status: Literal["completed", "partial", "failed"]
     tables: list[ScannedTable] = []
+    warnings: list[str] = []
 
 
 def _utc(value: datetime) -> datetime:
@@ -62,7 +63,7 @@ def _utc(value: datetime) -> datetime:
 
 
 def _to_row(rec: ScanRecord) -> ScanRecordRow:
-    payload = rec.model_dump(mode="json", by_alias=True, include={"tables"})
+    payload = rec.model_dump(mode="json", by_alias=True, include={"tables", "warnings"})
     return ScanRecordRow(
         id=rec.id,
         source=rec.source,
@@ -86,6 +87,7 @@ def _from_row(row: ScanRecordRow) -> ScanRecord:
             "client": row.client,
             "status": row.status,
             "tables": row.payload.get("tables", []),
+            "warnings": row.payload.get("warnings", []),
         }
     )
 
