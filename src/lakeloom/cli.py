@@ -4,6 +4,7 @@
 Configuration errors are printed to stderr and exit with code 2, without a traceback.
 """
 
+import asyncio
 from typing import Annotated
 
 import typer
@@ -58,3 +59,34 @@ def serve(
         # RequestContextMiddleware writes the access log; uvicorn's would duplicate it.
         access_log=False,
     )
+
+
+db_app = typer.Typer(name="db", help="State store commands.", no_args_is_help=True)
+app.add_typer(db_app)
+
+
+@db_app.command("upgrade")
+def db_upgrade() -> None:
+    """Apply state store migrations (Alembic upgrade head)."""
+    from lakeloom.state.db import create_engine, upgrade
+
+    try:
+        settings = get_settings()
+    except (ConfigError, ValidationError) as exc:
+        typer.echo(f"configuration error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    async def _run() -> None:
+        engine = create_engine(settings.db_url)
+        try:
+            await upgrade(engine)
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(_run())
+    except Exception as exc:
+        # The DB URL may hold a password, so only the error type is printed.
+        typer.echo(f"state store upgrade failed ({type(exc).__name__})", err=True)
+        raise typer.Exit(code=1) from None
+    typer.echo("state store at head")

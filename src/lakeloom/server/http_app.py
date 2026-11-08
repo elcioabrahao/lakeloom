@@ -41,7 +41,7 @@ from lakeloom.server.health import (
     run_checks,
     state_store_check,
 )
-from lakeloom.state.db import create_engine
+from lakeloom.state.db import create_engine, upgrade
 
 _log = logging.getLogger("lakeloom.http")
 _IDP_TIMEOUT = 5.0
@@ -197,6 +197,12 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
         try:
+            try:
+                await upgrade(deps.engine)
+            except Exception as exc:
+                # Never log the exception text: it can embed the DB URL (NFR-SEC-11).
+                _log.error("state store migration failed (%s)", type(exc).__name__)
+                raise
             async with AsyncExitStack() as stack:
                 for factory in lifespans:
                     await stack.enter_async_context(factory())

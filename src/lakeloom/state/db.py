@@ -1,13 +1,17 @@
 """Async engine factory and liveness ping for the state store (NFR-OPS-01).
 
 PostgreSQL is the dev-stack default; SQLite is the code-level fallback (spec §10).
-Schema migrations (Alembic) arrive with the first table in M1 (ADR 0006).
+Schema migrations are Alembic scripts packaged in ``lakeloom/state/migrations`` (ADR 0006);
+``upgrade`` applies them programmatically, so no alembic.ini is needed at runtime.
 """
 
+from importlib.resources import as_file, files
 from pathlib import Path
 
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import text
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 _ASYNC_SCHEMES = {
@@ -38,3 +42,17 @@ async def ping(engine: AsyncEngine) -> None:
     """Run ``SELECT 1``; raises if the database is unreachable."""
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))
+
+
+def _run_upgrade(connection: Connection) -> None:
+    with as_file(files("lakeloom.state") / "migrations") as script_dir:
+        cfg = Config()
+        cfg.set_main_option("script_location", str(script_dir))
+        cfg.attributes["connection"] = connection
+        command.upgrade(cfg, "head")
+
+
+async def upgrade(engine: AsyncEngine) -> None:
+    """Apply all migrations (Alembic ``upgrade head``); idempotent, SQLite and PostgreSQL."""
+    async with engine.begin() as conn:
+        await conn.run_sync(_run_upgrade)
