@@ -181,3 +181,20 @@ idle (1 GB heap cap). Fits the 8 GB minimum with room for Lakeloom (Task 8).
   not REQUIREMENTS; IRI preview has no spec equivalent and needs a decision
   (client-side minting or a later OM version) in the OM client task.
 - All credentials in the stack are public dev defaults; `.env.example` marks them.
+
+## Appendix (Task 8): Lakeloom in the stack, and the CI wait command
+
+- `docker compose -f deploy/compose/docker-compose.yml up -d --wait` returns 0 with the
+  one-shot services (`execute-migrate-all`, `om-bootstrap`, `gitea-init`) present, on
+  Compose v5.1.2: services that exit 0 are accepted by `--wait`. Task 10's CI uses exactly
+  this command (add `--wait-timeout 600` on slow runners). A cold start took ~50 s warm.
+- `lakeloom` depends on postgres, openmetadata-server and keycloak (healthy) and on
+  `om-bootstrap` and `gitea-init` (`service_completed_successfully`).
+- Postgres healthcheck now requires TCP on 127.0.0.1 and the `lakeloom` role/db
+  (`pg_isready` + `psql`), because the init-script phase runs a temporary socket-only server.
+- All published ports bind to 127.0.0.1: 8585 (OM), 8180 (Keycloak), 3000 (Gitea),
+  8000 (Lakeloom), 5432 (Postgres, for `LAKELOOM_TEST_DB_URL`). The OM admin port 8586 is
+  no longer published (the healthcheck runs inside the container).
+- The OM bot token in `om-secrets` is written `10001:10001`, mode 0440 (Lakeloom runs as
+  uid 10001, read-only root filesystem, `/tmp` tmpfs, state in the `lakeloom-data` volume).
+- Image pins: `ghcr.io/astral-sh/uv:0.11.12`, `python:3.12.14-slim-trixie`.

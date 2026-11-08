@@ -3,7 +3,7 @@
 #
 # Logs in to OpenMetadata as the default admin, reads the JWT of the
 # `ingestion-bot` bot user and writes it to $OM_BOT_TOKEN_FILE
-# (named volume `om-secrets`, mounted read-only into Lakeloom later).
+# (named volume `om-secrets`, mounted read-only into Lakeloom; owner 10001:10001, mode 0440).
 #
 # Endpoints checked against the committed spec
 # src/lakeloom/om/openapi/openmetadata-2.1.0-rc1.json (see ADR 0003):
@@ -58,6 +58,8 @@ umask 022
 mkdir -p "$(dirname "$OM_BOT_TOKEN_FILE")"
 tmp="$OM_BOT_TOKEN_FILE.tmp"
 printf '%s' "$bot_token" > "$tmp"
-chmod 0644 "$tmp"
+# Readable by the Lakeloom container user (uid/gid 10001) only; not world-readable.
+chown 10001:10001 "$tmp"
+chmod 0440 "$tmp"
 mv "$tmp" "$OM_BOT_TOKEN_FILE"
 log "wrote $OM_BOT_NAME token to $OM_BOT_TOKEN_FILE (${#bot_token} chars)"

@@ -245,6 +245,7 @@ volumes:
   om-secrets:
   fuseki-data:
   gitea-data:
+  lakeloom-data:
 
 networks:
   default:
@@ -259,14 +260,22 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: password
-    # Not published to the host. Lakeloom (Task 8) reaches it as postgresql:5432.
+    # Published on loopback only so contract tests can use
+    # LAKELOOM_TEST_DB_URL=postgresql://lakeloom:lakeloom@localhost:5432/lakeloom
+    ports:
+      - "127.0.0.1:5432:5432"
     volumes:
       - om-db-data:/var/lib/postgresql/data
       # Extra init script: creates the `lakeloom` role + database (dev only). Runs only
       # when the data volume is empty (first start).
       - ./lakeloom-db-init.sql:/docker-entrypoint-initdb.d/zz-lakeloom.sql:ro
     healthcheck:
-      test: psql -U postgres -tAc 'select 1' -d openmetadata_db
+      # Passes only when the server accepts TCP *and* the lakeloom role/db exist (the init
+      # script runs on a temporary socket-only server first). Dev-only password.
+      test: >-
+        pg_isready -h 127.0.0.1 -U lakeloom -d lakeloom &&
+        PGPASSWORD=lakeloom psql -h 127.0.0.1 -U lakeloom -d lakeloom -tAc 'select 1' &&
+        psql -U postgres -tAc 'select 1' -d openmetadata_db
       interval: 15s
       timeout: 10s
       retries: 10
@@ -306,8 +315,7 @@ services:
     restart: unless-stopped
     environment: *om-environment
     ports:
-      - "8585:8585"
-      - "8586:8586"
+      - "127.0.0.1:8585:8585"
     depends_on:
       elasticsearch:
         condition: service_healthy
@@ -380,7 +388,7 @@ services:
       KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:-admin}
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:-admin}
     ports:
-      - "8180:8080"
+      - "127.0.0.1:8180:8080"
     volumes:
       # No data volume on purpose: dev H2 state is ephemeral, the realm is re-imported
       # from this file on every container (re)creation, so the realm JSON is the truth.
@@ -407,7 +415,7 @@ services:
       GITEA__server__DISABLE_SSH: "true"
       GITEA__service__DISABLE_REGISTRATION: "true"
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - gitea-data:/data
     healthcheck:
@@ -442,3 +450,41 @@ services:
       gitea:
         condition: service_healthy
     restart: "no"
+
+  # --- Lakeloom itself (built from the repo root) -------------------------------------------
+  lakeloom:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: lakeloom:dev
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      LAKELOOM_OM_URL: http://openmetadata-server:8585
+      LAKELOOM_OM_BOT_TOKEN_FILE: /secrets/om_bot_token
+      LAKELOOM_OIDC_ISSUER: http://localhost:8180/realms/lakeloom
+      LAKELOOM_OIDC_JWKS_URL: http://keycloak:8080/realms/lakeloom/protocol/openid-connect/certs
+      LAKELOOM_PUBLIC_URL: http://localhost:8000
+      LAKELOOM_SCOPE_GROUP_MAP: '{"ontology-reviewers":["lakeloom:read","lakeloom:review"],"data-engineers":["lakeloom:read","lakeloom:propose"],"lakeloom-admins":["lakeloom:admin"]}'
+      LAKELOOM_GIT_REMOTE: http://gitea:3000/lakeloom-admin/ontologies.git
+      LAKELOOM_FORGE: gitea
+      # Development only: role + database from lakeloom-db-init.sql.
+      LAKELOOM_DB_URL: postgresql://lakeloom:lakeloom@postgresql:5432/lakeloom
+    volumes:
+      - lakeloom-data:/data
+      - om-secrets:/secrets:ro
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      openmetadata-server:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      om-bootstrap:
+        condition: service_completed_successfully
+      gitea-init:
+        condition: service_completed_successfully
