@@ -1,5 +1,6 @@
 """Alembic migrations on the state store (TC-9)."""
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -40,3 +41,20 @@ async def test_upgrade_postgres() -> None:
         assert "scan_records" in await _tables(engine)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.contract
+async def test_concurrent_upgrades_postgres() -> None:
+    url = os.environ.get("LAKELOOM_TEST_DB_URL")
+    if not url:
+        pytest.skip("LAKELOOM_TEST_DB_URL not set")
+    engines = [create_engine(url) for _ in range(4)]
+    try:
+        async with engines[0].begin() as conn:
+            await conn.execute(text("DROP TABLE IF EXISTS scan_records"))
+            await conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        await asyncio.gather(*(upgrade(e) for e in engines))
+        assert "scan_records" in await _tables(engines[0])
+    finally:
+        for e in engines:
+            await e.dispose()

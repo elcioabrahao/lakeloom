@@ -43,8 +43,12 @@ def om_check(client: OMClient) -> Check:
     return _named("openmetadata", check)
 
 
-def state_store_check(engine: AsyncEngine) -> Check:
+def state_store_check(
+    engine: AsyncEngine, upgrade_pending: Callable[[], bool] | None = None
+) -> Check:
     async def check() -> CheckResult:
+        if upgrade_pending is not None and upgrade_pending():
+            return CheckResult("state_store", False, "schema upgrade pending")
         try:
             await ping(engine)
         except Exception as exc:

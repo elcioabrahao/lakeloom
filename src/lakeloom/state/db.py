@@ -44,7 +44,13 @@ async def ping(engine: AsyncEngine) -> None:
         await conn.execute(text("SELECT 1"))
 
 
+_UPGRADE_LOCK_KEY = 0x4C4B4C4D  # arbitrary constant: serialises replicas starting together
+
+
 def _run_upgrade(connection: Connection) -> None:
+    if connection.dialect.name == "postgresql":
+        # Transaction-scoped: released at commit; a second replica waits, then sees head.
+        connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _UPGRADE_LOCK_KEY})
     with as_file(files("lakeloom.state") / "migrations") as script_dir:
         cfg = Config()
         cfg.set_main_option("script_location", str(script_dir))

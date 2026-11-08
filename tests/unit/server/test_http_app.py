@@ -1,5 +1,6 @@
 """HTTP app: health, readiness, metrics, request ids, auth wiring (NFR-OPS-01..03, NFR-SEC-11)."""
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -208,3 +209,63 @@ def test_no_web_ui_docs_routes(deps: AppDeps) -> None:
     paths = {getattr(r, "path", None) for r in create_app(deps).routes}
     assert "/openapi.json" in paths
     assert not paths & {"/docs", "/docs/oauth2-redirect", "/redoc"}
+
+
+def _state_store(body: dict[str, object]) -> dict[str, object]:
+    checks = body["checks"]
+    assert isinstance(checks, list)
+    return next(c for c in checks if c["name"] == "state_store")
+
+
+async def test_upgrade_retries_when_state_store_unreachable(deps: AppDeps) -> None:
+    from sqlalchemy.exc import OperationalError
+
+    calls = 0
+
+    async def flaky(_: AsyncEngine) -> None:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            raise OperationalError("SELECT 1", {}, OSError("postgres://u:secret@h/db down"))
+
+    app = create_app(deps, upgrade_fn=flaky, upgrade_backoff=(0.01, 0.02))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            r = await c.get("/readyz")
+            assert r.status_code == 503
+            assert _state_store(r.json())["detail"] == "schema upgrade pending"
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if calls >= 3:
+                    break
+            await asyncio.sleep(0.02)
+            r = await c.get("/readyz")
+            assert _state_store(r.json())["ok"] is True
+    assert calls == 3
+
+
+async def test_upgrade_non_connection_error_stops_startup(deps: AppDeps) -> None:
+    async def broken(_: AsyncEngine) -> None:
+        raise RuntimeError("bad migration")
+
+    app = create_app(deps, upgrade_fn=broken)
+    with pytest.raises(RuntimeError, match="bad migration"):
+        async with app.router.lifespan_context(app):
+            pass
+
+
+async def test_unreachable_db_app_starts_and_cancels_retry(tmp_path: Path) -> None:
+    settings = _settings(tmp_path).model_copy(
+        update={"db_url": "postgresql://u:p@127.0.0.1:1/none"}
+    )
+    deps = build_deps(settings)
+    app = create_app(deps, upgrade_backoff=(0.01, 0.02))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            r = await c.get("/readyz")
+    assert r.status_code == 503
+    assert _state_store(r.json())["detail"] == "schema upgrade pending"

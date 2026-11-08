@@ -15,7 +15,7 @@ class Base(DeclarativeBase):
 
 class ScanRecordRow(Base):
     __tablename__ = "scan_records"
-    __table_args__ = (Index("ix_scan_records_source_created_at", "source", "created_at"),)
+    __table_args__ = (Index("ix_scan_records_source_id", "source", "id"),)
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     source: Mapped[str] = mapped_column(String(255))

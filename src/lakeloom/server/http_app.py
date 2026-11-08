@@ -7,18 +7,20 @@ under a path prefix. Startup/shutdown lives in one ``lifespan``; ``lifespans`` (
 the MCP session manager) are entered inside it and exited before dependencies close.
 """
 
+import asyncio
 import logging
 import time
 import uuid
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 
+import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 import httpx
 from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from sqlalchemy.exc import ArgumentError
+from sqlalchemy.exc import ArgumentError, InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -45,6 +47,14 @@ from lakeloom.state.db import create_engine, upgrade
 
 _log = logging.getLogger("lakeloom.http")
 _IDP_TIMEOUT = 5.0
+_CONNECTION_ERRORS: tuple[type[BaseException], ...] = (
+    OperationalError,
+    InterfaceError,
+    OSError,
+    TimeoutError,
+    asyncpg.PostgresConnectionError,
+    asyncpg.InterfaceError,
+)
 
 
 @dataclass
@@ -175,6 +185,8 @@ def create_app(
     endpoints: Sequence[tuple[str, ASGIApp]] = (),
     lifespans: Sequence[Callable[[], AbstractAsyncContextManager[None]]] = (),
     checks: Sequence[Check] | None = None,
+    upgrade_fn: Callable[[AsyncEngine], Awaitable[None]] = upgrade,
+    upgrade_backoff: tuple[float, float] = (1.0, 30.0),
 ) -> FastAPI:
     """Build the app. ``checks`` overrides the default readiness checks (tests).
 
@@ -184,23 +196,50 @@ def create_app(
     """
     settings = deps.settings
     resource_metadata_url = f"{settings.public_base_url}{PRM_PATH}"
+    upgrade_pending = False
     readiness: Sequence[Check] = (
         checks
         if checks is not None
         else (
             om_check(deps.om),
-            state_store_check(deps.engine),
+            state_store_check(deps.engine, lambda: upgrade_pending),
             git_workspace_check(settings.data_dir / "git"),
         )
     )
 
+    async def retry_upgrade() -> None:
+        nonlocal upgrade_pending
+        delay, maximum = upgrade_backoff
+        while True:
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, maximum)
+            try:
+                await upgrade_fn(deps.engine)
+            except _CONNECTION_ERRORS as exc:
+                _log.warning("schema upgrade retry failed (%s)", type(exc).__name__)
+            except Exception as exc:
+                _log.error("state store migration failed (%s)", type(exc).__name__)
+            else:
+                upgrade_pending = False
+                _log.info("state store schema upgraded")
+                return
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
+        nonlocal upgrade_pending
+        retry: asyncio.Task[None] | None = None
         try:
             try:
-                await upgrade(deps.engine)
-            except Exception as exc:
+                await upgrade_fn(deps.engine)
+            except _CONNECTION_ERRORS as exc:
                 # Never log the exception text: it can embed the DB URL (NFR-SEC-11).
+                _log.warning(
+                    "state store unreachable at startup (%s); retrying schema upgrade",
+                    type(exc).__name__,
+                )
+                upgrade_pending = True
+                retry = asyncio.create_task(retry_upgrade())
+            except Exception as exc:
                 _log.error("state store migration failed (%s)", type(exc).__name__)
                 raise
             async with AsyncExitStack() as stack:
@@ -208,6 +247,9 @@ def create_app(
                     await stack.enter_async_context(factory())
                 yield
         finally:
+            if retry is not None:
+                retry.cancel()
+                await asyncio.gather(retry, return_exceptions=True)
             if deps.idp_http is not None:
                 await deps.idp_http.aclose()
             await deps.om.aclose()

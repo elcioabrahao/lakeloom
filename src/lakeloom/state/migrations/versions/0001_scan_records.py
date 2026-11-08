@@ -28,9 +28,9 @@ def upgrade() -> None:
         sa.Column("status", sa.String(32), nullable=False),
         sa.Column("payload", sa.JSON(), nullable=False),
     )
-    op.create_index("ix_scan_records_source_created_at", "scan_records", ["source", "created_at"])
+    op.create_index("ix_scan_records_source_id", "scan_records", ["source", "id"])
 
 
 def downgrade() -> None:
-    op.drop_index("ix_scan_records_source_created_at", table_name="scan_records")
+    op.drop_index("ix_scan_records_source_id", table_name="scan_records")
     op.drop_table("scan_records")
