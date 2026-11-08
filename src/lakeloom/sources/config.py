@@ -65,6 +65,7 @@ class DeltaSourceConfig(_Base):
     type: Literal["delta"]
     name: str
     tables: list[DeltaTableEntry]
+    om_service: str | None = None  # OpenMetadata service name for FQN lookup (FR-SRC-07)
 
 
 class UnityCatalogSourceConfig(_Base):
@@ -74,6 +75,7 @@ class UnityCatalogSourceConfig(_Base):
     token_env: str | None = None
     catalogs: list[str] | None = None
     read_storage: bool = False
+    om_service: str | None = None
 
 
 class McpSourceConfig(_Base):
@@ -84,6 +86,7 @@ class McpSourceConfig(_Base):
     command: list[str] | None = None
     token_env: str | None = None
     mapping: Path
+    om_service: str | None = None
 
 
 class PluginSourceConfig(BaseModel):

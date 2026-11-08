@@ -5,13 +5,15 @@ Paths are keys of the committed spec (``servers[0].url`` is ``/api``), verified 
 header; it is never part of an exception message, log line or repr.
 """
 
+from collections.abc import Sequence
 from typing import ClassVar
+from urllib.parse import quote
 
 import httpx
 from pydantic import SecretStr
 
 from lakeloom.metrics import OM_REQUEST_SECONDS
-from lakeloom.om.models import OMCapabilities, OMVersion, RdfStatus
+from lakeloom.om.models import OMCapabilities, OMTable, OMVersion, RdfStatus
 
 API_PREFIX = "/api"
 
@@ -32,6 +34,7 @@ class OMClient:
     PATHS: ClassVar[dict[str, tuple[str, str]]] = {
         "get_version": ("GET", "/v1/system/version"),
         "get_rdf_status": ("GET", "/v1/rdf/status"),
+        "get_table_by_name": ("GET", "/v1/tables/name/{fqn}"),
     }
 
     def __init__(
@@ -54,15 +57,24 @@ class OMClient:
         if self._owns_http:
             await self._http.aclose()
 
-    async def _request(self, name: str) -> httpx.Response:
+    async def _request(
+        self,
+        name: str,
+        *,
+        path_args: dict[str, str] | None = None,
+        params: dict[str, str] | None = None,
+    ) -> httpx.Response:
         method, path = self.PATHS[name]
+        if path_args:
+            # Every path segment is percent-encoded, including "/" (FQNs may hold quotes).
+            path = path.format(**{k: quote(v, safe="") for k, v in path_args.items()})
         headers = {"Accept": "application/json"}
         if self._token is not None:
             headers["Authorization"] = f"Bearer {self._token.get_secret_value()}"
         url = f"{self._base_url}{API_PREFIX}{path}"
         try:
             with OM_REQUEST_SECONDS.labels(operation=name).time():
-                response = await self._http.request(method, url, headers=headers)
+                response = await self._http.request(method, url, headers=headers, params=params)
         except httpx.TimeoutException as exc:
             raise OMUnavailable(f"OpenMetadata timed out ({type(exc).__name__})") from None
         except httpx.TransportError as exc:
@@ -79,6 +91,24 @@ class OMClient:
 
     async def get_rdf_status(self) -> RdfStatus:
         return RdfStatus.model_validate(_json(await self._request("get_rdf_status")))
+
+    async def get_table_by_fqn(
+        self,
+        fqn: str,
+        *,
+        fields: Sequence[str] = ("columns", "tags", "owners", "tableConstraints"),
+    ) -> OMTable | None:
+        """Look a table up by FQN; ``None`` when OM has no such table (FR-SRC-07)."""
+        params = {"fields": ",".join(fields)} if fields else None
+        try:
+            response = await self._request(
+                "get_table_by_name", path_args={"fqn": fqn}, params=params
+            )
+        except OMError as exc:
+            if exc.status == 404:
+                return None
+            raise
+        return OMTable.model_validate(_json(response))
 
     async def get_capabilities(self) -> OMCapabilities:
         """Probe version and RDF status; never raises (FR-OM-06)."""

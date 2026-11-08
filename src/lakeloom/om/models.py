@@ -38,3 +38,48 @@ class OMCapabilities(BaseModel):
     rdf_enabled: bool | None = None
     rdf: RdfStatus | None = None
     error: str | None = None
+
+
+class OMTagLabel(BaseModel):
+    """A tag applied to an entity or column (``TagLabel``)."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    tag_fqn: str = Field(alias="tagFQN")
+    source: str | None = None
+    label_type: str | None = Field(default=None, alias="labelType")
+
+
+class OMEntityRef(BaseModel):
+    """An ``EntityReference`` (owner, domain, ...)."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    id: str | None = None
+    type: str | None = None
+    name: str | None = None
+    fully_qualified_name: str | None = Field(default=None, alias="fullyQualifiedName")
+
+
+class OMColumn(BaseModel):
+    """A table column as returned by ``GET /v1/tables/name/{fqn}?fields=columns``."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    name: str
+    data_type: str | None = Field(default=None, alias="dataType")
+    description: str | None = None
+    tags: list[OMTagLabel] = []
+
+
+class OMTable(BaseModel):
+    """A table entity (FR-SRC-07)."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    id: str
+    fully_qualified_name: str = Field(alias="fullyQualifiedName")
+    description: str | None = None
+    columns: list[OMColumn] = []
+    tags: list[OMTagLabel] = []
+    owners: list[OMEntityRef] = []
