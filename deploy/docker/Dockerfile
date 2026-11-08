@@ -32,7 +32,9 @@ COPY --from=builder /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    HOME=/data
+    HOME=/data \
+    # NFR-SEC-04: stdio is off in containers unless explicitly enabled.
+    LAKELOOM_STDIO_ENABLED=false
 USER 10001:10001
 WORKDIR /data
 VOLUME /data

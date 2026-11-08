@@ -80,3 +80,10 @@ async def test_fr_om_06_server_info_reports_om_version_and_rdf(
     assert om["version"].startswith("2.1")
     # RDF profile is off in the default dev stack (ADR 0003); the field is a bool, not None.
     assert isinstance(om["rdf_enabled"], bool)
+
+
+async def test_nfr_sec_04_stdio_disabled_in_container(lakeloom_url: str, agent_token: str) -> None:
+    # The image sets LAKELOOM_STDIO_ENABLED=false; compose does not override it.
+    info = await server_info(lakeloom_url, agent_token)
+    features: Any = info["features"]
+    assert features["stdio"] is False

@@ -44,7 +44,8 @@ ErrorCode = Literal[
 GET_SERVER_INFO_DESCRIPTION = """\
 Describe this Lakeloom server: its version and environment, the connected OpenMetadata \
 instance (version, whether it is reachable, whether its RDF/knowledge-graph support is \
-enabled), which optional features are on (triplestore, stdio, token_exchange), the \
+enabled), which optional features are switched on (triplestore, stdio, token_exchange; \
+these are configuration flags, not a guarantee the capability is live in this release), the \
 configured lake sources and semantic models, and who you are authenticated as (subject, \
 principal type, granted scopes).
 

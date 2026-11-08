@@ -34,7 +34,10 @@ class ServerInfo(BaseModel):
     environment: str = Field(description="Deployment environment (development or production).")
     openmetadata: OMCapabilities = Field(description="OpenMetadata version and RDF status.")
     features: dict[str, bool] = Field(
-        description="Optional features: triplestore, stdio, token_exchange."
+        description=(
+            "Optional features (triplestore, stdio, token_exchange) as configuration flags, "
+            "not live capabilities: a flag can be on before the feature ships."
+        )
     )
     sources: list[str] = Field(description="Configured lake sources (none in M0).")
     models: list[str] = Field(description="Registered semantic models (none in M0).")

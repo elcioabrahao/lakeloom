@@ -63,9 +63,12 @@ async def test_fr_agt_06_get_server_info_annotations(make_deps: DepsFactory) -> 
     assert tool.annotations.idempotent_hint is True
     assert tool.description
     assert "lakeloom:read" in tool.description
+    # NFR-SEC-04: features are configuration flags, not live transports/capabilities.
+    assert "configuration flags" in tool.description
     assert tool.input_schema.get("properties", {}) == {}
     assert tool.output_schema is not None
     assert "openmetadata" in tool.output_schema["properties"]
+    assert "configuration flags" in tool.output_schema["properties"]["features"]["description"]
 
 
 async def test_nfr_sec_01_mcp_requires_auth(make_deps: DepsFactory) -> None:
