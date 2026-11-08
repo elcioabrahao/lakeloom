@@ -4,7 +4,7 @@
 
 FROM ghcr.io/astral-sh/uv:0.13.7 AS uv
 
-FROM python:3.12.14-slim-trixie AS builder
+FROM python:3.12.15-slim-trixie AS builder
 COPY --from=uv /uv /uvx /bin/
 # Precompile .pyc at build time: the container runs with a read-only root filesystem.
 ENV UV_COMPILE_BYTECODE=1 \
@@ -19,7 +19,7 @@ COPY README.md LICENSE NOTICE ./
 COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable
 
-FROM python:3.12.14-slim-trixie AS runtime
+FROM python:3.12.15-slim-trixie AS runtime
 LABEL org.opencontainers.image.title="Lakeloom" \
       org.opencontainers.image.source="https://github.com/elcioabrahao/lakeloom" \
       org.opencontainers.image.licenses="Apache-2.0"
