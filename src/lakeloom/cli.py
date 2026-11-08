@@ -55,4 +55,6 @@ def serve(
         host=settings.host if host is None else host,
         port=settings.port if port is None else port,
         log_config=None,
+        # RequestContextMiddleware writes the access log; uvicorn's would duplicate it.
+        access_log=False,
     )

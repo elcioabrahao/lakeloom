@@ -88,3 +88,43 @@ def test_cli_serve_invalid_setting_exits_2(monkeypatch: pytest.MonkeyPatch, tmp_
 
     assert result.exit_code == 2
     assert "port" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "db_url",
+    [
+        "postgresql://u:hunter2@h:notaport/db",  # bad port -> ValueError
+        "nosuchdialect://u:hunter2@h/db",  # unknown dialect -> NoSuchModuleError
+        "not a url hunter2",  # unparsable -> ArgumentError
+        "mysql://u:hunter2@h/db",  # driver not installed -> ImportError
+    ],
+)
+def test_nfr_sec_11_cli_serve_bad_db_url_exits_2_without_password(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, db_url: str
+) -> None:
+    _serve_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAKELOOM_DB_URL", db_url)
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: pytest.fail("must not start"))
+    monkeypatch.setattr("lakeloom.cli.configure_logging", lambda level: None)
+
+    result = CliRunner().invoke(app, ["serve"])
+
+    assert result.exit_code == 2, result.output
+    assert "LAKELOOM_DB_URL" in result.stderr
+    assert "hunter2" not in result.output
+    assert "Traceback" not in result.output
+
+
+def test_cli_serve_disables_uvicorn_access_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The app's RequestContextMiddleware writes the access log; uvicorn's would duplicate it.
+    _serve_env(monkeypatch, tmp_path)
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr("uvicorn.run", lambda app, **kw: calls.append(kw))
+    monkeypatch.setattr("lakeloom.cli.configure_logging", lambda level: None)
+
+    result = CliRunner().invoke(app, ["serve"])
+
+    assert result.exit_code == 0, result.output
+    assert calls[0]["access_log"] is False

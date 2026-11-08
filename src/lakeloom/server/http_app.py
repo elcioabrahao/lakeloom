@@ -18,6 +18,7 @@ import httpx
 from fastapi import FastAPI, Response
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -66,6 +67,7 @@ def build_deps(settings: Settings) -> AppDeps:
     missing = [name for name, value in required.items() if not value]
     if missing or settings.om_url is None or settings.oidc_issuer is None:
         raise ConfigError(f"missing required configuration: set {', '.join(missing)}")
+    engine = _create_engine_or_config_error(settings.db_url)
     idp_http = httpx.AsyncClient(timeout=_IDP_TIMEOUT)
     validator = TokenValidator(
         issuer=settings.oidc_issuer,
@@ -79,10 +81,27 @@ def build_deps(settings: Settings) -> AppDeps:
     return AppDeps(
         settings=settings,
         om=OMClient(str(settings.om_url), settings.om_bot_token),
-        engine=create_engine(settings.db_url),
+        engine=engine,
         validator=validator,
         idp_http=idp_http,
     )
+
+
+def _create_engine_or_config_error(db_url: str) -> AsyncEngine:
+    """Turn an unusable ``db_url`` into a ConfigError that never echoes the URL.
+
+    The URL may embed a password (NFR-SEC-11), so only the scheme and the error type
+    are reported: bad port (ValueError), unparsable URL or unknown dialect
+    (ArgumentError / NoSuchModuleError), driver not installed (ImportError).
+    """
+    try:
+        return create_engine(db_url)
+    except (ValueError, ArgumentError, ImportError) as exc:
+        scheme = db_url.partition("://")[0] if "://" in db_url else "?"
+        raise ConfigError(
+            f"LAKELOOM_DB_URL is unusable ({type(exc).__name__}; scheme {scheme!r}): "
+            "check the dialect, driver, host and port"
+        ) from None
 
 
 class RequestContextMiddleware:
