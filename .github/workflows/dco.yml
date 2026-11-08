@@ -1,0 +1,38 @@
+name: DCO
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dco-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dco:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check Signed-off-by on every commit (NFR-OSS-04)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          bad=0
+          for sha in $(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA"); do
+            author=$(git log -1 --format='%an <%ae>' "$sha")
+            if ! git log -1 --format=%B "$sha" | grep -qxF "Signed-off-by: $author"; then
+              echo "::error::Commit $sha is missing 'Signed-off-by: $author'"
+              git log -1 --format='  %h %s' "$sha"
+              bad=1
+            fi
+          done
+          if [ "$bad" -ne 0 ]; then
+            echo "Sign off with 'git commit -s' (amend: 'git commit --amend -s' or 'git rebase --signoff')."
+            exit 1
+          fi
+          echo "All commits are signed off."

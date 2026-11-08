@@ -22,6 +22,11 @@ uv run ruff format --check
 uv run pyright
 ```
 
+### Troubleshooting (macOS)
+
+If `uv run` cannot import `lakeloom` (macOS marks `.venv` files with the hidden flag), run
+`chflags -R nohidden .venv`.
+
 ## Commits and pull requests
 
 - Use [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, `chore:` ...).

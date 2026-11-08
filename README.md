@@ -67,7 +67,64 @@ flowchart TB
 
 ## Quick start
 
-_Coming soon: docker compose quick start (added in milestone M0, task 10)._
+Runs the full development stack locally: OpenMetadata 2.1.0-rc1 (M0 targets this release
+candidate), Keycloak, Gitea, PostgreSQL and Lakeloom.
+
+**Prerequisites:** a Docker-compatible engine with at least 8 GB of memory (Docker Engine,
+OrbStack, Podman or Rancher Desktop) and [uv](https://docs.astral.sh/uv/) (only needed for
+development and the tests).
+
+```bash
+git clone https://github.com/elcioabrahao/lakeloom
+cd lakeloom
+docker compose -f deploy/compose/docker-compose.yml up -d --wait   # first start takes several minutes
+curl localhost:8000/readyz
+```
+
+`/readyz` returns HTTP 200 once Lakeloom can reach OpenMetadata, its database and its Git workspace.
+
+| Service       | URL                     | Notes                  |
+|---------------|-------------------------|------------------------|
+| Lakeloom      | http://localhost:8000   | MCP at `/mcp`          |
+| OpenMetadata  | http://localhost:8585   |                        |
+| Keycloak      | http://localhost:8180   | realm `lakeloom`       |
+| Gitea         | http://localhost:3000   |                        |
+| PostgreSQL    | localhost:5432          |                        |
+
+All ports are bound to `127.0.0.1` only.
+
+> **Development only.** Every credential in the dev stack is a fixed, publicly known default
+> (for example the Keycloak client secret `dev-agent-secret` and the OpenMetadata admin
+> `admin@open-metadata.org` / `admin`). Never reuse them outside a local machine.
+
+### Call a tool from an agent
+
+Get an agent token from Keycloak (client `lakeloom-agent`, realm `lakeloom`):
+
+```bash
+TOKEN=$(curl -s http://localhost:8180/realms/lakeloom/protocol/openid-connect/token \
+  -d grant_type=client_credentials -d client_id=lakeloom-agent \
+  -d client_secret=dev-agent-secret | python3 -c 'import sys, json; print(json.load(sys.stdin)["access_token"])')
+```
+
+Register Lakeloom in Claude Code and ask it to call `get_server_info`:
+
+```bash
+claude mcp add --transport http lakeloom http://localhost:8000/mcp \
+  --header "Authorization: Bearer $TOKEN"
+```
+
+Any other MCP client that supports Streamable HTTP works the same way: point it at
+`http://localhost:8000/mcp` and send the bearer token. Tokens are short-lived; fetch a new one
+when it expires.
+
+### Optional RDF store
+
+```bash
+RDF_ENABLED=true docker compose -f deploy/compose/docker-compose.yml --profile rdf up -d --wait
+```
+
+Stop the stack and delete its data with `docker compose -f deploy/compose/docker-compose.yml down -v`.
 
 For development setup see [CONTRIBUTING.md](CONTRIBUTING.md).
 
