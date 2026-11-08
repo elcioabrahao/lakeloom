@@ -36,7 +36,25 @@ scans of table metadata and profiles.
   | `LAKELOOM_PROFILE_VALUE_MAX_LENGTH` | 64 (characters) |
   | `LAKELOOM_SCAN_CONCURRENCY` | 8 |
 
-- **Delta key/tag conventions:** see Task 2.
+- **Delta key/tag conventions.** Delta has no native tags, owners or constraints, so
+  Lakeloom reads these conventions from standard Delta metadata (a table written by Spark,
+  delta-rs or any other engine can follow them):
+
+  | Concept | Where | Format |
+  |---|---|---|
+  | Table description | Delta metadata `description` | free text |
+  | Column comment | field metadata key `comment` | free text |
+  | Column tags | field metadata key `lakeloom.tags` | comma-separated, e.g. `PII.Email` |
+  | Table tags | table configuration `lakeloom.tags` | comma-separated |
+  | Primary key | configuration `lakeloom.primaryKey` | comma-separated columns |
+  | Foreign key | configuration `lakeloom.foreignKey.<column>` | `<schema>.<table>.<column>`, resolved in the same catalog |
+  | Owners | configuration `lakeloom.owners` | comma-separated |
+
+  Comments and descriptions are returned as `UntrustedText` (NFR-SEC-14). Malformed foreign
+  key values are ignored rather than failing the table. Delta types are rendered Spark-style
+  (`long` becomes `bigint`, `integer` becomes `int`). The fixture generator patches the
+  `lakeloom.*` keys into commit 0 of the log because delta-rs 1.6 (delta-kernel) rejects
+  unknown table properties on write while readers accept them.
 
 ## Consequences
 
