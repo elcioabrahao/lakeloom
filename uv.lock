@@ -973,6 +973,7 @@ version = "0.1.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
+    { name = "asyncpg" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "mcp" },
@@ -983,11 +984,6 @@ dependencies = [
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.optional-dependencies]
-postgres = [
-    { name = "asyncpg" },
 ]
 
 [package.dev-dependencies]
@@ -1005,7 +1001,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.1" },
-    { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.32.0" },
+    { name = "asyncpg", specifier = ">=0.32.0" },
     { name = "fastapi", specifier = ">=0.162.2" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "mcp", specifier = ">=2.3.0" },

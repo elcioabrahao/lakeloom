@@ -10,6 +10,7 @@ from typing import ClassVar
 import httpx
 from pydantic import SecretStr
 
+from lakeloom.metrics import OM_REQUEST_SECONDS
 from lakeloom.om.models import OMCapabilities, OMVersion, RdfStatus
 
 API_PREFIX = "/api"
@@ -60,7 +61,8 @@ class OMClient:
             headers["Authorization"] = f"Bearer {self._token.get_secret_value()}"
         url = f"{self._base_url}{API_PREFIX}{path}"
         try:
-            response = await self._http.request(method, url, headers=headers)
+            with OM_REQUEST_SECONDS.labels(operation=name).time():
+                response = await self._http.request(method, url, headers=headers)
         except httpx.TimeoutException as exc:
             raise OMUnavailable(f"OpenMetadata timed out ({type(exc).__name__})") from None
         except httpx.TransportError as exc:

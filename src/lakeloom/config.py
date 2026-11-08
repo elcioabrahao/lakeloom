@@ -20,6 +20,10 @@ ENV_PREFIX = "LAKELOOM_"
 SECRET_FILE_FIELDS = ("om_bot_token", "git_token")
 
 
+class ConfigError(Exception):
+    """Required configuration is missing or unusable at startup."""
+
+
 def _secret_file_error(field: str, message: str) -> ValidationError:
     return ValidationError.from_exception_data(
         "Settings",

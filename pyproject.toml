@@ -23,6 +23,7 @@ classifiers = [
 ]
 dependencies = [
     "aiosqlite>=0.22.1",
+    "asyncpg>=0.32.0",
     "fastapi>=0.162.2",
     "httpx>=0.28.1",
     "mcp>=2.3.0",
@@ -36,9 +37,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-postgres = [
-    "asyncpg>=0.32.0",
-]
+postgres = []
 databricks = []
 snowflake = []
 delta = []
