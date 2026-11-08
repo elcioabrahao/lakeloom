@@ -1,6 +1,6 @@
 """``build_server_info`` (FR-OM-06, NFR-SEC-11)."""
 
-from conftest import OM_BOT_TOKEN, DepsFactory, om_down
+from kit import OM_BOT_TOKEN, DepsFactory, om_down
 from pydantic import SecretStr
 
 import lakeloom

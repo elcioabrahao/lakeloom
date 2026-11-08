@@ -11,8 +11,8 @@ from typing import Any
 
 import httpx
 import httpx2
-from conftest import AuthKit, DepsFactory, om_down
 from fastapi import FastAPI
+from kit import AuthKit, DepsFactory, om_down
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult

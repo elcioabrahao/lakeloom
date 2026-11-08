@@ -7,7 +7,7 @@ from typing import Any
 
 import httpx
 import pytest
-from conftest import KEYCLOAK_URL, server_info, token_scopes
+from stack import KEYCLOAK_URL, server_info, token_scopes
 
 pytestmark = pytest.mark.contract
 
