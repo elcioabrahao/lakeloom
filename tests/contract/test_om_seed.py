@@ -1,5 +1,6 @@
 """Fixture lake seeded into the real OpenMetadata (FR-SRC-07, FR-OM-01)."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -19,6 +20,12 @@ TABLES = ("customers", "products", "orders", "invoices")
 def _run_seed(om_url: str, token: str, tmp_path: Path) -> dict[str, str]:
     token_file = tmp_path / "om_bot_token"
     token_file.write_text(token, encoding="utf-8")
+    # The subprocess does not inherit pytest's pythonpath; prepend src so a hidden .pth
+    # in the venv (macOS) cannot break `import lakeloom` in the seed script.
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (str(REPO / "src"), env.get("PYTHONPATH", "")) if p
+    )
     proc = subprocess.run(  # noqa: S603 - fixed argv
         [
             sys.executable,
@@ -34,6 +41,7 @@ def _run_seed(om_url: str, token: str, tmp_path: Path) -> dict[str, str]:
         text=True,
         timeout=120,
         check=False,
+        env=env,
     )
     assert proc.returncode == 0, proc.stderr[-500:]
     assert token not in proc.stdout + proc.stderr
