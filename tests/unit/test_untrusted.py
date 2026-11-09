@@ -96,3 +96,40 @@ def test_nfr_sec_14_single_line_strips_control_characters(ctrl: str) -> None:
     span = code_span(hostile)
     assert not any(ord(c) < 0x20 or ord(c) == 0x7F for c in span)
     assert span == "`or[31mders]0;pwned`"
+
+
+def _unescape_seq(text: str) -> str:
+    # Reference single-pass unescape: backslash escapes the next char, entities decode.
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text):
+            out.append(text[i + 1])
+            i += 2
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out).replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "see \\[click\\](https://evil/?q=1)",
+        "\\[t\\](u)",
+        "!\\[x\\](u)",
+        "\\\\[t\\\\](u)",
+        "[t](u)",
+        "![x](u)",
+    ],
+)
+def test_nfr_sec_14_backslash_cannot_cancel_bracket_escape(payload: str) -> None:
+    from lakeloom.untrusted import _escape
+
+    out = _escape(payload)
+    for i, ch in enumerate(out):
+        if ch in "[]":
+            run = len(out[:i]) - len(out[:i].rstrip("\\"))
+            assert run % 2 == 1, out
+    assert _unescape_seq(out) == payload
+    assert "[click\\](" not in quote_untrusted(payload, source="s")

