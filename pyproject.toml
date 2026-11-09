@@ -27,6 +27,8 @@ dependencies = [
     "asyncpg>=0.32.0",
     "fastapi>=0.162.2",
     "httpx>=0.28.1",
+    "httpx2>=2.16.0",
+    "jmespath>=1.1.0",
     "mcp>=2.3.0",
     "prometheus-client>=0.26.0",
     "pydantic>=2",
@@ -58,7 +60,6 @@ lakeloom = "lakeloom.cli:app"
 [dependency-groups]
 dev = [
     "deltalake>=1.6.6",
-    "httpx2>=2.16.0",
     "hypothesis>=6.170.15",
     "pip-audit>=2.10.1",
     "pyarrow>=26.0.1",
@@ -68,6 +69,7 @@ dev = [
     "pytest-cov>=7.1.0",
     "respx>=0.23.1",
     "ruff>=0.17.4",
+    "types-jmespath>=1.1.0.20260724",
     "types-pyyaml>=6.0.12.20261103",
 ]
 

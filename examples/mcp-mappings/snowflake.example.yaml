@@ -1,0 +1,38 @@
+# EXAMPLE TO VERIFY — tool names are placeholders; run tools/list against your server and edit
+#
+# Upstream MCP mapping skeleton for a Snowflake MCP server (FR-SRC-05). Nothing here has been
+# tested against a live server: replace every `<tool-from-tools/list>` with a tool name your
+# server reports in tools/list, and adjust the argument names to its input schemas and the
+# JMESPath expressions to its result shapes. Lakeloom marks the source unavailable if a
+# mapped tool is missing from tools/list. See ADR 0008 for the mapping format.
+version: 1
+operations:
+  list_catalogs:
+    tool: "<tool-from-tools/list>"
+    arguments: {}
+    result:
+      items: "databases"
+      fields: {name: name}
+
+  list_schemas:
+    tool: "<tool-from-tools/list>"
+    arguments: {database: "{catalog}"}
+    result:
+      items: "schemas"
+      fields: {name: name}
+
+  list_tables:
+    tool: "<tool-from-tools/list>"
+    arguments: {database: "{catalog}", schema: "{schema}", page_token: "{cursor}"}
+    result:
+      items: "tables"
+      fields: {name: name}
+    pagination: {cursor: next_page_token}
+
+  describe_table:
+    tool: "<tool-from-tools/list>"
+    arguments: {full_name: "{full_name}"}
+    result:
+      fields:
+        comment: comment
+        columns: "columns[].{name: name, data_type: type, nullable: nullable, comment: comment, position: position}"

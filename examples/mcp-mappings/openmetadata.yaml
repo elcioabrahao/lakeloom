@@ -1,0 +1,70 @@
+# Upstream MCP mapping for OpenMetadata's own MCP server (FR-SRC-05, ADR 0008).
+#
+# Verified against OpenMetadata 2.1.0-rc1 (McpApplication, Streamable HTTP at /mcp) with
+# tools/list: `search_metadata` and `get_entity_details` are the tool names it reports.
+# The source config must set `om_service` to the OM database service holding the tables
+# (e.g. lakeloom_fixture); it fills the {om_service} placeholder. OM catalog = OM database,
+# schema = OM databaseSchema.
+#
+# Placeholders embedded in `queryFilter` (a JSON string) are substituted textually; Lakeloom
+# rejects values containing a quote, backslash or control character, so an agent-supplied
+# name cannot break out of the JSON.
+version: 1
+operations:
+  list_catalogs:
+    tool: search_metadata
+    arguments:
+      entityType: database
+      size: 50
+      cursor: "{cursor}"
+      queryFilter: '{"bool": {"must": [{"term": {"entityType": "database"}}, {"term": {"service.name.keyword": "{om_service}"}}]}}'
+    result:
+      items: "results[?entityType=='database']"
+      fields: {name: name}
+    pagination: {cursor: nextCursor}
+
+  list_schemas:
+    tool: search_metadata
+    arguments:
+      entityType: databaseSchema
+      size: 50
+      cursor: "{cursor}"
+      queryFilter: '{"bool": {"must": [{"term": {"entityType": "databaseSchema"}}, {"term": {"service.name.keyword": "{om_service}"}}, {"term": {"database.name.keyword": "{catalog}"}}]}}'
+    result:
+      items: "results[?entityType=='databaseSchema']"
+      fields: {name: name}
+    pagination: {cursor: nextCursor}
+
+  list_tables:
+    tool: search_metadata
+    arguments:
+      entityType: table
+      size: 50
+      cursor: "{cursor}"
+      queryFilter: '{"bool": {"must": [{"term": {"entityType": "table"}}, {"term": {"service.name.keyword": "{om_service}"}}, {"term": {"database.name.keyword": "{catalog}"}}, {"term": {"databaseSchema.name.keyword": "{schema}"}}]}}'
+    result:
+      # entityType='table' searches can also return tableColumn documents; keep tables only.
+      items: "results[?entityType=='table']"
+      fields: {name: name}
+    pagination: {cursor: nextCursor}
+
+  describe_table:
+    tool: get_entity_details
+    arguments:
+      entityType: table
+      fqn: "{om_service}.{full_name}"
+    result:
+      fields:
+        comment: description
+        tags: "tags[].tagFQN"
+        owners: "owners[].name"
+        columns: >-
+          columns[].{name: name, data_type: dataTypeDisplay || dataType,
+          nullable: constraint != 'NOT_NULL', comment: description,
+          tags: tags[].tagFQN, position: ordinalPosition}
+        constraints: >-
+          tableConstraints[].{kind: constraintType, columns: columns,
+          ref_columns: referredColumns}
+        partition_columns: "tablePartition.columns[].columnName"
+    # OM answers a missing entity with isError and {"statusCode": 404, ...}.
+    not_found: "statusCode == `404`"

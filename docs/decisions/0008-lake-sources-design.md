@@ -31,10 +31,10 @@ scans of table metadata and profiles.
 
   | Variable | Default |
   |---|---|
-  | `LAKELOOM_PROFILE_TOPK` | 10 |
-  | `LAKELOOM_PROFILE_LOW_CARDINALITY` | 50 (distinct values) |
-  | `LAKELOOM_PROFILE_VALUE_MAX_LENGTH` | 64 (characters) |
-  | `LAKELOOM_SCAN_CONCURRENCY` | 8 |
+    | `LAKELOOM_PROFILE_TOPK` | 10 |
+    | `LAKELOOM_PROFILE_LOW_CARDINALITY` | 50 (distinct values) |
+    | `LAKELOOM_PROFILE_VALUE_MAX_LENGTH` | 64 (characters) |
+    | `LAKELOOM_SCAN_CONCURRENCY` | 8 |
 
 - **Delta tags, owners and constraints.** Delta has no native tags, owners or constraints.
   Lakeloom resolves them from two mechanisms, in precedence order:
@@ -111,6 +111,105 @@ scans of table metadata and profiles.
     (ISO for dates/timestamps) truncated to `value_max_length` plus `…`.
   - Settings: `LAKELOOM_PROFILE_TOPK` (10), `LAKELOOM_PROFILE_LOW_CARDINALITY` (50),
     `LAKELOOM_PROFILE_VALUE_MAX_LENGTH` (64).
+
+- **Upstream MCP adapter (FR-SRC-05).** `lakeloom.sources.mcp_adapter.McpUpstreamSource`
+  is an MCP *client* of an operator-configured upstream (`type: mcp`, `transport:
+  streamable_http` with `url`, or `stdio` with `command` argv). Bearer token from at most one
+  of `token_env` (variable name) or `token_file` (path, read at `start()`; for compose the
+  OM bot-token file); never logged or put in errors. A relative `mapping` / `token_file` is
+  resolved against the sources YAML file's directory.
+  - **Lifecycle.** `start()` connects (10 s timeout), runs `initialize` + `tools/list` and
+    checks every mapped tool exists; it never raises. On failure the source stays
+    registered with `available=False` and `last_error` (e.g. `upstream_unavailable`
+    "upstream tool '<name>' not found", hint "update the mapping or the upstream server");
+    every operation then raises that error. The connection lives in a dedicated asyncio
+    task that owns the `AsyncExitStack` (the SDK transports are anyio task groups and must
+    be exited in the task that entered them); `aclose()` signals it and waits. Tool calls
+    time out after 30 s.
+  - **Mapping format** (`McpMapping`, validated at load time, errors are `ConfigError`):
+
+    ```yaml
+    version: 1
+    operations:              # list_catalogs | list_schemas | list_tables | describe_table
+      <operation>:           #   | get_table_version | profile_table
+        tool: <name from tools/list>
+        arguments: {...}     # string leaves may hold placeholders
+        result:
+          items: <JMESPath>  # required for list operations: the list of items
+          fields: {<field>: <JMESPath>}
+        pagination: {cursor: <JMESPath>}  # list operations; needs a {cursor} argument
+        not_found: <JMESPath>  # optional, evaluated on an isError result -> not_found
+    ```
+
+    Placeholders: `{catalog}`, `{schema}`, `{name}`, `{full_name}`, `{cursor}` from the
+    brief, plus `{om_service}` (the source's configured `om_service`) so one mapping serves
+    any OM service. Allowed per operation (checked at load): list_catalogs `om_service,
+    cursor`; list_schemas `+catalog`; list_tables `+schema`; table operations `catalog,
+    schema, name, full_name, om_service`. A leaf that is exactly one placeholder becomes the
+    raw value, or is omitted when the value is absent (first page cursor, no catalog). An
+    embedded placeholder is substituted as text and its value must not contain `"`, `\` or
+    control characters (`validation_error`), so an agent-chosen name cannot break out of a
+    JSON string such as OM's OpenSearch `queryFilter`.
+    Fields: list_catalogs/list_schemas `name`; list_tables `name` (+ optional `catalog`,
+    `schema`, defaulting to the request); describe_table `columns` (required; JMESPath
+    yielding objects with `name`, `data_type`, `nullable`, `comment`, `tags`, `position`),
+    `comment`, `tags`, `owners`, `partition_columns`, `constraints` (objects with `kind`
+    `PRIMARY_KEY`/`FOREIGN_KEY` case-insensitive, `columns`, `ref_columns`, optional
+    `ref_table`; dotted `ref_columns` like `svc.db.schema.table.col` yield the referenced
+    table and column), `properties`, `storage_location`, `version`, `committed_at`;
+    get_table_version `version`, `committed_at`; profile_table `row_count`, `columns`
+    (`name`, `null_rate`, `distinct_count`). Unmapped operations are capability-off and raise
+    `validation_error`.
+  - **Results are untrusted (NFR-SEC-14).** Read from `structuredContent`, else the first
+    text content JSON-decoded (at most 8 MiB; non-JSON or too-deep JSON is
+    `upstream_unavailable` "upstream returned non-JSON for <operation>"). Comments become
+    `UntrustedText(source="mcp:<source name>")`; names, types and tags are data only,
+    bounded to 1024 characters, lists to 10 000 items, pagination to 100 pages (a repeated
+    cursor stops). Lakeloom only ever calls tools named in the mapping *and* present in
+    `tools/list`; nothing in a result can choose a tool. A field of the wrong shape is
+    `upstream_unavailable` naming the operation, field and JMESPath. An upstream error's
+    text is never copied into Lakeloom's error message. profile_table never takes min/max or
+    top-k from an upstream, so no sample values can leak past FR-SRC-09.
+  - **OpenMetadata mapping** (`examples/mcp-mappings/openmetadata.yaml`, the working one).
+    OM 2.1.0-rc1's `McpApplication` serves Streamable HTTP at `/mcp` with the bot token as
+    bearer; no compose change was needed. `tools/list` on 2026-11-09 returned (`*` =
+    required):
+
+    | Tool | Input properties |
+    |---|---|
+    | `company_context` | `query`, `fqn`, `size`, `from`, `cursor` |
+    | `search_metadata` | `query`, `entityType`, `queryFilter`, `from`, `cursor`, `size`, `includeDeleted`, `fields`, `includeAggregations`, `maxAggregationBuckets`, `excludeEntityTypes`, `ignorePersonaScope` |
+    | `semantic_search` | `query`*, `filters`, `size`, `k`, `threshold`, `from`, `cursor`, `ignorePersonaScope` |
+    | `get_entity_details` | `entityType`, `fqn`, `columnOffset`, `columnLimit`, `include`, `entities`, `query`, `format`, `passages` |
+    | `get_persona_context` | `personaName`, `format`, `part` |
+    | `get_user_context` | `includeOwnedSummary`, `includeFollowedSummary`, `ownedLimit`, `followedLimit`, `ownedFilter` |
+    | `find_context` | `query`*, `size`, `format` |
+    | `get_concept_context` | `entityType`*, `fqn`*, `format`, `query` |
+    | `create_entity` | `entityType`*, `name`*, `description`, `displayName`, `owners`, `tags`, `domains`, `reviewers`, `extension`, `attributes` |
+    | `describe_entity_type` | `entityType`* |
+    | `patch_entity` | `entityType`*, `fqn`*, `patch`* |
+    | `get_entity_lineage` | `entityType`*, `fqn`*, `upstreamDepth`, `downstreamDepth`, `includeColumnLineage`, `column`, `cursor`, `includeSql` |
+    | `create_lineage` | `fromEntity`*, `toEntity`* |
+    | `get_test_definitions` | `entityType`*, `testPlatform`, `after`, `cursor`, `limit` |
+    | `create_test_case` | `name`*, `fqn`*, `columnName`, `entityType`, `testDefinitionName`*, `description`, `parameterValues`* |
+    | `root_cause_analysis` | `fqn`*, `upstreamDepth`, `downstreamDepth`, `queryFilter`, `includeDeleted`, `includeColumnLineage`, `entityType`* |
+    | `ontology_describe` | `resource`, `format`, `maxBytes` |
+
+    Mapping: list_catalogs / list_schemas / list_tables use `search_metadata` with an
+    OpenSearch `queryFilter` on `entityType`, `service.name.keyword` = `{om_service}`,
+    `database.name.keyword` = `{catalog}`, `databaseSchema.name.keyword` = `{schema}`,
+    `size: 50`, paginated by `nextCursor` (items `results[?entityType=='table']`, since table
+    searches may also return `tableColumn` documents). describe_table uses
+    `get_entity_details` with `entityType: table`, `fqn: "{om_service}.{full_name}"`:
+    `description`, `tags[].tagFQN`, `owners[].name`, `columns[]` (`dataTypeDisplay`,
+    `ordinalPosition`, `constraint != 'NOT_NULL'`), `tableConstraints[]`; a missing table is
+    `isError` with `statusCode: 404` -> `not_found`. OM's catalog = OM database, schema = OM
+    databaseSchema. get_table_version and profile_table are not mapped (OM's entity
+    `version` is a metadata revision, not a table version).
+  - **Examples to verify.** `databricks.example.yaml` and `snowflake.example.yaml` start with
+    `# EXAMPLE TO VERIFY — tool names are placeholders; run tools/list against your server
+    and edit` and use `<tool-from-tools/list>` as every tool name; they are not tested
+    against live servers.
 
 ## Consequences
 

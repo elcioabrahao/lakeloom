@@ -82,14 +82,33 @@ class UnityCatalogSourceConfig(_Base):
 
 
 class McpSourceConfig(_Base):
+    """An upstream MCP server (FR-SRC-05).
+
+    ``streamable_http`` needs ``url``; ``stdio`` needs ``command`` (argv, no shell). The
+    bearer token comes from at most one of ``token_env`` (environment-variable name) or
+    ``token_file`` (path, read at start); neither is ever logged. A relative ``mapping``
+    path is resolved against the sources YAML file's directory.
+    """
+
     type: Literal["mcp"]
     name: str
     transport: Literal["streamable_http", "stdio"]
     url: AnyHttpUrl | None = None
     command: list[str] | None = None
     token_env: str | None = None
+    token_file: Path | None = None
     mapping: Path
     om_service: str | None = None
+
+    @model_validator(mode="after")
+    def _check_transport(self) -> "McpSourceConfig":
+        if self.token_env is not None and self.token_file is not None:
+            raise ValueError("set at most one of token_env and token_file")
+        if self.transport == "streamable_http" and self.url is None:
+            raise ValueError("transport streamable_http needs url")
+        if self.transport == "stdio" and not self.command:
+            raise ValueError("transport stdio needs a non-empty command")
+        return self
 
 
 class PluginSourceConfig(BaseModel):
@@ -146,9 +165,25 @@ def load_sources_config(path: Path | None) -> SourcesConfig:
     if not isinstance(raw, dict):
         raise ConfigError(f"{path}: top level must be a mapping with a 'sources' list")
     try:
-        return SourcesConfig.model_validate(raw)
+        config = SourcesConfig.model_validate(raw)
     except ValidationError as exc:
         problems = "; ".join(
             f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()
         )
         raise ConfigError(f"invalid sources config {path}: {problems}") from None
+    return _resolve_relative(config, path.parent)
+
+
+def _resolve_relative(config: SourcesConfig, base: Path) -> SourcesConfig:
+    """Resolve relative MCP ``mapping`` / ``token_file`` paths against ``base``."""
+    resolved: list[SourceConfig] = []
+    for source in config.sources:
+        if isinstance(source, McpSourceConfig):
+            update: dict[str, Path] = {}
+            if not source.mapping.is_absolute():
+                update["mapping"] = base / source.mapping
+            if source.token_file is not None and not source.token_file.is_absolute():
+                update["token_file"] = base / source.token_file
+            source = source.model_copy(update=update)
+        resolved.append(source)
+    return SourcesConfig(sources=resolved)
