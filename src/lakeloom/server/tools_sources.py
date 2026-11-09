@@ -308,7 +308,8 @@ def register_source_tools(mcp: MCPServer, deps: AppDeps) -> None:
             bool,
             Field(
                 description="Also compute column profiles (slower; sources without "
-                "profiling record a per-table validation_error)."
+                "profiling add a warning, and a failed profile is recorded as the "
+                "table's profile_error)."
             ),
         ] = False,
     ) -> Annotated[CallToolResult, ScanResult]:

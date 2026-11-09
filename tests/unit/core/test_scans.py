@@ -287,3 +287,46 @@ async def test_nfr_sec_14_warning_names_are_code_spans(repo: ScanRepository) -> 
 
     assert any(w.startswith("table filter `x' ") for w in rec.warnings), rec.warnings
     assert_inert(summarize(rec))
+
+
+async def test_fr_src_10_profile_on_source_without_profiling_completes(
+    repo: ScanRepository,
+) -> None:
+    from lakeloom.sources.base import SourceCapabilities
+
+    src = DeltaStorageSource(_config())
+    src.capabilities = SourceCapabilities(profiling=False, versions=True, constraints=True)
+    svc = ScanService({"fixture": src}, repo, None, Settings())
+
+    rec = await svc.scan("fixture", profile=True, principal=_principal(), client=None)
+
+    assert rec.status == "completed"
+    assert all(t.version.version is not None and t.description for t in rec.tables)
+    assert all(t.profile is None and t.profile_error is None for t in rec.tables)
+    assert sum("does not support profiling" in w for w in rec.warnings) == 1
+
+
+async def test_fr_src_10_profile_failure_keeps_description_and_version(
+    repo: ScanRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lakeloom.errors import LakeloomError
+
+    src = DeltaStorageSource(_config())
+
+    async def broken(*_: object) -> None:
+        raise LakeloomError("upstream_unavailable", "profile read failed", "retry")
+
+    monkeypatch.setattr(src, "profile_table", broken)
+    svc = ScanService({"fixture": src}, repo, None, Settings())
+
+    rec = await svc.scan("fixture", profile=True, principal=_principal(), client=None)
+
+    assert rec.status == "completed"
+    for t in rec.tables:
+        assert t.error is None
+        assert t.version.version is not None and t.description is not None
+        assert t.profile is None
+        assert t.profile_error is not None
+        assert t.profile_error["code"] == "upstream_unavailable"
+    got = await repo.get(rec.id)
+    assert all(t.profile_error for t in got.tables)

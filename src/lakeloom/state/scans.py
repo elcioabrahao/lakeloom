@@ -41,6 +41,7 @@ class ScannedTable(BaseModel):
     description: TableDescription | None = None
     profile: TableProfile | None = None
     error: dict[str, Any] | None = None
+    profile_error: dict[str, Any] | None = None
 
 
 class ScanRecord(BaseModel):

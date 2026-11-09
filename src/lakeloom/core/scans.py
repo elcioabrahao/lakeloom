@@ -3,6 +3,7 @@
 Walks a configured lake source, describes every table (and optionally profiles it),
 looks tables up in OpenMetadata, and persists a :class:`ScanRecord`. One broken table
 never aborts the scan: its error is recorded on the table and the status is ``partial``.
+A profiling failure is recorded separately (``profile_error``) and never fails the table.
 """
 
 import asyncio
@@ -130,11 +131,15 @@ class ScanService:
         async with sem:
             try:
                 description = await describe_with_version(src, ref)
-                row = ScannedTable(ref=ref, version=description.version, description=description)
-                if profile:
-                    row.profile = await src.profile_table(ref, policy)
             except Exception as exc:
                 return ScannedTable(ref=ref, version=TableVersion(), error=_error_dict(exc))
+            row = ScannedTable(ref=ref, version=description.version, description=description)
+            if profile and src.capabilities.profiling:
+                # A profile failure keeps the description and version (FR-SRC-10).
+                try:
+                    row.profile = await src.profile_table(ref, policy)
+                except Exception as exc:
+                    row.profile_error = _error_dict(exc)
             await self._lookup_om(src, ref, row, warnings)
             return row
 
@@ -157,6 +162,11 @@ class ScanService:
                 "call list_sources to see the configured sources",
             )
         warnings: list[str] = []
+        if profile and not src.capabilities.profiling:
+            warnings.append(
+                f"source {code_span(source)} does not support profiling; tables were "
+                "described without profiles"
+            )
         scanned: list[ScannedTable] = []
         status = "failed"
         try:
