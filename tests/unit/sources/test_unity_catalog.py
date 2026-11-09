@@ -349,3 +349,38 @@ async def test_aclose_keeps_injected_client() -> None:
         source = UnityCatalogSource(_config(), http=http)
         await source.aclose()
         assert not http.is_closed
+
+
+@pytest.mark.parametrize("location", ["file:///lake/../etc/x", "file:///lake/a/../../etc/x"])
+async def test_read_storage_dotdot_escape_is_not_read(
+    respx_mock: respx.MockRouter, location: str
+) -> None:
+    body = _json("table_orders.json")
+    body["storage_location"] = location
+    respx_mock.get(f"{API}/tables/retail.sales.orders").respond(json=body)
+    config = _config(read_storage=True, storage_root_map={"file:///lake": str(LAKE)})
+    source = UnityCatalogSource(config)
+    version = await source.get_table_version(_ref())
+    assert (version.version, version.committed_at) == (None, None)
+    with pytest.raises(LakeloomError) as err:
+        await source.profile_table(_ref(), _policy())
+    assert err.value.code == "validation_error"
+
+
+@pytest.mark.parametrize("location", ["file:///lake/./orders", "file:///lake/a/../orders"])
+async def test_read_storage_normalised_location_maps(
+    respx_mock: respx.MockRouter, location: str
+) -> None:
+    body = _json("table_orders.json")
+    body["storage_location"] = location
+    respx_mock.get(f"{API}/tables/retail.sales.orders").respond(json=body)
+    seen: list[DeltaSourceConfig] = []
+
+    def factory(config: DeltaSourceConfig) -> DeltaStorageSource:
+        seen.append(config)
+        return DeltaStorageSource(config)
+
+    config = _config(read_storage=True, storage_root_map={"file:///lake": str(LAKE)})
+    version = await UnityCatalogSource(config, delta_factory=factory).get_table_version(_ref())
+    assert version.version == 1
+    assert seen[0].tables[0].uri == f"{LAKE}/orders"

@@ -18,6 +18,7 @@ and never logged or placed in errors.
 """
 
 import os
+import posixpath
 from collections.abc import Callable
 from typing import Any, cast
 from urllib.parse import quote
@@ -77,6 +78,17 @@ def _unavailable(message: str) -> LakeloomError:
         message,
         hint="check that Unity Catalog is running and the source url is reachable, then retry",
     )
+
+
+def _normalise(uri: str) -> str | None:
+    """Collapse ``.``/``..`` in the path part of ``uri``; ``None`` if ``..`` would climb out."""
+    scheme, sep, rest = uri.partition("://")
+    if not sep:
+        scheme, rest = "", uri
+    path = posixpath.normpath(rest) if rest else rest
+    if path == ".." or path.startswith("../") or "/../" in path or path.endswith("/.."):
+        return None
+    return f"{scheme}{sep}{path}"
 
 
 def _under(location: str, prefix: str) -> bool:
@@ -318,9 +330,13 @@ class UnityCatalogSource:
             return None
         roots = self._config.storage_root_map
         if roots:
+            normalised = _normalise(location)
+            if normalised is None:
+                return None
             for prefix in sorted(roots, key=len, reverse=True):
-                if _under(location, prefix):
-                    location = roots[prefix] + location[len(prefix) :]
+                norm_prefix = _normalise(prefix)
+                if norm_prefix is not None and _under(normalised, norm_prefix):
+                    location = roots[prefix].rstrip("/") + normalised[len(norm_prefix) :]
                     break
             else:
                 return None
