@@ -93,6 +93,7 @@ pythonVersion = "3.12"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 # macOS: uv can flag the editable .pth as hidden, which Python then skips; keep tests independent of it.
 pythonpath = ["src"]

@@ -15,6 +15,7 @@ not match the mapping is ``upstream_unavailable`` naming the operation and JMESP
 
 import asyncio
 import json
+import logging
 import math
 import os
 from collections.abc import AsyncGenerator, Callable
@@ -27,7 +28,7 @@ import jmespath.exceptions
 from mcp import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
-from mcp.types import CallToolResult, PaginatedRequestParams, TextContent
+from mcp.types import CallToolResult, PaginatedRequestParams, TextContent, Tool
 from pydantic import SecretStr, TypeAdapter, ValidationError
 
 from lakeloom.config import Settings
@@ -65,6 +66,7 @@ MAX_ITEMS = 10_000
 MAX_NAME = 1024  # identifiers, types, tags, cursors
 COLUMNS_TRUNCATED = "lakeloom.columns_truncated"
 MAX_TEXT = 64 * 1024  # comments (quote_untrusted cuts further when rendering)
+_log = logging.getLogger("lakeloom.sources.mcp")
 _HINT = "check that the upstream MCP server is running and matches the mapping, then retry"
 
 
@@ -94,6 +96,10 @@ def _kind(exc: BaseException) -> str:
             break
         current = leaves[0]
     return type(cast("object", current)).__name__
+
+
+def _read_only(tool: Tool) -> bool:
+    return tool.annotations is not None and tool.annotations.read_only_hint is True
 
 
 def _unavailable(message: str, hint: str = _HINT) -> LakeloomError:
@@ -320,17 +326,17 @@ class McpUpstreamSource:
 
     async def _connect(
         self, stack: AsyncExitStack, token: SecretStr | None
-    ) -> tuple[ClientSession, set[str]]:
+    ) -> tuple[ClientSession, dict[str, Tool]]:
         secret = token.get_secret_value() if token else None
         session = await stack.enter_async_context(self._factory(self._config, secret))
         await session.initialize()
-        names: set[str] = set()
+        names: dict[str, Tool] = {}
         cursor: str | None = None
         for _ in range(MAX_PAGES):
             result = await session.list_tools(
                 params=None if cursor is None else PaginatedRequestParams(cursor=cursor)
             )
-            names.update(tool.name for tool in result.tools)
+            names.update((tool.name, tool) for tool in result.tools)
             cursor = result.next_cursor
             if not cursor:
                 break
@@ -339,7 +345,7 @@ class McpUpstreamSource:
     async def _run(
         self,
         token: SecretStr | None,
-        ready: "asyncio.Future[tuple[ClientSession, set[str]]]",
+        ready: "asyncio.Future[tuple[ClientSession, dict[str, Tool]]]",
         closing: asyncio.Event,
     ) -> None:
         """Own the connection: transports are entered and exited in this one task.
@@ -377,7 +383,7 @@ class McpUpstreamSource:
         except LakeloomError as exc:
             self.last_error = exc
             return
-        ready: asyncio.Future[tuple[ClientSession, set[str]]] = (
+        ready: asyncio.Future[tuple[ClientSession, dict[str, Tool]]] = (
             asyncio.get_running_loop().create_future()
         )
         closing = asyncio.Event()
@@ -408,6 +414,17 @@ class McpUpstreamSource:
                 hint="update the mapping or the upstream server",
             )
             return
+        writable = sorted(
+            {op.tool for op in self._mapping.operations.values() if not _read_only(tools[op.tool])}
+        )
+        if writable:
+            # Warn only: many servers omit annotations. Lakeloom calls just the mapped tools.
+            _log.warning(
+                "upstream MCP source '%s': mapped tools not annotated read-only "
+                "(readOnlyHint is not true): %s",
+                self.name,
+                ", ".join(writable),
+            )
         self._session = session
         self.available = True
         self.last_error = None

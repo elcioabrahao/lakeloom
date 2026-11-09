@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 from mcp import ClientSession
-from mcp.types import CallToolResult, ListToolsResult, Tool
+from mcp.types import CallToolResult, ListToolsResult, Tool, ToolAnnotations
 
 from lakeloom.config import ConfigError, Settings
 from lakeloom.errors import LakeloomError
@@ -467,3 +467,48 @@ async def test_fr_src_05_partial_column_page_is_flagged_truncated() -> None:
         desc = await source.describe_table(ORDERS)
     assert len(desc.columns) == 1
     assert desc.properties["lakeloom.columns_truncated"] == "true"
+
+
+async def test_fr_src_05_warns_when_mapped_tools_are_not_read_only(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("WARNING", logger="lakeloom.sources.mcp")
+    source = McpUpstreamSource(config(), mapping(), session_factory=factory_for(Fake()))
+    async with started(source):
+        assert source.available is True  # warn only
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "not annotated read-only" in message
+    assert "get_table, search_tables" in message
+
+
+class _AnnotatedSession(_StubSession):
+    async def list_tools(self, *, params: Any = None) -> ListToolsResult:
+        return ListToolsResult(
+            tools=[
+                Tool(
+                    name=self.tool,
+                    input_schema={"type": "object"},
+                    annotations=ToolAnnotations(read_only_hint=True),
+                )
+            ]
+        )
+
+
+async def test_fr_src_05_no_warning_for_read_only_mapped_tools(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("WARNING", logger="lakeloom.sources.mcp")
+
+    @asynccontextmanager
+    async def factory(_c: McpSourceConfig, _t: str | None) -> AsyncIterator[Any]:
+        yield _AnnotatedSession("t", {})
+
+    describe = _single(
+        "describe_table", {"tool": "t", "arguments": {}, "result": {"fields": {"columns": "c"}}}
+    )
+    source = McpUpstreamSource(config(), describe, session_factory=factory)
+    async with started(source):
+        assert source.available is True
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
