@@ -15,7 +15,6 @@ from lakeloom.core.sources import describe_with_version
 from lakeloom.errors import LakeloomError
 from lakeloom.om.client import OMClient, OMUnavailable
 from lakeloom.om.fqn import build_fqn
-from lakeloom.server.auth import Principal
 from lakeloom.sources.base import LakeSource, ProfilePolicy
 from lakeloom.sources.models import TableRef, TableVersion
 from lakeloom.state.scans import ScannedTable, ScanRecord, ScanRepository, new_scan_id
@@ -151,7 +150,8 @@ class ScanService:
         schemas: list[str] | None = None,
         tables: list[str] | None = None,
         profile: bool = False,
-        principal: Principal,
+        principal_subject: str,
+        principal_type: str,
         client: str | None,
     ) -> ScanRecord:
         src = self._sources.get(source)
@@ -194,8 +194,8 @@ class ScanService:
             id=new_scan_id(),
             source=source,
             created_at=datetime.now(UTC),
-            principal_subject=principal.subject,
-            principal_type=principal.type.value,
+            principal_subject=principal_subject,
+            principal_type=principal_type,
             client=client[:_MAX_CLIENT] if client else client,
             status=status,  # pyright: ignore[reportArgumentType]
             tables=scanned,

@@ -3,16 +3,15 @@
 import time
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
-from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from lakeloom.config import Settings
 from lakeloom.core.scans import ScanService, summarize
 from lakeloom.om.client import OMUnavailable
 from lakeloom.om.models import OMTable
-from lakeloom.server.auth import Principal, PrincipalType
 from lakeloom.sources.config import DeltaSourceConfig, DeltaTableEntry
 from lakeloom.sources.delta_storage import DeltaStorageSource
 from lakeloom.sources.models import TableRef, TableVersion
@@ -43,16 +42,12 @@ class FakeOM:
         return None
 
 
-def _principal() -> Principal:
-    return Principal(
-        subject="agent-7",
-        type=PrincipalType.AGENT,
-        client_id="c",
-        username=None,
-        scopes=frozenset(),
-        groups=frozenset(),
-        token=SecretStr("t"),
-    )
+class _Who(TypedDict):
+    principal_subject: str
+    principal_type: str
+
+
+WHO: _Who = {"principal_subject": "agent-7", "principal_type": "agent"}
 
 
 def _config(extra: list[str] | None = None, om_service: str | None = None) -> DeltaSourceConfig:
@@ -86,7 +81,7 @@ def _service(
 
 async def test_fr_src_10_scan_fixture_lake_records_versions(repo: ScanRepository) -> None:
     svc = _service(repo, _config())
-    rec = await svc.scan("fixture", principal=_principal(), client="pytest")
+    rec = await svc.scan("fixture", **WHO, client="pytest")
     assert rec.status == "completed"
     assert len(rec.tables) == 4
     assert all(t.version.version is not None for t in rec.tables)
@@ -100,7 +95,7 @@ async def test_fr_src_10_scan_fixture_lake_records_versions(repo: ScanRepository
 
 async def test_scan_with_profile_respects_policy(repo: ScanRepository) -> None:
     svc = _service(repo, _config())
-    rec = await svc.scan("fixture", profile=True, principal=_principal(), client=None)
+    rec = await svc.scan("fixture", profile=True, **WHO, client=None)
     orders = next(t for t in rec.tables if t.ref.name == "orders")
     assert orders.profile is not None
     assert all(c.top_k is None for c in orders.profile.columns)
@@ -109,7 +104,7 @@ async def test_scan_with_profile_respects_policy(repo: ScanRepository) -> None:
 async def test_fr_src_07_om_lookup_sets_fqn(repo: ScanRepository) -> None:
     om = FakeOM({"lakeloom_fixture.retail.sales.orders"})
     svc = _service(repo, _config(om_service="lakeloom_fixture"), om)
-    rec = await svc.scan("fixture", principal=_principal(), client=None)
+    rec = await svc.scan("fixture", **WHO, client=None)
     by = {t.ref.name: t for t in rec.tables}
     assert by["orders"].om_fqn == "lakeloom_fixture.retail.sales.orders"
     assert by["orders"].om_id == "om-1"
@@ -120,7 +115,7 @@ async def test_fr_src_07_om_lookup_sets_fqn(repo: ScanRepository) -> None:
 async def test_scan_partial_on_missing_table(repo: ScanRepository, tmp_path: Path) -> None:
     bogus = (tmp_path / "bogus").as_uri()
     svc = _service(repo, _config([bogus]))
-    rec = await svc.scan("fixture", principal=_principal(), client=None)
+    rec = await svc.scan("fixture", **WHO, client=None)
     assert rec.status == "partial"
     failed = [t for t in rec.tables if t.error]
     assert len(failed) == 1 and failed[0].ref.name == "bogus"
@@ -136,14 +131,14 @@ async def test_all_tables_failed_is_failed(repo: ScanRepository, tmp_path: Path)
         name="fixture",
         tables=[DeltaTableEntry(uri=(tmp_path / "x").as_uri(), schema="s")],
     )
-    rec = await _service(repo, cfg).scan("fixture", principal=_principal(), client=None)
+    rec = await _service(repo, cfg).scan("fixture", **WHO, client=None)
     assert rec.status == "failed"
 
 
 async def test_om_down_does_not_fail_scan(repo: ScanRepository) -> None:
     om = FakeOM(down=True)
     svc = _service(repo, _config(om_service="svc"), om)
-    rec = await svc.scan("fixture", principal=_principal(), client=None)
+    rec = await svc.scan("fixture", **WHO, client=None)
     assert rec.status == "completed"
     assert all(t.om_fqn is None for t in rec.tables)
     assert len(rec.warnings) == 4
@@ -158,26 +153,21 @@ async def test_unknown_source_is_not_found(repo: ScanRepository) -> None:
 
     svc = _service(repo, _config())
     with pytest.raises(LakeloomError) as info:
-        await svc.scan("nope", principal=_principal(), client=None)
+        await svc.scan("nope", **WHO, client=None)
     assert info.value.code == "not_found"
 
 
 async def test_filters(repo: ScanRepository) -> None:
     svc = _service(repo, _config())
-    p = _principal()
-    rec = await svc.scan(
-        "fixture", tables=["orders", "retail.sales.customers"], principal=p, client=None
-    )
+    rec = await svc.scan("fixture", tables=["orders", "retail.sales.customers"], **WHO, client=None)
     assert sorted(t.ref.name for t in rec.tables) == ["customers", "orders"]
-    rec = await svc.scan(
-        "fixture", schemas=["sales"], catalogs=["retail"], principal=p, client=None
-    )
+    rec = await svc.scan("fixture", schemas=["sales"], catalogs=["retail"], **WHO, client=None)
     assert len(rec.tables) == 4
 
 
 async def test_filter_matching_nothing_fails(repo: ScanRepository) -> None:
     svc = _service(repo, _config())
-    rec = await svc.scan("fixture", tables=["ghost"], principal=_principal(), client=None)
+    rec = await svc.scan("fixture", tables=["ghost"], **WHO, client=None)
     assert rec.status == "failed"
     assert rec.tables == []
     assert "ghost" in summarize(rec)
@@ -185,7 +175,7 @@ async def test_filter_matching_nothing_fails(repo: ScanRepository) -> None:
 
 
 async def test_summarize_omits_comments(repo: ScanRepository) -> None:
-    rec = await _service(repo, _config()).scan("fixture", principal=_principal(), client=None)
+    rec = await _service(repo, _config()).scan("fixture", **WHO, client=None)
     text = summarize(rec)
     assert "orders" in text and "version 1" in text
     for t in rec.tables:
@@ -209,7 +199,7 @@ async def test_nfr_perf_02_100_tables_under_60s(repo: ScanRepository, tmp_path: 
     cfg = DeltaSourceConfig(type="delta", name="big", tables=entries)
     svc = _service(repo, cfg)
     start = time.monotonic()
-    rec = await svc.scan("big", principal=_principal(), client=None)
+    rec = await svc.scan("big", **WHO, client=None)
     elapsed = time.monotonic() - start
     assert rec.status == "completed" and len(rec.tables) == 100
     assert elapsed < 60, f"100 tables took {elapsed:.2f}s"
@@ -217,7 +207,7 @@ async def test_nfr_perf_02_100_tables_under_60s(repo: ScanRepository, tmp_path: 
 
 async def test_om_unexpected_exception_does_not_fail_scan(repo: ScanRepository) -> None:
     svc = _service(repo, _config(om_service="svc"), FakeOM(boom=True))
-    rec = await svc.scan("fixture", principal=_principal(), client=None)
+    rec = await svc.scan("fixture", **WHO, client=None)
     assert rec.status == "completed"
     assert len(rec.warnings) == 4 and all("upstream_error" in w for w in rec.warnings)
     assert (await repo.get(rec.id)).id == rec.id
@@ -233,9 +223,9 @@ async def test_fr_src_10_mixed_catalog_and_catalogless_tables(repo: ScanReposito
         ],
     )
     svc = _service(repo, cfg)
-    rec = await svc.scan("fixture", principal=_principal(), client=None)
+    rec = await svc.scan("fixture", **WHO, client=None)
     assert sorted(t.ref.name for t in rec.tables) == ["customers", "orders"]
-    rec = await svc.scan("fixture", catalogs=["retail"], principal=_principal(), client=None)
+    rec = await svc.scan("fixture", catalogs=["retail"], **WHO, client=None)
     assert [t.ref.name for t in rec.tables] == ["orders"]
 
 
@@ -283,7 +273,7 @@ def test_nfr_sec_14_summary_neutralises_hostile_names() -> None:
 async def test_nfr_sec_14_warning_names_are_code_spans(repo: ScanRepository) -> None:
     svc = _service(repo, _config())
 
-    rec = await svc.scan("fixture", tables=[HOSTILE_NAME], principal=_principal(), client=None)
+    rec = await svc.scan("fixture", tables=[HOSTILE_NAME], **WHO, client=None)
 
     assert any(w.startswith("table filter `x' ") for w in rec.warnings), rec.warnings
     assert_inert(summarize(rec))
@@ -298,7 +288,7 @@ async def test_fr_src_10_profile_on_source_without_profiling_completes(
     src.capabilities = SourceCapabilities(profiling=False, versions=True, constraints=True)
     svc = ScanService({"fixture": src}, repo, None, Settings())
 
-    rec = await svc.scan("fixture", profile=True, principal=_principal(), client=None)
+    rec = await svc.scan("fixture", profile=True, **WHO, client=None)
 
     assert rec.status == "completed"
     assert all(t.version.version is not None and t.description for t in rec.tables)
@@ -319,7 +309,7 @@ async def test_fr_src_10_profile_failure_keeps_description_and_version(
     monkeypatch.setattr(src, "profile_table", broken)
     svc = ScanService({"fixture": src}, repo, None, Settings())
 
-    rec = await svc.scan("fixture", profile=True, principal=_principal(), client=None)
+    rec = await svc.scan("fixture", profile=True, **WHO, client=None)
 
     assert rec.status == "completed"
     for t in rec.tables:

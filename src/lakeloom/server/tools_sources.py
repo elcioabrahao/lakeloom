@@ -320,7 +320,8 @@ def register_source_tools(mcp: MCPServer, deps: AppDeps) -> None:
                 schemas=schemas,
                 tables=tables,
                 profile=profile,
-                principal=principal,
+                principal_subject=principal.subject,
+                principal_type=principal.type.value,
                 client=client_name(ctx),
             )
             record = _withhold(record)

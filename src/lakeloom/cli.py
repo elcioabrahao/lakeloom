@@ -214,24 +214,14 @@ def scan_cmd(
     ] = None,
 ) -> None:
     """Scan a source, store the scan record and print its summary."""
-    from pydantic import SecretStr
-
     from lakeloom.core.scans import ScanService, summarize
     from lakeloom.om.client import OMClient
-    from lakeloom.server.auth import Principal, PrincipalType
+    from lakeloom.server.auth import PrincipalType
     from lakeloom.state.db import create_engine, upgrade
     from lakeloom.state.scans import ScanRepository
 
     settings = _cli_settings()
-    principal = Principal(
-        subject=_operator(),
-        type=PrincipalType.HUMAN,
-        client_id=CLI_CLIENT,
-        username=None,
-        scopes=frozenset(),
-        groups=frozenset(),
-        token=SecretStr(""),
-    )
+    operator = _operator()
 
     async def _go() -> None:
         async with _open_sources(settings) as sources:
@@ -250,7 +240,8 @@ def scan_cmd(
                     schemas=schema,
                     tables=table,
                     profile=profile,
-                    principal=principal,
+                    principal_subject=operator,
+                    principal_type=PrincipalType.HUMAN.value,
                     client=CLI_CLIENT,
                 )
             finally:
