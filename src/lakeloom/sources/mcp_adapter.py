@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import time
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from datetime import datetime
@@ -60,6 +61,7 @@ SessionFactory = Callable[[McpSourceConfig, str | None], AbstractAsyncContextMan
 
 CONNECT_TIMEOUT = 10.0
 CALL_TIMEOUT = 30.0
+RECONNECT_INTERVAL = 30.0  # seconds between lazy reconnect attempts
 MAX_PAYLOAD_CHARS = 8 * 1024 * 1024  # text content decoded at most this long
 MAX_PAGES = 100
 MAX_ITEMS = 10_000
@@ -271,6 +273,8 @@ class McpUpstreamSource:
         *,
         session_factory: SessionFactory = default_session_factory,
         connect_timeout: float = CONNECT_TIMEOUT,
+        reconnect_interval: float = RECONNECT_INTERVAL,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.name = config.name
         self.om_service = config.om_service
@@ -294,6 +298,11 @@ class McpUpstreamSource:
         self._closing: asyncio.Event | None = None
         self._session: ClientSession | None = None
         self._source = f"mcp:{config.name}"
+        self._reconnect_interval = reconnect_interval
+        self._clock = clock
+        self._last_attempt: float | None = None
+        self._closed = False
+        self._reconnect_lock = asyncio.Lock()
 
     # --- lifecycle --------------------------------------------------------------------------
 
@@ -375,9 +384,12 @@ class McpUpstreamSource:
     async def start(self) -> None:
         """Connect, run ``tools/list`` and check every mapped tool; never raises.
 
-        On failure the source stays registered with ``available=False`` and ``last_error``.
+        On failure the source stays registered with ``available=False`` and ``last_error``;
+        a later operation retries the connection (see :meth:`_ensure_connected`).
         """
-        await self.aclose()
+        self._last_attempt = self._clock()
+        self._closed = False
+        await self._close()
         try:
             token = self._token()
         except LakeloomError as exc:
@@ -447,14 +459,37 @@ class McpUpstreamSource:
                 raise  # our own caller was cancelled
             # wait_for cancelled the hung task on timeout; nothing else to do.
 
-    async def aclose(self) -> None:
+    async def _close(self) -> None:
         if self.available:
             self.last_error = _unavailable(f"upstream MCP source '{self.name}' is closed")
         await self._stop()
 
+    async def aclose(self) -> None:
+        """Close the connection; no lazy reconnect happens until :meth:`start` is called."""
+        self._closed = True
+        await self._close()
+
+    async def _ensure_connected(self) -> None:
+        """Lazily reconnect a down source (FR-SRC-05).
+
+        When the source is unavailable (never connected, failed to connect, or its session
+        ended), re-run :meth:`start` if the last attempt was at least
+        ``reconnect_interval`` seconds ago. Concurrent callers share one attempt.
+        """
+        if self._closed or (self.available and self._session is not None):
+            return
+        async with self._reconnect_lock:
+            if self.available and self._session is not None:
+                return
+            last = self._last_attempt
+            if last is not None and self._clock() - last < self._reconnect_interval:
+                return
+            await self.start()
+
     # --- calls ------------------------------------------------------------------------------
 
-    def _operation(self, name: OperationName) -> OperationMapping:
+    async def _operation(self, name: OperationName) -> OperationMapping:
+        await self._ensure_connected()
         if not self.available or self._session is None:
             raise self.last_error or _unavailable(f"upstream MCP source '{self.name}' is down")
         op = self._mapping.operations.get(name)
@@ -525,7 +560,7 @@ class McpUpstreamSource:
     async def _list(
         self, name: OperationName, values: dict[str, str | int | None]
     ) -> list[dict[str, object]]:
-        op = self._operation(name)
+        op = await self._operation(name)
         items: list[dict[str, object]] = []
         cursor: str | None = None
         seen: set[str] = set()
@@ -613,12 +648,12 @@ class McpUpstreamSource:
     async def _table_payload(
         self, name: OperationName, ref: TableRef
     ) -> tuple[OperationMapping, object]:
-        op = self._operation(name)
+        op = await self._operation(name)
         return op, await self._call(name, op, self._table_values(ref))
 
     async def describe_table(self, ref: TableRef) -> TableDescription:
         name: OperationName = "describe_table"
-        op = self._operation(name)
+        op = await self._operation(name)
         values: dict[str, str | int | None] = {**self._table_values(ref), "column_offset": None}
         payload = await self._call(name, op, values)
         key = "columns"

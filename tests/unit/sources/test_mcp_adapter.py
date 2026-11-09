@@ -512,3 +512,62 @@ async def test_fr_src_05_no_warning_for_read_only_mapped_tools(
     async with started(source):
         assert source.available is True
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+async def test_fr_src_05_lazy_reconnect_after_upstream_comes_back() -> None:
+    fake = Fake()
+    up = {"value": False}
+    attempts: list[float] = []
+    now = {"t": 1000.0}
+    real = factory_for(fake)
+
+    @asynccontextmanager
+    async def flaky(c: McpSourceConfig, t: str | None) -> AsyncIterator[ClientSession]:
+        attempts.append(now["t"])
+        if not up["value"]:
+            raise ConnectionRefusedError("down")
+        async with real(c, t) as session:
+            yield session
+
+    source = McpUpstreamSource(config(), mapping(), session_factory=flaky, clock=lambda: now["t"])
+    await source.start()
+    assert source.available is False
+    first_error = source.last_error
+
+    up["value"] = True
+    now["t"] += 29.0  # too soon: no new attempt, the last error is raised
+    with pytest.raises(LakeloomError) as info:
+        await source.list_tables("retail", "sales")
+    assert info.value is first_error
+    assert len(attempts) == 1
+
+    now["t"] += 1.0  # 30 s after the last attempt: the call reconnects and succeeds
+    try:
+        tables = await source.list_tables("retail", "sales")
+        assert "orders" in [t.name for t in tables]
+        assert source.available is True
+        assert len(attempts) == 2
+    finally:
+        await source.aclose()
+
+
+async def test_fr_src_05_failed_reconnect_raises_last_error() -> None:
+    now = {"t": 0.0}
+    attempts: list[float] = []
+
+    @asynccontextmanager
+    async def down(_c: McpSourceConfig, _t: str | None) -> AsyncIterator[ClientSession]:
+        attempts.append(now["t"])
+        raise ConnectionRefusedError("nope")
+        yield  # pragma: no cover
+
+    source = McpUpstreamSource(config(), mapping(), session_factory=down, clock=lambda: now["t"])
+    await source.start()
+    now["t"] += 31.0
+    with pytest.raises(LakeloomError) as info:
+        await source.describe_table(ORDERS)
+    assert info.value is source.last_error
+    assert info.value.code == "upstream_unavailable"
+    assert "cannot connect" in info.value.message
+    assert attempts == [0.0, 31.0]
+    await source.aclose()
