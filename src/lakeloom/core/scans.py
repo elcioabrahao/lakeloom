@@ -18,6 +18,7 @@ from lakeloom.server.auth import Principal
 from lakeloom.sources.base import LakeSource, ProfilePolicy
 from lakeloom.sources.models import TableRef, TableVersion
 from lakeloom.state.scans import ScannedTable, ScanRecord, ScanRepository, new_scan_id
+from lakeloom.untrusted import code_span, single_line
 
 __all__ = ["ScanService", "summarize"]
 
@@ -86,15 +87,17 @@ class ScanService:
             found = [t for t in found if _matches_table(t, wanted)]
             for value in tables:
                 if not any(_matches_table(t, {value}) for t in found):
-                    warnings.append(f"table filter {value!r} matched no table")
+                    warnings.append(f"table filter {code_span(value)} matched no table")
         if catalogs is not None:
             known = set(await src.list_catalogs())
             warnings.extend(
-                f"catalog filter {c!r} matched nothing" for c in catalogs if c not in known
+                f"catalog filter {code_span(c)} matched nothing" for c in catalogs if c not in known
             )
         if schemas is not None:
             warnings.extend(
-                f"schema filter {s!r} matched nothing" for s in schemas if s not in seen_schemas
+                f"schema filter {code_span(s)} matched nothing"
+                for s in schemas
+                if s not in seen_schemas
             )
         return found
 
@@ -109,7 +112,7 @@ class ScanService:
             table = await self._om.get_table_by_fqn(fqn)
         except Exception as exc:
             reason = "upstream_unavailable" if isinstance(exc, OMUnavailable) else "upstream_error"
-            warnings.append(f"OpenMetadata lookup failed for {ref.full_name}: {reason}")
+            warnings.append(f"OpenMetadata lookup failed for {code_span(ref.full_name)}: {reason}")
             return
         if table is not None:
             row.om_fqn = table.fully_qualified_name
@@ -193,15 +196,15 @@ class ScanService:
 
 
 def summarize(record: ScanRecord) -> str:
-    """Markdown summary. Never includes table or column comments (NFR-SEC-14)."""
+    """Markdown summary. Never includes comments; names are inert code spans (NFR-SEC-14)."""
     failed = [t for t in record.tables if t.error]
     lines = [
-        f"# Scan {record.id} of `{record.source}`",
+        f"# Scan {record.id} of {code_span(record.source)}",
         "",
         f"- Status: {record.status}",
         f"- Tables: {len(record.tables)} "
         f"({len(record.tables) - len(failed)} ok, {len(failed)} failed)",
-        f"- Requested by: {record.principal_type} {record.principal_subject}",
+        f"- Requested by: {record.principal_type} {code_span(record.principal_subject)}",
         "",
     ]
     ok = [t for t in record.tables if not t.error]
@@ -209,16 +212,17 @@ def summarize(record: ScanRecord) -> str:
         lines.append("## Tables")
         for t in ok:
             v = "unknown" if t.version.version is None else str(t.version.version)
-            om = f", OpenMetadata `{t.om_fqn}`" if t.om_fqn else ""
-            lines.append(f"- `{t.ref.full_name}`: version {v}{om}")
+            om = f", OpenMetadata {code_span(t.om_fqn)}" if t.om_fqn else ""
+            lines.append(f"- {code_span(t.ref.full_name)}: version {v}{om}")
         lines.append("")
     if failed:
         lines.append("## Failed tables")
         for t in failed:
             code = t.error["code"] if t.error else "unknown"
-            lines.append(f"- `{t.ref.full_name}`: {code}")
+            lines.append(f"- {code_span(t.ref.full_name)}: {single_line(str(code))}")
         lines.append("")
     if record.warnings:
         lines.append("## Warnings")
-        lines.extend(f"- {w}" for w in record.warnings)
+        # Warnings can embed upstream text (error messages): one line each, always.
+        lines.extend(f"- {single_line(w)}" for w in record.warnings)
     return "\n".join(lines).rstrip() + "\n"

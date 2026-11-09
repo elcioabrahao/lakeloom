@@ -30,6 +30,7 @@ from lakeloom.server.http_app import AppDeps
 from lakeloom.server.tools_common import PROPOSE_SCOPE, READ_SCOPE, client_name, guarded
 from lakeloom.sources.models import ColumnProfile, Page, TableDescription, TableRef
 from lakeloom.state.scans import ScanRecord
+from lakeloom.untrusted import code_span as _code
 from lakeloom.untrusted import quote_untrusted
 
 __all__ = ["ScanResult", "SourceList", "register_source_tools"]
@@ -115,11 +116,6 @@ class ScanResult(BaseModel):
     record: ScanRecord = Field(description="The stored scan record.")
 
 
-def _code(value: str) -> str:
-    """Inline code for an identifier from a source: backticks and line breaks neutralised."""
-    return "`" + " ".join(value.replace("`", "'").split()) + "`"
-
-
 def _encode_cursor(offset: int) -> str:
     return base64.urlsafe_b64encode(str(offset).encode()).decode().rstrip("=")
 
@@ -155,7 +151,7 @@ def _sources_text(listing: SourceList) -> str:
         state = "available" if s.available else "**unavailable**"
         if s.error is not None:
             state += f" (`{s.error.code}`: {s.error.hint})"
-        lines.append(f"- {_code(s.name)} ({s.kind}): {state}")
+        lines.append(f"- {_code(s.name)} ({_code(s.kind)}): {state}")
     return "\n".join(lines)
 
 

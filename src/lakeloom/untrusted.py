@@ -9,7 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-__all__ = ["MAX_QUOTED_CHARS", "UntrustedText", "quote_untrusted"]
+__all__ = ["MAX_QUOTED_CHARS", "UntrustedText", "code_span", "quote_untrusted", "single_line"]
 
 MAX_QUOTED_CHARS = 2000
 
@@ -24,6 +24,25 @@ class UntrustedText(BaseModel):
 
 def _escape(text: str) -> str:
     return text.replace("`", "\\`").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def single_line(text: str) -> str:
+    """Collapse every line boundary and whitespace run to one space.
+
+    Uses the same boundaries as :func:`quote_untrusted` (``splitlines``: ``\n``, ``\r``,
+    ``\v``, ``\f``, ``\x1c``-``\x1e``, U+0085, U+2028, U+2029) plus ``str.split``'s
+    whitespace, so interpolated text can never start a new Markdown line or heading.
+    """
+    return " ".join(" ".join(text.splitlines()).split())
+
+
+def code_span(name: str) -> str:
+    """An untrusted identifier (table, column, tag, source name) as inert inline code.
+
+    Backticks become ``'`` so the span cannot be closed early, and line boundaries are
+    collapsed by :func:`single_line`, so a hostile name stays inside one list item.
+    """
+    return "`" + single_line(name.replace("`", "'")) + "`"
 
 
 def quote_untrusted(text: str, *, source: str) -> str:

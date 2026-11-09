@@ -22,6 +22,7 @@ import lakeloom
 from lakeloom.config import ConfigError, Settings, get_settings
 from lakeloom.errors import LakeloomError
 from lakeloom.logging import configure_logging
+from lakeloom.untrusted import single_line
 
 if TYPE_CHECKING:
     from lakeloom.sources.base import LakeSource
@@ -168,7 +169,7 @@ def sources_cmd() -> None:
                 state = "available"
                 if status.error is not None:
                     state = f"unavailable ({status.error.code}: {status.error.hint})"
-                typer.echo(f"{name}\t{status.kind}\t{state}")
+                typer.echo(f"{single_line(name)}\t{single_line(status.kind)}\t{state}")
 
     _run(_go())
 
@@ -193,7 +194,7 @@ def tables_cmd(
                     version = "unknown" if v is None else str(v)
                 except LakeloomError as exc:
                     version = f"error {exc.code}"
-                typer.echo(f"{ref.full_name}\t{version}")
+                typer.echo(f"{single_line(ref.full_name)}\t{version}")
 
     _run(_go())
 
