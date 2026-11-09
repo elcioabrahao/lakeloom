@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 from stack import OM_URL, REPO
 
 from lakeloom.config import Settings
@@ -71,5 +72,46 @@ async def test_fr_src_05_om_mcp_mapping_lists_fixture_tables(
         with pytest.raises(Exception) as info:
             await source.describe_table(TableRef(catalog="retail", schema="sales", name="nope"))
         assert getattr(info.value, "code", None) == "not_found"
+    finally:
+        await source.aclose()
+
+
+async def test_fr_src_05_om_mcp_describe_pages_columns(om_bot_token: str, tmp_path: Path) -> None:
+    """With a tiny columnLimit OM returns column slices; the adapter reassembles them."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as http:
+            (await http.get(f"{OM_URL}/api/v1/system/version")).raise_for_status()
+    except httpx.HTTPError as exc:
+        pytest.skip(f"OpenMetadata not reachable at {OM_URL}: {exc!r}")
+    raw = yaml.safe_load((REPO / "examples/mcp-mappings/openmetadata.yaml").read_text())
+    raw["operations"]["describe_table"]["arguments"]["columnLimit"] = 2
+    mapping = tmp_path / "om-small-pages.yaml"
+    mapping.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    token_file = tmp_path / "om_bot_token"
+    token_file.write_text(om_bot_token, encoding="utf-8")
+    config = McpSourceConfig(
+        type="mcp",
+        name="om",
+        transport="streamable_http",
+        url=f"{OM_URL}/mcp",  # pyright: ignore[reportArgumentType]
+        token_file=token_file,
+        mapping=mapping,
+        om_service="lakeloom_fixture",
+    )
+    source = build_source(config, Settings())
+    await source.start()
+    try:
+        assert source.available, source.last_error and source.last_error.message
+        orders = await source.describe_table(
+            TableRef(catalog="retail", schema="sales", name="orders")
+        )
+        assert [(c.name, c.position) for c in orders.columns] == [
+            ("order_id", 1),
+            ("customer_id", 2),
+            ("order_date", 3),
+            ("status", 4),
+            ("total_amount", 5),
+        ]
+        assert "lakeloom.columns_truncated" not in orders.properties
     finally:
         await source.aclose()

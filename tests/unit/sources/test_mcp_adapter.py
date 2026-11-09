@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from mcp import ClientSession
+from mcp.types import CallToolResult, ListToolsResult, Tool
 
 from lakeloom.config import ConfigError, Settings
 from lakeloom.errors import LakeloomError
@@ -209,6 +210,8 @@ async def test_start_times_out_on_real_transport_black_hole() -> None:
         ("not_json", "upstream returned non-JSON for describe_table"),
         ("deep", "upstream returned non-JSON for describe_table"),
         ("huge", "too large"),
+        ("infinity_text", "upstream returned non-JSON for describe_table"),
+        ("nan_text", "upstream returned non-JSON for describe_table"),
     ],
 )
 async def test_shape_mismatch_upstream_unavailable(tool: str, message: str) -> None:
@@ -331,3 +334,136 @@ async def test_jmespath_runtime_error_is_upstream_unavailable() -> None:
             await source.describe_table(ORDERS)
     assert info.value.code == "upstream_unavailable"
     assert "length(no_such_field)" in info.value.message
+
+
+def _single(op: str, spec: dict[str, Any]) -> McpMapping:
+    return parse_mapping({"version": 1, "operations": {op: spec}}, where="test")
+
+
+class _StubSession:
+    """Hands the adapter already-decoded structuredContent with non-finite floats, as a
+    real HTTP upstream can (pydantic's JSON parser accepts Infinity/NaN); the SDK's
+    in-memory transport would turn them into null first."""
+
+    def __init__(self, tool: str, body: dict[str, Any]) -> None:
+        self.tool, self.body = tool, body
+
+    async def initialize(self) -> None:
+        return None
+
+    async def list_tools(self, *, params: Any = None) -> ListToolsResult:
+        return ListToolsResult(tools=[Tool(name=self.tool, input_schema={"type": "object"})])
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> CallToolResult:
+        return CallToolResult(content=[], structured_content=self.body)
+
+
+def _stub_factory(tool: str, body: dict[str, Any]) -> Any:
+    @asynccontextmanager
+    async def factory(_c: McpSourceConfig, _t: str | None) -> AsyncIterator[Any]:
+        yield _StubSession(tool, body)
+
+    return factory
+
+
+@pytest.mark.parametrize("bad", [float("inf"), float("-inf"), float("nan")])
+async def test_non_finite_structured_numbers_are_upstream_unavailable(bad: float) -> None:
+    describe = _single(
+        "describe_table",
+        {
+            "tool": "t",
+            "arguments": {"full_name": "{full_name}"},
+            "result": {"fields": {"columns": DESCRIBE_FIELDS["columns"]}},
+        },
+    )
+    body = {"columns": [{"name": "a", "type": "int", "position": bad}]}
+    source = McpUpstreamSource(config(), describe, session_factory=_stub_factory("t", body))
+    async with started(source):
+        with pytest.raises(LakeloomError) as info:
+            await source.describe_table(ORDERS)
+    assert info.value.code == "upstream_unavailable"
+    assert "columns[0].position" in info.value.message
+
+    profile = _single(
+        "profile_table",
+        {
+            "tool": "t",
+            "arguments": {"full_name": "{full_name}"},
+            "result": {"fields": {"row_count": "rows", "columns": "columns"}},
+        },
+    )
+    policy = ProfilePolicy(
+        samples=False, sensitive_tags=[], top_k=1, low_cardinality=1, value_max_length=1
+    )
+    for body in (
+        {"rows": 3, "columns": [{"name": "a", "null_rate": bad}]},
+        {"rows": bad, "columns": []},
+    ):
+        source = McpUpstreamSource(config(), profile, session_factory=_stub_factory("t", body))
+        async with started(source):
+            with pytest.raises(LakeloomError) as info:
+                await source.profile_table(ORDERS, policy)
+        assert info.value.code == "upstream_unavailable"
+
+
+def _paged(tool: str, **arguments: Any) -> McpMapping:
+    return _single(
+        "describe_table",
+        {
+            "tool": tool,
+            "arguments": {
+                "full_name": "{full_name}",
+                "column_offset": "{column_offset}",
+                **arguments,
+            },
+            "result": {
+                "fields": {
+                    "comment": "comment",
+                    "columns": DESCRIBE_FIELDS["columns"],
+                    "columns_truncated": "truncated",
+                }
+            },
+            "column_pagination": {"more": "more"},
+        },
+    )
+
+
+async def test_fr_src_05_describe_follows_column_pages() -> None:
+    fake = Fake()
+    source = McpUpstreamSource(
+        config(), _paged("get_table_paged"), session_factory=factory_for(fake)
+    )
+    async with started(source):
+        desc = await source.describe_table(ORDERS)
+    assert [c.name for c in desc.columns] == ["order_id", "customer_id", "status"]
+    assert "lakeloom.columns_truncated" not in desc.properties
+    offsets = [c[1]["offset"] for c in fake.calls if c[0] == "get_table_paged"]
+    assert offsets == [None, 1, 2]  # first page omits the offset; then it is an integer
+
+
+async def test_fr_src_05_partial_column_page_is_flagged_truncated() -> None:
+    # The upstream claims more columns but returns an empty page: keep what we have, flag it.
+    source = McpUpstreamSource(
+        config(), _paged("get_table_paged", empty_after=2), session_factory=factory_for(Fake())
+    )
+    async with started(source):
+        desc = await source.describe_table(ORDERS)
+    assert [c.name for c in desc.columns] == ["order_id", "customer_id"]
+    assert desc.properties["lakeloom.columns_truncated"] == "true"
+
+    # A mapping without column paging still surfaces the upstream's own truncation flag.
+    partial = _single(
+        "describe_table",
+        {
+            "tool": "get_table_partial",
+            "arguments": {"full_name": "{full_name}"},
+            "result": {
+                "fields": {"columns": DESCRIBE_FIELDS["columns"], "columns_truncated": "truncated"}
+            },
+        },
+    )
+    source = McpUpstreamSource(config(), partial, session_factory=factory_for(Fake()))
+    async with started(source):
+        desc = await source.describe_table(ORDERS)
+    assert len(desc.columns) == 1
+    assert desc.properties["lakeloom.columns_truncated"] == "true"

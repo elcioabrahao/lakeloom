@@ -53,6 +53,12 @@ operations:
     arguments:
       entityType: table
       fqn: "{om_service}.{full_name}"
+      # OM drops columns beyond its response-size budget unless asked page by page; page
+      # explicitly (the first call omits columnOffset) and stop on hasMoreColumns=false.
+      # `columnsTruncated` is not mapped: OM sets it on every slice, the last one included.
+      columnOffset: "{column_offset}"
+      columnLimit: 200
+    column_pagination: {more: hasMoreColumns}
     result:
       fields:
         comment: description

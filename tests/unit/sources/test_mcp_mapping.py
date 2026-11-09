@@ -134,6 +134,19 @@ def test_fr_src_05_mapping_yaml_validation_errors(tmp_path: Path) -> None:
         {"operations": {"list_tables": {"tool": "t", "result": {"fields": {"name": "n"}}}}}, "items"
     )
 
+    describe = {"tool": "t", "result": {"fields": {"columns": "c"}}}
+    bad(
+        {"operations": {"describe_table": {**describe, "arguments": {"o": "{column_offset}"}}}},
+        "column_pagination",
+    )
+    bad(
+        {"operations": {"describe_table": {**describe, "column_pagination": {"more": "m"}}}},
+        "column_offset",
+    )
+    assert render_arguments(
+        {"o": "{column_offset}", "s": "p{column_offset}"}, {"column_offset": 3}
+    ) == {"o": 3, "s": "p3"}
+
     path = tmp_path / "m.yaml"
     path.write_text("version: 1\noperations: [\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="invalid YAML"):

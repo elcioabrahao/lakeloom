@@ -15,6 +15,7 @@ not match the mapping is ``upstream_unavailable`` naming the operation and JMESP
 
 import asyncio
 import json
+import math
 import os
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
@@ -62,6 +63,7 @@ MAX_PAYLOAD_CHARS = 8 * 1024 * 1024  # text content decoded at most this long
 MAX_PAGES = 100
 MAX_ITEMS = 10_000
 MAX_NAME = 1024  # identifiers, types, tags, cursors
+COLUMNS_TRUNCATED = "lakeloom.columns_truncated"
 MAX_TEXT = 64 * 1024  # comments (quote_untrusted cuts further when rendering)
 _HINT = "check that the upstream MCP server is running and matches the mapping, then retry"
 
@@ -76,6 +78,11 @@ def _eval(operation: str, expression: str, data: object) -> object:
             f"{expression!r} failed ({type(exc).__name__})",
             hint="update the mapping to the upstream's result shape",
         ) from None
+
+
+def _reject_constant(token: str) -> object:
+    """``json.loads`` hook: NaN / Infinity / -Infinity are not JSON; refuse them."""
+    raise ValueError(f"non-finite number {token}")
 
 
 def _kind(exc: BaseException) -> str:
@@ -166,20 +173,33 @@ def _objects(value: object, path: str, *, required: bool) -> list[dict[str, obje
     return cast("list[dict[str, object]]", items)
 
 
+def _finite(value: object) -> bool:
+    """A real JSON number: not bool, and not NaN/Infinity (which also arrive via
+    already-decoded ``structuredContent``)."""
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int | float)
+        and (isinstance(value, int) or math.isfinite(value))
+    )
+
+
 def _int(value: object, path: str, *, required: bool = False) -> int | None:
     if value is None and not required:
         return None
-    if isinstance(value, bool) or not isinstance(value, int | float) or value != int(value):
+    if not _finite(value):
         raise _Shape(path, "an integer")
-    return int(value)
+    number = cast("int | float", value)
+    if isinstance(number, float) and not number.is_integer():
+        raise _Shape(path, "an integer")
+    return int(number)
 
 
 def _float(value: object, path: str) -> float | None:
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise _Shape(path, "a number")
-    return float(value)
+    if not _finite(value):
+        raise _Shape(path, "a finite number")
+    return float(cast("int | float", value))
 
 
 def _bool(value: object, path: str, default: bool) -> bool:
@@ -430,7 +450,7 @@ class McpUpstreamSource:
         return op
 
     async def _call(
-        self, name: OperationName, op: OperationMapping, values: dict[str, str | None]
+        self, name: OperationName, op: OperationMapping, values: dict[str, str | int | None]
     ) -> object:
         assert self._session is not None  # noqa: S101 - checked by _operation
         arguments = render_arguments(op.arguments, values)
@@ -469,7 +489,7 @@ class McpUpstreamSource:
         if len(text) > MAX_PAYLOAD_CHARS:
             raise _unavailable(f"upstream result for {name} is too large ({len(text)} chars)")
         try:
-            return cast("object", json.loads(text))
+            return cast("object", json.loads(text, parse_constant=_reject_constant))
         except (ValueError, RecursionError):
             raise _unavailable(f"upstream returned non-JSON for {name}") from None
 
@@ -486,7 +506,7 @@ class McpUpstreamSource:
         return None if expression is None else _eval(name, expression, data)
 
     async def _list(
-        self, name: OperationName, values: dict[str, str | None]
+        self, name: OperationName, values: dict[str, str | int | None]
     ) -> list[dict[str, object]]:
         op = self._operation(name)
         items: list[dict[str, object]] = []
@@ -534,7 +554,7 @@ class McpUpstreamSource:
                 raise self._shape_error(name, op, "name", exc) from None
         return out
 
-    def _base_values(self) -> dict[str, str | None]:
+    def _base_values(self) -> dict[str, str | int | None]:
         return {"om_service": self.om_service}
 
     async def list_catalogs(self) -> list[str]:
@@ -564,7 +584,7 @@ class McpUpstreamSource:
             refs.append(TableRef(catalog=cat or catalog, schema=sch or schema, name=table))
         return refs
 
-    def _table_values(self, ref: TableRef) -> dict[str, str | None]:
+    def _table_values(self, ref: TableRef) -> dict[str, str | int | None]:
         return {
             **self._base_values(),
             "catalog": ref.catalog,
@@ -581,15 +601,16 @@ class McpUpstreamSource:
 
     async def describe_table(self, ref: TableRef) -> TableDescription:
         name: OperationName = "describe_table"
-        op, payload = await self._table_payload(name, ref)
+        op = self._operation(name)
+        values: dict[str, str | int | None] = {**self._table_values(ref), "column_offset": None}
+        payload = await self._call(name, op, values)
         key = "columns"
         try:
-            columns = [
-                self._column(c, i)
-                for i, c in enumerate(
-                    _objects(self._field(name, op, key, payload), "columns[]", required=True)
-                )
-            ]
+            raw_columns = _objects(self._field(name, op, key, payload), "columns[]", required=True)
+            raw_columns, truncated = await self._more_columns(
+                name, op, values, payload, raw_columns
+            )
+            columns = [self._column(c, i) for i, c in enumerate(raw_columns)]
             key = "comment"
             comment = self._untrusted(self._field(name, op, key, payload), "comment")
             key = "constraints"
@@ -608,6 +629,9 @@ class McpUpstreamSource:
             version = self._version(name, op, payload)
         except _Shape as exc:
             raise self._shape_error(name, op, key, exc) from None
+        if truncated:
+            # Surfaced, never silent: the agent sees the column list is incomplete.
+            properties[COLUMNS_TRUNCATED] = "true"
         return TableDescription(
             ref=ref,
             comment=comment,
@@ -620,6 +644,32 @@ class McpUpstreamSource:
             storage_location=location,
             version=version,
         )
+
+    async def _more_columns(
+        self,
+        name: OperationName,
+        op: OperationMapping,
+        values: dict[str, str | int | None],
+        payload: object,
+        columns: list[dict[str, object]],
+    ) -> tuple[list[dict[str, object]], bool]:
+        """Follow ``column_pagination``; returns the columns and whether the list is cut."""
+        paging = op.column_pagination
+        last = payload
+        if paging is not None:
+            pages = 1
+            while _eval(name, paging.more, last):
+                if pages >= MAX_PAGES or len(columns) >= MAX_ITEMS:
+                    return columns, True
+                last = await self._call(name, op, {**values, "column_offset": len(columns)})
+                page = _objects(self._field(name, op, "columns", last), "columns[]", required=True)
+                if not page:
+                    return columns, True  # upstream says "more" but sends nothing
+                columns = [*columns, *page]
+                pages += 1
+            if len(columns) > MAX_ITEMS:
+                raise _Shape("columns[]", f"at most {MAX_ITEMS} items")
+        return columns, bool(self._field(name, op, "columns_truncated", last))
 
     def _untrusted(self, value: object, path: str) -> UntrustedText | None:
         if value is None or value == "":

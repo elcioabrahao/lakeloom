@@ -139,11 +139,13 @@ scans of table metadata and profiles.
           fields: {<field>: <JMESPath>}
         pagination: {cursor: <JMESPath>}  # list operations; needs a {cursor} argument
         not_found: <JMESPath>  # optional, evaluated on an isError result -> not_found
+        column_pagination: {more: <JMESPath>}  # describe_table only; needs {column_offset}
     ```
 
     Placeholders: `{catalog}`, `{schema}`, `{name}`, `{full_name}`, `{cursor}` from the
     brief, plus `{om_service}` (the source's configured `om_service`) so one mapping serves
-    any OM service. Allowed per operation (checked at load): list_catalogs `om_service,
+    any OM service, and `{column_offset}` (an integer: the number of columns received so far;
+    describe_table with `column_pagination` only). Allowed per operation (checked at load): list_catalogs `om_service,
     cursor`; list_schemas `+catalog`; list_tables `+schema`; table operations `catalog,
     schema, name, full_name, om_service`. A leaf that is exactly one placeholder becomes the
     raw value, or is omitted when the value is absent (first page cursor, no catalog). An
@@ -153,16 +155,24 @@ scans of table metadata and profiles.
     Fields: list_catalogs/list_schemas `name`; list_tables `name` (+ optional `catalog`,
     `schema`, defaulting to the request); describe_table `columns` (required; JMESPath
     yielding objects with `name`, `data_type`, `nullable`, `comment`, `tags`, `position`),
-    `comment`, `tags`, `owners`, `partition_columns`, `constraints` (objects with `kind`
+    `columns_truncated` (truthy on the last page = upstream dropped columns), `comment`, `tags`,
+    `owners`, `partition_columns`, `constraints` (objects with `kind`
     `PRIMARY_KEY`/`FOREIGN_KEY` case-insensitive, `columns`, `ref_columns`, optional
     `ref_table`; dotted `ref_columns` like `svc.db.schema.table.col` yield the referenced
     table and column), `properties`, `storage_location`, `version`, `committed_at`;
     get_table_version `version`, `committed_at`; profile_table `row_count`, `columns`
     (`name`, `null_rate`, `distinct_count`). Unmapped operations are capability-off and raise
     `validation_error`.
+  - **Column pages.** With `column_pagination`, describe_table repeats the call with
+    `{column_offset}` = columns so far while `more` is truthy (the first call omits it).
+    The description is never silently short: if the upstream stops early (empty page), the
+    100-page / 10 000-column caps are hit, or `columns_truncated` holds on the last page, the
+    columns received are returned with property `lakeloom.columns_truncated: "true"`.
   - **Results are untrusted (NFR-SEC-14).** Read from `structuredContent`, else the first
     text content JSON-decoded (at most 8 MiB; non-JSON or too-deep JSON is
-    `upstream_unavailable` "upstream returned non-JSON for <operation>"). Comments become
+    `upstream_unavailable` "upstream returned non-JSON for <operation>"; `NaN`/`Infinity` tokens
+    are rejected too). Numbers must be finite, also when they arrive already decoded in
+    `structuredContent`; a non-finite or non-integral count is a shape mismatch. Comments become
     `UntrustedText(source="mcp:<source name>")`; names, types and tags are data only,
     bounded to 1024 characters, lists to 10 000 items, pagination to 100 pages (a repeated
     cursor stops). Lakeloom only ever calls tools named in the mapping *and* present in
@@ -202,7 +212,11 @@ scans of table metadata and profiles.
     searches may also return `tableColumn` documents). describe_table uses
     `get_entity_details` with `entityType: table`, `fqn: "{om_service}.{full_name}"`:
     `description`, `tags[].tagFQN`, `owners[].name`, `columns[]` (`dataTypeDisplay`,
-    `ordinalPosition`, `constraint != 'NOT_NULL'`), `tableConstraints[]`; a missing table is
+    `ordinalPosition`, `constraint != 'NOT_NULL'`), `tableConstraints[]`. OM drops columns
+    past its response-size budget unless paged, flagging `columnsTruncated`/`hasMoreColumns`
+    (verified live), so the mapping sends `columnOffset: "{column_offset}"`, `columnLimit:
+    200` and pages on `hasMoreColumns`. `columnsTruncated` is not mapped, because OM sets it on
+    every slice, the last one included; a missing table is
     `isError` with `statusCode: 404` -> `not_found`. OM's catalog = OM database, schema = OM
     databaseSchema. get_table_version and profile_table are not mapped (OM's entity
     `version` is a metadata revision, not a table version).

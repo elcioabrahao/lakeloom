@@ -14,8 +14,9 @@ expressions that pick the operation's fields out of the tool result. Example::
         not_found: "statusCode == `404`"
 
 Argument string leaves may contain the placeholders ``{catalog}``, ``{schema}``,
-``{name}``, ``{full_name}``, ``{cursor}`` and ``{om_service}`` (which ones depends on the
-operation; checked at load time). A leaf that is exactly one placeholder is replaced by the
+``{name}``, ``{full_name}``, ``{cursor}``, ``{om_service}`` and ``{column_offset}`` (an
+integer; describe_table with ``column_pagination``) — which ones depends on the operation,
+checked at load time. A leaf that is exactly one placeholder is replaced by the
 raw value, or dropped when the value is absent (the first page has no ``{cursor}``). An
 embedded placeholder is substituted textually, and its value must not contain ``"``, ``\\``
 or control characters, so agent-supplied names cannot break out of a JSON string in the
@@ -71,7 +72,7 @@ PLACEHOLDERS: dict[str, frozenset[str]] = {
     "list_catalogs": frozenset({"om_service", "cursor"}),
     "list_schemas": frozenset({"catalog", "om_service", "cursor"}),
     "list_tables": frozenset({"catalog", "schema", "om_service", "cursor"}),
-    "describe_table": _TABLE,
+    "describe_table": _TABLE | {"column_offset"},
     "get_table_version": _TABLE,
     "profile_table": _TABLE,
 }
@@ -83,6 +84,7 @@ FIELDS: dict[str, frozenset[str]] = {
         {
             "comment",
             "columns",
+            "columns_truncated",
             "partition_columns",
             "constraints",
             "tags",
@@ -157,11 +159,26 @@ class PaginationMapping(_Base):
         return _check_jmespath(value)
 
 
+class ColumnPagination(_Base):
+    """describe_table only: fetch further column pages while ``more`` is truthy.
+
+    The adapter passes the number of columns received so far as ``{column_offset}``.
+    """
+
+    more: str
+
+    @field_validator("more")
+    @classmethod
+    def _more(cls, value: str) -> str:
+        return _check_jmespath(value)
+
+
 class OperationMapping(_Base):
     tool: str = Field(min_length=1, max_length=128)
     arguments: dict[str, Any] = {}
     result: ResultMapping
     pagination: PaginationMapping | None = None
+    column_pagination: ColumnPagination | None = None
     # Evaluated on an error result: truthy means the object does not exist (not_found).
     not_found: str | None = None
 
@@ -195,9 +212,15 @@ def _placeholders(template: object) -> set[str]:
 def _check_operation(name: str, op: OperationMapping) -> list[str]:
     problems: list[str] = []
     allowed = PLACEHOLDERS[name] if op.pagination else PLACEHOLDERS[name] - {"cursor"}
+    if op.column_pagination is None:
+        allowed = allowed - {"column_offset"}
     for placeholder in sorted(_placeholders(op.arguments) - allowed):
         if placeholder == "cursor":
             problems.append(f"{name}: {{cursor}} is used but no pagination is configured")
+        elif placeholder == "column_offset" and name == "describe_table":
+            problems.append(
+                f"{name}: {{column_offset}} is used but no column_pagination is configured"
+            )
         else:
             problems.append(f"{name}: placeholder {{{placeholder}}} is not allowed here")
     if op.pagination is not None:
@@ -211,6 +234,11 @@ def _check_operation(name: str, op: OperationMapping) -> list[str]:
     missing = sorted(REQUIRED_FIELDS[name] - set(op.result.fields))
     if missing:
         problems.append(f"{name}: result fields {missing} are required")
+    if op.column_pagination is not None:
+        if name != "describe_table":
+            problems.append(f"{name}: column_pagination is only allowed on describe_table")
+        elif "column_offset" not in _placeholders(op.arguments):
+            problems.append(f"{name}: column_pagination needs a {{column_offset}} argument")
     if name in LIST_OPERATIONS and op.result.items is None:
         problems.append(f"{name}: result.items is required for list operations")
     return problems
@@ -245,7 +273,7 @@ def load_mapping(path: Path) -> McpMapping:
 _ABSENT = object()
 
 
-def _render(template: object, values: Mapping[str, str | None]) -> object:
+def _render(template: object, values: Mapping[str, str | int | None]) -> object:
     if isinstance(template, str):
         whole = _PLACEHOLDER.fullmatch(template)
         if whole:
@@ -270,6 +298,7 @@ def _render(template: object, values: Mapping[str, str | None]) -> object:
                         else f"pass {key} explicitly"
                     ),
                 )
+            value = str(value)
             if _UNSAFE_EMBEDDED.search(value):
                 raise LakeloomError(
                     "validation_error",
@@ -295,7 +324,7 @@ def _render(template: object, values: Mapping[str, str | None]) -> object:
 
 
 def render_arguments(
-    template: Mapping[str, Any], values: Mapping[str, str | None]
+    template: Mapping[str, Any], values: Mapping[str, str | int | None]
 ) -> dict[str, Any]:
     """Fill an argument template; unknown placeholder raises ``ConfigError``."""
     return cast("dict[str, Any]", _render(template, values))

@@ -104,6 +104,38 @@ class Fake:
             calls.append(("huge", {"full_name": full_name}))
             return '{"columns": [], "pad": "' + "x" * (9 * 1024 * 1024) + '"}'
 
+        @server.tool(structured_output=False)
+        def infinity_text(full_name: str) -> str:
+            calls.append(("infinity_text", {"full_name": full_name}))
+            return '{"columns": [{"name": "a", "type": "int", "position": Infinity}]}'
+
+        @server.tool(structured_output=False)
+        def nan_text(full_name: str) -> str:
+            calls.append(("nan_text", {"full_name": full_name}))
+            return '{"columns": [{"name": "a", "type": "int", "position": NaN}]}'
+
+        @server.tool()
+        def get_table_paged(
+            full_name: str, column_offset: int | None = None, empty_after: int = -1
+        ) -> CallToolResult:
+            """One column per page; ``empty_after`` simulates an upstream that lies."""
+            calls.append(("get_table_paged", {"full_name": full_name, "offset": column_offset}))
+            cols = TABLES["orders"]["columns"]
+            start = column_offset or 0
+            page = [] if 0 <= empty_after <= start else cols[start : start + 1]
+            body = {"comment": "paged", "columns": page, "more": start + 1 < len(cols)}
+            return CallToolResult(
+                content=[TextContent(type="text", text="{}")], structured_content=body
+            )
+
+        @server.tool()
+        def get_table_partial(full_name: str) -> CallToolResult:
+            calls.append(("get_table_partial", {"full_name": full_name}))
+            body = {"columns": TABLES["orders"]["columns"][:1], "truncated": True}
+            return CallToolResult(
+                content=[TextContent(type="text", text="{}")], structured_content=body
+            )
+
         @server.tool()
         def drop_all() -> dict[str, Any]:
             calls.append(("drop_all", {}))
