@@ -261,4 +261,12 @@ def scan_cmd(
             if record.status == "failed":
                 raise typer.Exit(code=1)
 
-    _run(_go())
+    try:
+        _run(_go())
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        # Like `db upgrade`: no traceback, and only the error type (the message may hold
+        # a DB URL or upstream text).
+        typer.echo(f"scan failed ({type(exc).__name__})", err=True)
+        raise typer.Exit(code=1) from None

@@ -199,6 +199,25 @@ def test_cli_unknown_source_is_typed_error(monkeypatch: pytest.MonkeyPatch, tmp_
     assert "error not_found" in result.output
 
 
+def test_cli_scan_unexpected_error_exits_1_without_traceback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _sources_env(monkeypatch, tmp_path)
+
+    async def boom(*_: Any, **__: Any) -> None:
+        raise RuntimeError("postgresql://user:secret@db/x")
+
+    monkeypatch.setattr("lakeloom.core.scans.ScanService.scan", boom)
+
+    result = CliRunner().invoke(app, ["scan", "lake"])
+
+    assert result.exit_code == 1
+    assert "scan failed (RuntimeError)" in result.output
+    assert "secret" not in result.output
+    assert "Traceback" not in result.output
+    assert not isinstance(result.exception, RuntimeError)
+
+
 def test_cli_missing_config_file_exits_2(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _sources_env(monkeypatch, tmp_path)
     monkeypatch.setenv("LAKELOOM_CONFIG_FILE", str(tmp_path / "nope.yaml"))
