@@ -29,12 +29,14 @@ scans of table metadata and profiles.
   `to_dict()` is the tool error shape.
 - **New settings.**
 
-  | Variable | Default |
-  |---|---|
-    | `LAKELOOM_PROFILE_TOPK` | 10 |
-    | `LAKELOOM_PROFILE_LOW_CARDINALITY` | 50 (distinct values) |
-    | `LAKELOOM_PROFILE_VALUE_MAX_LENGTH` | 64 (characters) |
-    | `LAKELOOM_SCAN_CONCURRENCY` | 8 |
+  | Variable | Default | Allowed |
+  |---|---|---|
+  | `LAKELOOM_PROFILE_TOPK` | 10 | 1–1000 |
+  | `LAKELOOM_PROFILE_LOW_CARDINALITY` | 50 (distinct values) | 1–100 000 |
+  | `LAKELOOM_PROFILE_VALUE_MAX_LENGTH` | 64 (characters) | 1–10 000 |
+  | `LAKELOOM_SCAN_CONCURRENCY` | 8 | 1–256 |
+
+  Values outside the range fail settings validation at startup.
 
 - **Delta tags, owners and constraints.** Delta has no native tags, owners or constraints.
   Lakeloom resolves them from two mechanisms, in precedence order:

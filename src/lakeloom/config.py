@@ -87,10 +87,10 @@ class Settings(BaseSettings):
     sensitive_tags: Annotated[list[str], NoDecode] = ["PII.*"]
     max_proposal_ops: int = 50
     # M1a additions (docs/decisions/0008-lake-sources-design.md)
-    profile_topk: int = 10
-    profile_low_cardinality: int = 50
-    profile_value_max_length: int = 64
-    scan_concurrency: int = 8
+    profile_topk: int = Field(default=10, ge=1, le=1000)
+    profile_low_cardinality: int = Field(default=50, ge=1, le=100_000)
+    profile_value_max_length: int = Field(default=64, ge=1, le=10_000)
+    scan_concurrency: int = Field(default=8, ge=1, le=256)
     triplestore_enabled: bool = False
     # None means "auto": False in production, True in development (resolved after validation).
     stdio_enabled: bool | None = None

@@ -186,3 +186,24 @@ def test_nfr_sec_11_db_url_and_file_both_set_is_error(
     text = str(exc.value) + repr(exc.value)
     assert "hunter2" not in text
     assert "fromfile" not in text
+
+
+BOUNDS = [
+    ("LAKELOOM_PROFILE_TOPK", "profile_topk", 1, 1000),
+    ("LAKELOOM_PROFILE_LOW_CARDINALITY", "profile_low_cardinality", 1, 100_000),
+    ("LAKELOOM_PROFILE_VALUE_MAX_LENGTH", "profile_value_max_length", 1, 10_000),
+    ("LAKELOOM_SCAN_CONCURRENCY", "scan_concurrency", 1, 256),
+]
+
+
+@pytest.mark.parametrize(("env", "field", "low", "high"), BOUNDS)
+def test_fr_src_09_profile_and_scan_settings_are_bounded(
+    monkeypatch: pytest.MonkeyPatch, env: str, field: str, low: int, high: int
+) -> None:
+    for ok in (low, high):
+        monkeypatch.setenv(env, str(ok))
+        assert getattr(Settings(), field) == ok
+    for bad in (low - 1, high + 1):
+        monkeypatch.setenv(env, str(bad))
+        with pytest.raises(ValidationError):
+            Settings()
