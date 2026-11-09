@@ -206,13 +206,17 @@ def describe_markdown(source: str, d: TableDescription) -> str:
 
 
 def _withhold(record: ScanRecord) -> ScanRecord:
-    """Drop raw values from any column profile whose values are withheld (FR-SRC-09)."""
+    """Drop raw values from columns tagged sensitive (FR-SRC-09, ADR 0008).
+
+    Defence in depth: profiling already withholds them. Columns withheld only because
+    samples are disabled keep their numeric/date min/max, which are aggregates.
+    """
     for table in record.tables:
         if table.profile is None:
             continue
         columns: list[ColumnProfile] = [
             c.model_copy(update={"min": None, "max": None, "top_k": None})
-            if c.values_withheld
+            if c.values_withheld == "sensitive"
             else c
             for c in table.profile.columns
         ]

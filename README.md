@@ -164,10 +164,10 @@ docker compose -f deploy/compose/docker-compose.yml exec lakeloom lakeloom scan 
 ```
 
 **Privacy defaults.** Profiles are computed where the data lives; no data is exported.
-Sample values (min/max, top-k) are off by default (`LAKELOOM_PROFILE_SAMPLES=false`); when
-enabled, columns tagged with a sensitive tag (`LAKELOOM_SENSITIVE_TAGS`, default `PII.*`)
-never yield values, and values are truncated to `LAKELOOM_PROFILE_VALUE_MAX_LENGTH`
-(default 64). Upstream MCP sources contribute aggregates only. Lake comments and upstream
+Top-k values and string min/max are off by default (`LAKELOOM_PROFILE_SAMPLES=false`);
+numeric/date min/max are aggregates and always reported; columns tagged with a sensitive
+tag (`LAKELOOM_SENSITIVE_TAGS`, default `PII.*`) never expose values. When samples are
+enabled, values are truncated to `LAKELOOM_PROFILE_VALUE_MAX_LENGTH` (default 64). Upstream MCP sources contribute aggregates only. Lake comments and upstream
 text are untrusted: tool outputs show them as quoted blocks flagged `untrusted`.
 
 Unity Catalog OSS keeps its state inside its container, so recreating the container drops

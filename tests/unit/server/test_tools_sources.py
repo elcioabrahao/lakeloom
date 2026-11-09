@@ -300,17 +300,23 @@ async def test_fr_src_10_scan_lake_source(make_deps: DepsFactory, kit: AuthKit) 
     assert record["id"] == data["scan_id"]
     assert len(record["tables"]) == 4
     assert all(t["version"]["version"] is not None for t in record["tables"])
-    # Samples are off by default: profiles carry no raw values (FR-SRC-09).
+    # Samples are off by default: no top-k values, no string min/max (FR-SRC-09); numeric
+    # and date min/max are aggregates and stay reported (ADR 0008 §Profiling).
+    numeric_minmax = 0
     for table in record["tables"]:
         for col in table["profile"]["columns"]:
             assert col["top_k"] is None
-            assert col["min"] is None
-            assert col["max"] is None
+            assert col["values_withheld"] in ("samples_disabled", "sensitive")
+            if col["min"] is not None:
+                numeric_minmax += 1
+    assert numeric_minmax > 0
     assert data["summary"].startswith(f"# Scan {data['scan_id']}")
     assert text(result) == data["summary"]
     stored = await deps.scans._repo.get(data["scan_id"])  # pyright: ignore[reportPrivateUsage]
     assert stored.client == "pytest-agent"
     assert stored.principal_subject == "user-123"
+    # The MCP layer exposes exactly what is stored (FR-SRC-09, FR-SRC-10).
+    assert record == stored.model_dump(mode="json", by_alias=True)
     assert tool_calls("scan_lake_source", "ok") == before + 1
 
 
