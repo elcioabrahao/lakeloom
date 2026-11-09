@@ -1,5 +1,6 @@
 """CLI tests (NFR-OSS-01 console entry point; FR-AGT-07 ``lakeloom serve``)."""
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -128,3 +129,81 @@ def test_cli_serve_disables_uvicorn_access_log(
 
     assert result.exit_code == 0, result.output
     assert calls[0]["access_log"] is False
+
+
+# --- lake source commands (FR-AGT-07, FR-SRC-10) ---------------------------------------------
+
+FIXTURE = Path(__file__).parents[1] / "fixtures" / "lake"
+LOG_CALLS: list[tuple[str, Any, Any]] = []
+
+
+def _sources_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    entries = "\n".join(
+        f"      - {{uri: {(FIXTURE / n).as_uri()}, catalog: retail, schema: sales}}"
+        for n in ("customers", "products", "orders", "invoices")
+    )
+    config = tmp_path / "sources.yaml"
+    config.write_text(f"sources:\n  - type: delta\n    name: lake\n    tables:\n{entries}\n")
+    monkeypatch.delenv("LAKELOOM_OM_URL", raising=False)
+    # A real handler would outlive CliRunner's captured stderr; record the call instead.
+    monkeypatch.setattr(
+        "lakeloom.cli.configure_logging",
+        lambda level, stream=None: LOG_CALLS.append((level, stream, sys.stderr)),
+    )
+    for name, value in {
+        "LAKELOOM_CONFIG_FILE": str(config),
+        "LAKELOOM_DATA_DIR": str(tmp_path),
+        "LAKELOOM_DB_URL": f"sqlite:///{tmp_path}/l.db",
+        "LAKELOOM_LOG_LEVEL": "WARNING",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+
+def test_cli_scan_prints_summary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _sources_env(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(app, ["scan", "lake", "--profile", "--table", "orders"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("# Scan scan_")
+    assert "- Status: completed" in result.output
+    assert "`retail.sales.orders`: version 1" in result.output
+    assert "customers" not in result.output
+    # stdout is the command's output: logs go to stderr.
+    level, stream, stderr_at_call = LOG_CALLS[-1]
+    assert level == "WARNING"
+    assert stream is stderr_at_call
+
+
+def test_cli_sources_and_tables(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _sources_env(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    listed = runner.invoke(app, ["sources"])
+    tables = runner.invoke(app, ["tables", "lake"])
+
+    assert listed.exit_code == 0, listed.output
+    assert listed.output == "lake\tdelta\tavailable\n"
+    assert tables.exit_code == 0, tables.output
+    lines = tables.output.splitlines()
+    assert len(lines) == 4
+    assert "retail.sales.orders\t1" in lines
+
+
+def test_cli_unknown_source_is_typed_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _sources_env(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(app, ["scan", "ghost"])
+
+    assert result.exit_code == 1
+    assert "error not_found" in result.output
+
+
+def test_cli_missing_config_file_exits_2(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _sources_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("LAKELOOM_CONFIG_FILE", str(tmp_path / "nope.yaml"))
+
+    result = CliRunner().invoke(app, ["sources"])
+
+    assert result.exit_code == 2
+    assert "configuration error" in result.output

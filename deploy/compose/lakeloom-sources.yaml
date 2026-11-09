@@ -1,0 +1,40 @@
+# Lake sources of the dev stack (FR-SRC-01, NFR-SEC-13). Operator-managed: mounted read-only
+# into the lakeloom service at /etc/lakeloom/sources.yaml (LAKELOOM_CONFIG_FILE). Agents can
+# only name these sources; they can never add one or pass a URL.
+#
+# All three expose the same fixture lake (tests/fixtures/lake, mounted at /lake):
+# catalog `retail`, schema `sales`, tables customers/products/orders/invoices, registered in
+# OpenMetadata under the database service `lakeloom_fixture` by the om-seed one-shot.
+sources:
+  # Delta tables read straight from storage with delta-rs.
+  - type: delta
+    name: fixture_delta
+    om_service: lakeloom_fixture
+    tables:
+      - {uri: "file:///lake/customers", catalog: retail, schema: sales}
+      - {uri: "file:///lake/products", catalog: retail, schema: sales}
+      - {uri: "file:///lake/orders", catalog: retail, schema: sales}
+      - {uri: "file:///lake/invoices", catalog: retail, schema: sales}
+
+  # Unity Catalog OSS (no auth in dev); tables registered by uc-init at file:///lake/<table>.
+  # read_storage: versions and profiles come from the Delta log, which Lakeloom also sees
+  # at /lake, so no storage_root_map is needed. `catalogs` hides the image's built-in
+  # `unity` sample catalog, whose storage is not reachable from Lakeloom.
+  - type: unity_catalog
+    name: fixture_uc
+    url: http://unitycatalog:8080
+    catalogs: [retail]
+    read_storage: true
+    om_service: lakeloom_fixture
+
+  # OpenMetadata's own MCP server as an upstream MCP source (FR-SRC-05). The bearer token
+  # is the ingestion-bot JWT that om-bootstrap writes to the om-secrets volume; token_file
+  # is read at startup and never logged. The mapping is examples/mcp-mappings, mounted
+  # read-only at /etc/lakeloom/mappings.
+  - type: mcp
+    name: openmetadata_mcp
+    transport: streamable_http
+    url: http://openmetadata-server:8585/mcp
+    token_file: /secrets/om_bot_token
+    mapping: /etc/lakeloom/mappings/openmetadata.yaml
+    om_service: lakeloom_fixture

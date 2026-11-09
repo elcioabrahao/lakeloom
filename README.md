@@ -107,7 +107,7 @@ TOKEN=$(curl -s http://localhost:8180/realms/lakeloom/protocol/openid-connect/to
   -d client_secret=dev-agent-secret | python3 -c 'import sys, json; print(json.load(sys.stdin)["access_token"])')
 ```
 
-Register Lakeloom in Claude Code and ask it to call `get_server_info`:
+Register Lakeloom in Claude Code and ask it to call `get_server_info` (or `list_sources`):
 
 ```bash
 claude mcp add --transport http lakeloom http://localhost:8000/mcp \
@@ -117,6 +117,62 @@ claude mcp add --transport http lakeloom http://localhost:8000/mcp \
 Any other MCP client that supports Streamable HTTP works the same way: point it at
 `http://localhost:8000/mcp` and send the bearer token. Tokens are short-lived; fetch a new one
 when it expires.
+
+### Lake sources and scans
+
+Lake sources are configured by the operator in a YAML file named by `LAKELOOM_CONFIG_FILE`;
+agents can only name a configured source, never add one or pass a URL. The dev stack mounts
+[`deploy/compose/lakeloom-sources.yaml`](deploy/compose/lakeloom-sources.yaml) with three
+sources over the same fixture lake (catalog `retail`, schema `sales`, four tables):
+
+```yaml
+sources:
+  - type: delta                       # Delta tables read with delta-rs (extra `delta`)
+    name: fixture_delta
+    om_service: lakeloom_fixture      # OpenMetadata service used to look tables up
+    tables:
+      - {uri: "file:///lake/orders", catalog: retail, schema: sales}
+      # ... customers, products, invoices
+  - type: unity_catalog               # Unity Catalog REST API (OSS or Databricks)
+    name: fixture_uc
+    url: http://unitycatalog:8080
+    catalogs: [retail]                # optional allow-list
+    read_storage: true                # versions/profiles from the Delta log
+    om_service: lakeloom_fixture
+  - type: mcp                         # an upstream MCP server, bound by a mapping file
+    name: openmetadata_mcp
+    transport: streamable_http
+    url: http://openmetadata-server:8585/mcp
+    token_file: /secrets/om_bot_token # or token_env: VAR_NAME; never logged
+    mapping: /etc/lakeloom/mappings/openmetadata.yaml
+    om_service: lakeloom_fixture
+```
+
+Relative `mapping` and `token_file` paths resolve against the YAML file's directory. A
+broken config stops startup with a configuration error; an unreachable upstream MCP server
+does not: its source is reported `available: false` with an error code and hint.
+
+MCP tools: `list_sources`, `list_tables` (paginated with `cursor`/`limit`) and
+`describe_table` need scope `lakeloom:read` and are read-only; `scan_lake_source` needs
+`lakeloom:propose` and writes a scan record (tables, versions, OpenMetadata matches and
+optional profiles). The same operations are on the CLI for operators:
+
+```bash
+docker compose -f deploy/compose/docker-compose.yml exec lakeloom lakeloom sources
+docker compose -f deploy/compose/docker-compose.yml exec lakeloom lakeloom tables fixture_uc
+docker compose -f deploy/compose/docker-compose.yml exec lakeloom lakeloom scan fixture_delta --profile
+```
+
+**Privacy defaults.** Profiles are computed where the data lives; no data is exported.
+Sample values (min/max, top-k) are off by default (`LAKELOOM_PROFILE_SAMPLES=false`); when
+enabled, columns tagged with a sensitive tag (`LAKELOOM_SENSITIVE_TAGS`, default `PII.*`)
+never yield values, and values are truncated to `LAKELOOM_PROFILE_VALUE_MAX_LENGTH`
+(default 64). Upstream MCP sources contribute aggregates only. Lake comments and upstream
+text are untrusted: tool outputs show them as quoted blocks flagged `untrusted`.
+
+Unity Catalog OSS keeps its state inside its container, so recreating the container drops
+the fixture registrations; re-seed them with
+`docker compose -f deploy/compose/docker-compose.yml run --rm uc-init`.
 
 ### Optional RDF store
 

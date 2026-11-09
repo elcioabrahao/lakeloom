@@ -10,7 +10,7 @@ import logging
 import sys
 from contextvars import ContextVar
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TextIO
 
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 
@@ -34,13 +34,13 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(data, default=str)
 
 
-def configure_logging(level: str) -> None:
-    """Install a single JSON stdout handler on the root logger (idempotent)."""
+def configure_logging(level: str, stream: TextIO | None = None) -> None:
+    """Install a single JSON handler (stdout by default) on the root logger (idempotent)."""
     root = logging.getLogger()
     for handler in list(root.handlers):
         if getattr(handler, "_lakeloom", False):
             root.removeHandler(handler)
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler(sys.stdout if stream is None else stream)
     handler.setFormatter(JsonFormatter())
     handler._lakeloom = True  # type: ignore[attr-defined]  # pyright: ignore[reportAttributeAccessIssue]
     root.addHandler(handler)

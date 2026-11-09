@@ -6,32 +6,31 @@ guards ``/mcp`` and stores the :class:`Principal` in the ASGI scope state, which
 read through ``ctx.request_context.request``. Tools check their own scope and answer a
 missing one with a typed ``forbidden`` error result (FR-AGT-05).
 
-M0 registers one tool, ``get_server_info`` (FR-OM-06, §7: scope ``lakeloom:read``,
-no side effects).
+Tools: ``get_server_info`` (FR-OM-06, §7: scope ``lakeloom:read``, no side effects) and
+the source/scan tools of :mod:`lakeloom.server.tools_sources` (M1a). Shared plumbing
+(scope checks, typed errors, metrics) lives in :mod:`lakeloom.server.tools_common`.
 """
 
 from contextlib import AbstractAsyncContextManager
-from typing import Annotated, Any
+from typing import Annotated
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
-from starlette.requests import Request
 
 import lakeloom
 from lakeloom.config import Settings
-from lakeloom.errors import ErrorCode, LakeloomError
-from lakeloom.metrics import TOOL_CALLS
 from lakeloom.server.auth import Principal
 from lakeloom.server.http_app import AppDeps, create_app
 from lakeloom.server.server_info import ServerInfo, build_server_info, summarize
+from lakeloom.server.tools_common import READ_SCOPE, guarded, tool_error
+from lakeloom.server.tools_sources import register_source_tools
 
-__all__ = ["MCP_PATH", "create_mcp", "create_server_app", "transport_security"]
+__all__ = ["MCP_PATH", "create_mcp", "create_server_app", "tool_error", "transport_security"]
 
 MCP_PATH = "/mcp"
-READ_SCOPE = "lakeloom:read"
 
 GET_SERVER_INFO_DESCRIPTION = """\
 Describe this Lakeloom server: its version and environment, the connected OpenMetadata \
@@ -48,25 +47,6 @@ down the call still succeeds and reports `openmetadata.reachable: false` with an
 Requires scope `lakeloom:read`; without it the call fails with error code `forbidden`."""
 
 
-def tool_error(code: ErrorCode, message: str, hint: str) -> CallToolResult:
-    """A typed tool error (FR-AGT-05): ``{"error": {"code", "message", "hint"}}``."""
-    error = LakeloomError(code, message, hint)
-    return CallToolResult(
-        content=[TextContent(type="text", text=f"Error `{code}`: {message}. Hint: {hint}.")],
-        structured_content=error.to_dict(),
-        is_error=True,
-    )
-
-
-def _principal(ctx: Context) -> Principal | None:
-    request = ctx.request_context.request
-    if not isinstance(request, Request):
-        return None
-    state: dict[str, Any] = request.scope.get("state") or {}
-    principal = state.get("principal")
-    return principal if isinstance(principal, Principal) else None
-
-
 def create_mcp(deps: AppDeps) -> MCPServer:
     """The MCP server with Lakeloom's tools registered."""
     mcp: MCPServer = MCPServer(
@@ -75,30 +55,22 @@ def create_mcp(deps: AppDeps) -> MCPServer:
         version=lakeloom.__version__,
         instructions=(
             "Lakeloom builds semantic models of a data lake in OpenMetadata. "
-            "Start with get_server_info to see versions, enabled features and your scopes."
+            "Start with get_server_info to see versions, enabled features and your scopes; "
+            "list_sources, list_tables and describe_table explore the configured lake "
+            "sources, and scan_lake_source records a scan of one."
         ),
         log_level="WARNING",
     )
 
     async def get_server_info(ctx: Context) -> Annotated[CallToolResult, ServerInfo]:
-        principal = _principal(ctx)
-        if principal is None or READ_SCOPE not in principal.scopes:
-            TOOL_CALLS.labels(tool="get_server_info", outcome="forbidden").inc()
-            return tool_error(
-                "forbidden",
-                f"get_server_info requires the {READ_SCOPE} scope",
-                f"token lacks {READ_SCOPE}",
-            )
-        try:
+        async def body(principal: Principal) -> CallToolResult:
             info = await build_server_info(deps, principal)
-        except Exception:
-            TOOL_CALLS.labels(tool="get_server_info", outcome="error").inc()
-            raise
-        TOOL_CALLS.labels(tool="get_server_info", outcome="ok").inc()
-        return CallToolResult(
-            content=[TextContent(type="text", text=summarize(info))],
-            structured_content=info.model_dump(mode="json"),
-        )
+            return CallToolResult(
+                content=[TextContent(type="text", text=summarize(info))],
+                structured_content=info.model_dump(mode="json"),
+            )
+
+        return await guarded("get_server_info", ctx, READ_SCOPE, body)
 
     mcp.add_tool(
         get_server_info,
@@ -112,6 +84,7 @@ def create_mcp(deps: AppDeps) -> MCPServer:
             open_world_hint=False,
         ),
     )
+    register_source_tools(mcp, deps)
     return mcp
 
 

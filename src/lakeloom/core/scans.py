@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 
 from lakeloom.config import Settings
+from lakeloom.core.sources import describe_with_version
 from lakeloom.errors import LakeloomError
 from lakeloom.om.client import OMClient, OMUnavailable
 from lakeloom.om.fqn import build_fqn
@@ -125,9 +126,8 @@ class ScanService:
     ) -> ScannedTable:
         async with sem:
             try:
-                description = await src.describe_table(ref)
-                version = await src.get_table_version(ref)
-                row = ScannedTable(ref=ref, version=version, description=description)
+                description = await describe_with_version(src, ref)
+                row = ScannedTable(ref=ref, version=description.version, description=description)
                 if profile:
                     row.profile = await src.profile_table(ref, policy)
             except Exception as exc:

@@ -12,17 +12,24 @@ import hashlib
 import hmac
 import json
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import httpx
+import httpx2
 import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from fastapi import FastAPI
 from jwt.algorithms import ECAlgorithm, RSAAlgorithm
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+from mcp.types import Implementation
 
 from lakeloom.server.http_app import AppDeps
+from lakeloom.sources.base import LakeSource
 
 ISSUER = "https://idp.test/realms/lakeloom"
 AUDIENCE = "lakeloom"
@@ -183,5 +190,31 @@ class DepsFactory(Protocol):
     def __call__(
         self,
         om_handler: Callable[[httpx.Request], httpx.Response] = ...,
+        sources: dict[str, LakeSource] | None = ...,
         **settings: Any,
     ) -> AppDeps: ...
+
+
+# --- In-process MCP client over the full ASGI app (Task 7 / M1a Task 9) ---
+
+BASE = "https://lakeloom.test"
+
+
+@asynccontextmanager
+async def mcp_session(
+    app: FastAPI, token: str | None, *, client_name: str = "mcp"
+) -> AsyncIterator[ClientSession]:
+    """The official MCP client against ``app`` via ``httpx2.ASGITransport``; runs the lifespan."""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    async with (
+        app.router.lifespan_context(app),
+        httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app), base_url=BASE, headers=headers
+        ) as http,
+        streamable_http_client(f"{BASE}/mcp", http_client=http) as (read, write),
+        ClientSession(
+            read, write, client_info=Implementation(name=client_name, version="0")
+        ) as session,
+    ):
+        await session.initialize()
+        yield session

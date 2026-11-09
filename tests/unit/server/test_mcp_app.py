@@ -55,8 +55,8 @@ async def test_fr_agt_06_get_server_info_annotations(make_deps: DepsFactory) -> 
 
     tools = await mcp.list_tools()
 
-    assert [t.name for t in tools] == ["get_server_info"]
-    tool = tools[0]
+    assert "get_server_info" in [t.name for t in tools]
+    (tool,) = [t for t in tools if t.name == "get_server_info"]
     assert tool.annotations is not None
     assert tool.annotations.read_only_hint is True
     assert tool.annotations.destructive_hint is False

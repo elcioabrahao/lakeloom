@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 import lakeloom
+from lakeloom.core.sources import SourceStatus, source_status
 from lakeloom.om.models import OMCapabilities
 from lakeloom.server.auth import Principal, PrincipalType
 from lakeloom.server.http_app import AppDeps
@@ -39,7 +40,9 @@ class ServerInfo(BaseModel):
             "not live capabilities: a flag can be on before the feature ships."
         )
     )
-    sources: list[str] = Field(description="Configured lake sources (none in M0).")
+    sources: list[SourceStatus] = Field(
+        description="Configured lake sources with kind, capabilities and availability."
+    )
     models: list[str] = Field(description="Registered semantic models (none in M0).")
     caller: CallerInfo | None = Field(description="Who is calling, with granted scopes.")
 
@@ -64,7 +67,7 @@ async def build_server_info(deps: AppDeps, principal: Principal | None) -> Serve
             "stdio": bool(settings.stdio_enabled),
             "token_exchange": settings.oidc_token_exchange,
         },
-        sources=[],
+        sources=[source_status(n, s) for n, s in deps.sources.items()],
         models=[],
         caller=caller,
     )
@@ -85,7 +88,8 @@ def summarize(info: ServerInfo) -> str:
         f"**Lakeloom {info.version}** ({info.environment})",
         f"- {om_line}",
         f"- Features enabled: {enabled}",
-        f"- Sources: {len(info.sources)}, models: {len(info.models)}",
+        f"- Sources: {len(info.sources)} ({sum(s.available for s in info.sources)} available), "
+        f"models: {len(info.models)}",
     ]
     if info.caller is not None:
         scopes = ", ".join(info.caller.scopes) or "none"

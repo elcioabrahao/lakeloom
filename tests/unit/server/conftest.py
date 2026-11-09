@@ -29,6 +29,7 @@ from lakeloom.config import Settings
 from lakeloom.om.client import OMClient
 from lakeloom.server.auth import TokenValidator
 from lakeloom.server.http_app import AppDeps
+from lakeloom.sources.base import LakeSource
 from lakeloom.state.db import create_engine
 
 
@@ -83,7 +84,9 @@ async def make_deps(tmp_path: Path, http: httpx.AsyncClient) -> AsyncIterator[De
     created: list[AppDeps] = []
 
     def factory(
-        om_handler: Callable[[httpx.Request], httpx.Response] = om_up, **settings: Any
+        om_handler: Callable[[httpx.Request], httpx.Response] = om_up,
+        sources: dict[str, LakeSource] | None = None,
+        **settings: Any,
     ) -> AppDeps:
         values: dict[str, Any] = {
             "om_url": "http://om.test:8585",
@@ -102,6 +105,7 @@ async def make_deps(tmp_path: Path, http: httpx.AsyncClient) -> AsyncIterator[De
             om=OMClient(str(s.om_url), s.om_bot_token, http=om_http),
             engine=create_engine(s.db_url),
             validator=validator,
+            sources=sources or {},
         )
         created.append(deps)
         return deps

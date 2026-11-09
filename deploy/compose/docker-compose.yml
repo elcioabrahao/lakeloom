@@ -545,10 +545,14 @@ services:
       LAKELOOM_FORGE: gitea
       # Development only: role + database from lakeloom-db-init.sql.
       LAKELOOM_DB_URL: postgresql://lakeloom:lakeloom@postgresql:5432/lakeloom
+      # Operator-managed lake sources (fixture_delta, fixture_uc, openmetadata_mcp).
+      LAKELOOM_CONFIG_FILE: /etc/lakeloom/sources.yaml
     volumes:
       - lakeloom-data:/data
       - om-secrets:/secrets:ro
       - ../../tests/fixtures/lake:/lake:ro
+      - ./lakeloom-sources.yaml:/etc/lakeloom/sources.yaml:ro
+      - ../../examples/mcp-mappings:/etc/lakeloom/mappings:ro
     depends_on:
       postgresql:
         condition: service_healthy

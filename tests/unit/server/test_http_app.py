@@ -188,6 +188,42 @@ async def test_build_deps_and_lifespan_close(tmp_path: Path) -> None:
     assert deps.validator is not None
 
 
+def test_fr_src_01_build_deps_loads_sources(tmp_path: Path) -> None:
+    lake = Path(__file__).parents[2] / "fixtures" / "lake"
+    config = tmp_path / "sources.yaml"
+    config.write_text(
+        "sources:\n  - type: delta\n    name: lake\n    tables:\n"
+        f"      - {{uri: {(lake / 'orders').as_uri()}, schema: sales}}\n"
+    )
+    settings = _settings(tmp_path).model_copy(update={"config_file": config})
+
+    deps = build_deps(settings)
+
+    assert list(deps.sources) == ["lake"]
+    assert deps.sources["lake"].kind == "delta"
+
+
+@pytest.mark.parametrize(
+    ("content", "message"),
+    [
+        (None, "does not exist"),
+        ("sources:\n  - type: delta\n    name: x\n", "invalid sources config"),
+    ],
+)
+def test_fr_src_01_build_deps_rejects_bad_sources_config(
+    tmp_path: Path, content: str | None, message: str
+) -> None:
+    config = tmp_path / "sources.yaml"
+    if content is not None:
+        config.write_text(content)
+    settings = _settings(tmp_path).model_copy(update={"config_file": config})
+
+    with pytest.raises(ConfigError) as exc:
+        build_deps(settings)
+
+    assert message in str(exc.value)
+
+
 async def test_lifespans_run_inside_app_lifespan(deps: AppDeps) -> None:
     events: list[str] = []
 

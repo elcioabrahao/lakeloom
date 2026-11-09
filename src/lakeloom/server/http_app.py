@@ -13,7 +13,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 import httpx
@@ -26,6 +26,8 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from lakeloom.config import ConfigError, Settings
+from lakeloom.core.scans import ScanService
+from lakeloom.core.sources import close_sources, start_sources
 from lakeloom.logging import request_id_var
 from lakeloom.metrics import HTTP_REQUESTS, REGISTRY
 from lakeloom.om.client import OMClient
@@ -43,7 +45,11 @@ from lakeloom.server.health import (
     run_checks,
     state_store_check,
 )
+from lakeloom.sources.base import LakeSource
+from lakeloom.sources.config import load_sources_config
+from lakeloom.sources.registry import build_sources
 from lakeloom.state.db import create_engine, upgrade
+from lakeloom.state.scans import ScanRepository
 
 _log = logging.getLogger("lakeloom.http")
 _IDP_TIMEOUT = 5.0
@@ -65,6 +71,12 @@ class AppDeps:
     validator: TokenValidator
     # Closed by the app lifespan (the validator's shared client).
     idp_http: httpx.AsyncClient | None = None
+    # Operator-configured lake sources (NFR-SEC-13); started and closed by the lifespan.
+    sources: dict[str, LakeSource] = field(default_factory=dict[str, LakeSource])
+    scans: ScanService = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.scans = ScanService(self.sources, ScanRepository(self.engine), self.om, self.settings)
 
 
 def build_deps(settings: Settings) -> AppDeps:
@@ -77,6 +89,7 @@ def build_deps(settings: Settings) -> AppDeps:
     missing = [name for name, value in required.items() if not value]
     if missing or settings.om_url is None or settings.oidc_issuer is None:
         raise ConfigError(f"missing required configuration: set {', '.join(missing)}")
+    sources = load_lake_sources(settings)
     engine = _create_engine_or_config_error(settings.db_url)
     idp_http = httpx.AsyncClient(timeout=_IDP_TIMEOUT)
     validator = TokenValidator(
@@ -94,7 +107,16 @@ def build_deps(settings: Settings) -> AppDeps:
         engine=engine,
         validator=validator,
         idp_http=idp_http,
+        sources=sources,
     )
+
+
+def load_lake_sources(settings: Settings) -> dict[str, LakeSource]:
+    """Build the sources in ``LAKELOOM_CONFIG_FILE`` (none when unset); bad config fails fast."""
+    path = settings.config_file
+    if path is not None and not path.is_file():
+        raise ConfigError(f"LAKELOOM_CONFIG_FILE {path} does not exist or is not a file")
+    return build_sources(load_sources_config(path), settings)
 
 
 def _create_engine_or_config_error(db_url: str) -> AsyncEngine:
@@ -242,6 +264,8 @@ def create_app(
             except Exception as exc:
                 _log.error("state store migration failed (%s)", type(exc).__name__)
                 raise
+            # Upstream MCP sources connect here, bounded; an unavailable one never fails startup.
+            await start_sources(deps.sources)
             async with AsyncExitStack() as stack:
                 for factory in lifespans:
                     await stack.enter_async_context(factory())
@@ -250,6 +274,7 @@ def create_app(
             if retry is not None:
                 retry.cancel()
                 await asyncio.gather(retry, return_exceptions=True)
+            await close_sources(deps.sources)
             if deps.idp_http is not None:
                 await deps.idp_http.aclose()
             await deps.om.aclose()

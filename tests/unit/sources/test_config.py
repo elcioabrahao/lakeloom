@@ -96,3 +96,33 @@ def test_profile_policy_from_settings() -> None:
 
 def test_new_scan_settings_defaults() -> None:
     assert Settings().scan_concurrency == 8
+
+
+def test_fr_src_01_compose_sources_config_is_valid() -> None:
+    """The dev stack's operator config parses and names the shipped OM mapping."""
+    from lakeloom.sources.config import (
+        DeltaSourceConfig,
+        McpSourceConfig,
+        UnityCatalogSourceConfig,
+    )
+
+    repo = Path(__file__).parents[3]
+    config = load_sources_config(repo / "deploy/compose/lakeloom-sources.yaml")
+
+    by_name = {s.name: s for s in config.sources}
+    assert list(by_name) == ["fixture_delta", "fixture_uc", "openmetadata_mcp"]
+    delta = by_name["fixture_delta"]
+    assert isinstance(delta, DeltaSourceConfig)
+    assert [t.uri for t in delta.tables] == [
+        f"file:///lake/{n}" for n in ("customers", "products", "orders", "invoices")
+    ]
+    assert all((t.catalog, t.schema_) == ("retail", "sales") for t in delta.tables)
+    uc = by_name["fixture_uc"]
+    assert isinstance(uc, UnityCatalogSourceConfig)
+    assert uc.read_storage is True
+    assert uc.catalogs == ["retail"]  # not UC OSS's built-in `unity` sample catalog
+    om = by_name["openmetadata_mcp"]
+    assert isinstance(om, McpSourceConfig)
+    assert om.token_file == Path("/secrets/om_bot_token")
+    assert (repo / "examples/mcp-mappings" / om.mapping.name).is_file()
+    assert {delta.om_service, uc.om_service, om.om_service} == {"lakeloom_fixture"}
