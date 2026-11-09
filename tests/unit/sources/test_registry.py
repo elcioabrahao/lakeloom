@@ -80,3 +80,23 @@ def test_builtin_without_build_source_is_config_error(monkeypatch: pytest.Monkey
     cfg = SourcesConfig(sources=[DeltaSourceConfig(type="delta", name="d", tables=[])])
     with pytest.raises(ConfigError, match="'delta' failed to load"):
         build_sources(cfg, Settings())
+
+
+def test_fr_src_06_missing_delta_extra_shows_install_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    import builtins
+
+    from lakeloom.sources.config import DeltaSourceConfig
+
+    real_import = builtins.__import__
+
+    def no_deltalake(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == "deltalake" or name.startswith("deltalake."):
+            raise ImportError("No module named 'deltalake'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_deltalake)
+    cfg = SourcesConfig(sources=[DeltaSourceConfig(type="delta", name="d", tables=[])])
+    with pytest.raises(ConfigError) as info:
+        build_sources(cfg, Settings())
+    assert "needs the 'deltalake' package" in str(info.value)
+    assert "pip install 'lakeloom[delta]'" in str(info.value)

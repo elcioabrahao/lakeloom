@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from lakeloom.config import ConfigError, Settings
+from lakeloom.errors import LakeloomError
 from lakeloom.sources.base import LakeSource
 from lakeloom.sources.config import PluginSourceConfig, SourcesConfig
 
@@ -22,7 +23,10 @@ _BUILTIN_MODULES = {
 
 
 def _failed(kind: str, exc: BaseException) -> ConfigError:
-    return ConfigError(f"source {kind!r} failed to load: {exc}")
+    message = f"source {kind!r} failed to load: {exc}"
+    if isinstance(exc, LakeloomError) and exc.hint:
+        message += f" (hint: {exc.hint})"  # e.g. pip install 'lakeloom[delta]'
+    return ConfigError(message)
 
 
 def _builtin_factory(kind: str) -> Callable[[Any, Settings], LakeSource]:
