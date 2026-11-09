@@ -204,6 +204,8 @@ idle (1 GB heap cap). Fits the 8 GB minimum with room for Lakeloom (Task 8).
 - `om-seed` (one-shot, same image as `lakeloom`, read-only root, `/tmp` tmpfs) runs
   `scripts/seed_om_fixture.py` after `om-bootstrap`; `lakeloom` waits for it. The image now
   installs the `delta` extra (the script reuses the Delta connector instead of re-parsing).
+  Measured cost: about +290 MB (`deltalake` + `pyarrow`); `lakeloom:dev` is about 955 MB
+  (`docker image ls`, 2026-11-09).
 - Entities are created with PUT create-or-update (`/v1/services/databaseServices`,
   `/v1/databases`, `/v1/databaseSchemas`, `/v1/tables`), so reruns keep the same ids.
 - Service type: `UnityCatalog` (present in the 2.1.0-rc1 `serviceType` enum), no connection

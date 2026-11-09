@@ -150,7 +150,13 @@ sources:
 
 Relative `mapping` and `token_file` paths resolve against the YAML file's directory. A
 broken config stops startup with a configuration error; an unreachable upstream MCP server
-does not: its source is reported `available: false` with an error code and hint.
+does not: its source is reported `available: false` with an error code and hint, and the
+next call at least 30 s after the last attempt reconnects.
+
+Give an upstream MCP source a **read-only** token. Lakeloom only calls the mapped read
+tools, but OpenMetadata's MCP server also exposes write tools (`create_entity`,
+`patch_entity`, ...); in production use a dedicated OM bot whose role can only read. The
+dev stack reuses OM's `ingestion-bot` token, which can write.
 
 MCP tools: `list_sources`, `list_tables` (paginated with `cursor`/`limit`) and
 `describe_table` need scope `lakeloom:read` and are read-only; `scan_lake_source` needs
@@ -167,8 +173,9 @@ docker compose -f deploy/compose/docker-compose.yml exec lakeloom lakeloom scan 
 Top-k values and string min/max are off by default (`LAKELOOM_PROFILE_SAMPLES=false`);
 numeric/date min/max are aggregates and always reported; columns tagged with a sensitive
 tag (`LAKELOOM_SENSITIVE_TAGS`, default `PII.*`) never expose values. When samples are
-enabled, values are truncated to `LAKELOOM_PROFILE_VALUE_MAX_LENGTH` (default 64). Upstream MCP sources contribute aggregates only. Lake comments and upstream
-text are untrusted: tool outputs show them as quoted blocks flagged `untrusted`.
+enabled, values are truncated to `LAKELOOM_PROFILE_VALUE_MAX_LENGTH` (default 64).
+Upstream MCP sources contribute aggregates only. Lake comments and upstream text are
+untrusted: tool outputs show them as quoted blocks flagged `untrusted`.
 
 Unity Catalog OSS keeps its state inside its container, so recreating the container drops
 the fixture registrations; re-seed them with

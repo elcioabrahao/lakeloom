@@ -92,7 +92,10 @@ scans of table metadata and profiles.
     locations (UC column tags are passed on as overlay so the sensitive-tag rule holds).
     Anything else yields `TableVersion(None, None)` and a `validation_error` on profiling.
     `storage_root_map` (`{"file:///lake": "/host/path"}`, prefix rewrite) lets Lakeloom
-    reach data at a different path than UC reports; the contract tests use it.
+    reach data at a different path than UC reports; the contract tests use it. When the map
+    is non-empty it is also an allow-list: only locations equal to or below a mapped prefix
+    on a `/` boundary are read (`file:///lake` covers `file:///lake/orders`, not
+    `file:///lake2/orders`); others get no version and no profile.
   - The bearer token is `os.environ[token_env]` when set, sent only in the Authorization
     header, never logged or put in errors. 404 is `not_found`; 401/403 `forbidden` (hint
     names `token_env`); 5xx, timeouts and connect errors `upstream_unavailable`.
@@ -113,6 +116,9 @@ scans of table metadata and profiles.
     (ISO for dates/timestamps) truncated to `value_max_length` plus `…`.
   - Settings: `LAKELOOM_PROFILE_TOPK` (10), `LAKELOOM_PROFILE_LOW_CARDINALITY` (50),
     `LAKELOOM_PROFILE_VALUE_MAX_LENGTH` (64).
+  - In a scan with `profile=true`, a source without the profiling capability is described
+    without profiles and the scan gets one warning; a failed profile is stored as the
+    table's `profile_error` and keeps its description and version (the table is not failed).
 
 - **Upstream MCP adapter (FR-SRC-05).** `lakeloom.sources.mcp_adapter.McpUpstreamSource`
   is an MCP *client* of an operator-configured upstream (`type: mcp`, `transport:
@@ -124,7 +130,10 @@ scans of table metadata and profiles.
     checks every mapped tool exists; it never raises. On failure the source stays
     registered with `available=False` and `last_error` (e.g. `upstream_unavailable`
     "upstream tool '<name>' not found", hint "update the mapping or the upstream server");
-    every operation then raises that error. The connection lives in a dedicated asyncio
+    every operation then raises that error. An operation on an unavailable source (never
+    connected, failed, or its session ended) re-runs `start()` when the last attempt was at
+    least 30 s ago (lazy reconnect, monotonic clock), and raises `last_error` if that fails.
+    The connection lives in a dedicated asyncio
     task that owns the `AsyncExitStack` (the SDK transports are anyio task groups and must
     be exited in the task that entered them); `aclose()` signals it and waits. Tool calls
     time out after 30 s.
@@ -175,13 +184,21 @@ scans of table metadata and profiles.
     `upstream_unavailable` "upstream returned non-JSON for <operation>"; `NaN`/`Infinity` tokens
     are rejected too). Numbers must be finite, also when they arrive already decoded in
     `structuredContent`; a non-finite or non-integral count is a shape mismatch. Comments become
-    `UntrustedText(source="mcp:<source name>")`; names, types and tags are data only,
+    `UntrustedText(source="mcp:<source name>")`; names, types, tags, owners and properties
+    are plain strings (only comments are `UntrustedText`), data only,
     bounded to 1024 characters, lists to 10 000 items, pagination to 100 pages (a repeated
     cursor stops). Lakeloom only ever calls tools named in the mapping *and* present in
     `tools/list`; nothing in a result can choose a tool. A field of the wrong shape is
     `upstream_unavailable` naming the operation, field and JMESPath. An upstream error's
     text is never copied into Lakeloom's error message. profile_table never takes min/max or
     top-k from an upstream, so no sample values can leak past FR-SRC-09.
+  - **Known limit.** The 8 MiB cap applies to text content only: the MCP SDK does not cap
+    the size of `structuredContent` or of the HTTP JSON body, so a hostile or broken
+    upstream can still send a large structured result. Configure only trusted upstreams.
+  - **Upstream token.** Use a read-only token. Lakeloom calls only mapped read tools, but
+    OM's MCP server also exposes write tools (`create_entity`, `patch_entity`, ...); in
+    production give the source a dedicated OM bot with a read-only role. The dev stack
+    reuses `ingestion-bot`, which can write.
   - **OpenMetadata mapping** (`examples/mcp-mappings/openmetadata.yaml`, the working one).
     OM 2.1.0-rc1's `McpApplication` serves Streamable HTTP at `/mcp` with the bot token as
     bearer; no compose change was needed. `tools/list` on 2026-11-09 returned (`*` =
