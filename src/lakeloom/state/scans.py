@@ -108,7 +108,7 @@ class ScanRepository:
             raise LakeloomError(
                 "not_found",
                 f"scan {scan_id!r} does not exist",
-                "List scans with the scan listing tool and use one of the returned ids.",
+                "Use a scan_id returned by scan_lake_source (or printed by `lakeloom scan`).",
             )
         return _from_row(row)
 

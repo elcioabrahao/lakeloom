@@ -89,3 +89,4 @@ async def test_get_missing_not_found(engine: AsyncEngine) -> None:
     with pytest.raises(LakeloomError) as exc:
         await ScanRepository(engine).get("scan_missing")
     assert exc.value.code == "not_found"
+    assert "scan_lake_source" in exc.value.hint
