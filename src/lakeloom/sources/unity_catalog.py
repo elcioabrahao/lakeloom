@@ -79,6 +79,13 @@ def _unavailable(message: str) -> LakeloomError:
     )
 
 
+def _under(location: str, prefix: str) -> bool:
+    """``location`` is ``prefix`` itself or below it on a ``/`` boundary."""
+    if location == prefix:
+        return True
+    return location.startswith(prefix if prefix.endswith("/") else prefix + "/")
+
+
 class UnityCatalogSource:
     """A read-only view of one Unity Catalog server."""
 
@@ -301,13 +308,22 @@ class UnityCatalogSource:
     # --- storage-backed operations ------------------------------------------------------------
 
     def _storage_uri(self, location: str | None) -> str | None:
-        """Apply ``storage_root_map`` and accept only Delta-capable storage locations."""
+        """Apply ``storage_root_map`` and accept only Delta-capable storage locations.
+
+        With a non-empty map, only locations under a mapped prefix are accepted, matched on
+        a ``/`` boundary (``file:///lake`` covers ``file:///lake/x`` but not
+        ``file:///lake2``); any other location is not read (no version, no profile).
+        """
         if not location:
             return None
-        for prefix in sorted(self._config.storage_root_map, key=len, reverse=True):
-            if location.startswith(prefix):
-                location = self._config.storage_root_map[prefix] + location[len(prefix) :]
-                break
+        roots = self._config.storage_root_map
+        if roots:
+            for prefix in sorted(roots, key=len, reverse=True):
+                if _under(location, prefix):
+                    location = roots[prefix] + location[len(prefix) :]
+                    break
+            else:
+                return None
         if location.startswith("/") or location.startswith(_STORAGE_SCHEMES):
             return location
         return None
