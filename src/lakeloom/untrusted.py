@@ -5,6 +5,7 @@ Markdown output renders them as an escaped blockquote under an explicit header; 
 output flags them with :class:`UntrustedText`.
 """
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel
@@ -12,6 +13,7 @@ from pydantic import BaseModel
 __all__ = ["MAX_QUOTED_CHARS", "UntrustedText", "code_span", "quote_untrusted", "single_line"]
 
 MAX_QUOTED_CHARS = 2000
+_CONTROLS = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class UntrustedText(BaseModel):
@@ -41,15 +43,18 @@ def single_line(text: str) -> str:
     Uses the same boundaries as :func:`quote_untrusted` (``splitlines``: ``\n``, ``\r``,
     ``\v``, ``\f``, ``\x1c``-``\x1e``, U+0085, U+2028, U+2029) plus ``str.split``'s
     whitespace, so interpolated text can never start a new Markdown line or heading.
+    Remaining C0 controls and DEL (``\x00``-``\x1f``, ``\x7f``, incl. ESC) are then
+    removed so upstream names cannot inject terminal escape sequences into CLI output.
     """
-    return " ".join(" ".join(text.splitlines()).split())
+    return _CONTROLS.sub("", " ".join(" ".join(text.splitlines()).split()))
 
 
 def code_span(name: str) -> str:
     """An untrusted identifier (table, column, tag, source name) as inert inline code.
 
     Backticks become ``'`` so the span cannot be closed early, and line boundaries are
-    collapsed by :func:`single_line`, so a hostile name stays inside one list item.
+    collapsed and control characters removed by :func:`single_line`, so a hostile name
+    stays inside one list item and cannot emit terminal escapes.
     """
     return "`" + single_line(name.replace("`", "'")) + "`"
 

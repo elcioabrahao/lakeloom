@@ -86,3 +86,13 @@ def test_nfr_sec_14_code_span_neutralises_names(sep: str) -> None:
     assert span.count("`") == 2  # cannot be closed early
     assert len(span.splitlines()) == 1
     assert single_line(f"a{sep}b") == "a b"
+
+
+@pytest.mark.parametrize("ctrl", ["\x1b", "\x00", "\x07", "\x08", "\x7f", "\x01"])
+def test_nfr_sec_14_single_line_strips_control_characters(ctrl: str) -> None:
+    hostile = f"or{ctrl}[31mders{ctrl}]0;pwned\x07"
+
+    assert single_line(hostile) == "or[31mders]0;pwned"
+    span = code_span(hostile)
+    assert not any(ord(c) < 0x20 or ord(c) == 0x7F for c in span)
+    assert span == "`or[31mders]0;pwned`"
