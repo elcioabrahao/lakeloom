@@ -17,7 +17,7 @@ from typing import Annotated
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI
-from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver import Context
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
@@ -25,6 +25,7 @@ import lakeloom
 from lakeloom.config import Settings
 from lakeloom.server.auth import Principal
 from lakeloom.server.http_app import AppDeps, create_app
+from lakeloom.server.resources import LakeloomMCP
 from lakeloom.server.server_info import ServerInfo, build_server_info, summarize
 from lakeloom.server.tools_common import READ_SCOPE, guarded, tool_error
 from lakeloom.server.tools_semantic import register_semantic_tools
@@ -49,9 +50,10 @@ down the call still succeeds and reports `openmetadata.reachable: false` with an
 Requires scope `lakeloom:read`; without it the call fails with error code `forbidden`."""
 
 
-def create_mcp(deps: AppDeps) -> MCPServer:
+def create_mcp(deps: AppDeps) -> LakeloomMCP:
     """The MCP server with Lakeloom's tools registered."""
-    mcp: MCPServer = MCPServer(
+    mcp = LakeloomMCP(
+        deps,
         name="lakeloom",
         title="Lakeloom",
         version=lakeloom.__version__,
@@ -61,7 +63,10 @@ def create_mcp(deps: AppDeps) -> MCPServer:
             "list_sources, list_tables and describe_table explore the configured lake "
             "sources, and scan_lake_source records a scan of one. The semantic tools list_models, "
             "find_concepts, explain_concept, find_assets_for_concept, get_asset_context and "
-            "export_model read the business vocabulary and what each asset means."
+            "export_model read the business vocabulary and what each asset means. The same "
+            "artefacts are MCP resources: lakeloom://models, "
+            "lakeloom://models/{slug}/ontology.{ttl|jsonld|owl|nt}, "
+            "lakeloom://models/{slug}/context.jsonld and lakeloom://assets/{fqn}/context.md."
         ),
         log_level="WARNING",
     )

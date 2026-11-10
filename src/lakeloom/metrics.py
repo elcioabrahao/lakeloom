@@ -20,6 +20,12 @@ TOOL_CALLS = Counter(
     ["tool", "outcome"],
     registry=REGISTRY,
 )
+RESOURCE_READS = Counter(
+    "lakeloom_resource_reads_total",
+    "MCP resource reads.",
+    ["resource", "outcome"],
+    registry=REGISTRY,
+)
 OM_REQUEST_SECONDS = Histogram(
     "lakeloom_om_request_seconds",
     "OpenMetadata request latency by operation.",

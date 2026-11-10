@@ -22,6 +22,7 @@ __all__ = [
     "PROPOSE_SCOPE",
     "READ_SCOPE",
     "client_name",
+    "current_principal",
     "guarded",
     "principal_of",
     "tool_error",
@@ -43,14 +44,17 @@ def tool_error(code: ErrorCode, message: str, hint: str) -> CallToolResult:
     )
 
 
-def principal_of(ctx: Context) -> Principal | None:
-    """The principal :class:`BearerAuthMiddleware` stored in the request's ASGI state."""
+def current_principal(ctx: Context) -> Principal | None:
+    """The caller: the principal :class:`BearerAuthMiddleware` stored in the ASGI state."""
     request = ctx.request_context.request
     if not isinstance(request, Request):
         return None
     state: dict[str, Any] = request.scope.get("state") or {}
     principal = state.get("principal")
     return principal if isinstance(principal, Principal) else None
+
+
+principal_of = current_principal  # the name tools used before the shared helper
 
 
 def client_name(ctx: Context) -> str | None:
@@ -72,7 +76,7 @@ async def guarded(
     body: Callable[[Principal], Awaitable[CallToolResult]],
 ) -> CallToolResult:
     """Run ``body`` for a caller holding ``scope``; typed errors and metrics around it."""
-    principal = principal_of(ctx)
+    principal = current_principal(ctx)
     if principal is None or scope not in principal.scopes:
         TOOL_CALLS.labels(tool=tool, outcome="forbidden").inc()
         return tool_error("forbidden", f"{tool} requires the {scope} scope", f"token lacks {scope}")

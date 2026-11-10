@@ -252,6 +252,25 @@ header pointing at the OpenMetadata entity (`rel="via"`; Git links arrive in M2)
 `304` with no body. Errors are JSON, `{"error": {"code", "message", "hint"}}`, with `404`
 `not_found`, `403` `forbidden`, `400` `validation_error`, `503` `upstream_unavailable`.
 
+### MCP resources
+
+The same artefacts are MCP resources, byte-identical to the HTTP API for the same representation
+and readable with the `lakeloom:read` scope (`forbidden` without it):
+
+| Resource | Content |
+| --- | --- |
+| `lakeloom://models` | `application/json`, the model list |
+| `lakeloom://models/{slug}/ontology.{ext}` | `ttl` `text/turtle`, `jsonld` `application/ld+json`, `owl` `application/rdf+xml`, `nt` `application/n-triples` |
+| `lakeloom://models/{slug}/context.jsonld` | `application/ld+json`, the minimal context (full one in M3) |
+| `lakeloom://assets/{fqn}/context.md` | `text/markdown`; percent-encode the table FQN |
+
+`resources/list` names `lakeloom://models` and, for up to 100 models, their ontology and context
+URIs; `resources/templates/list` gives the parameterised forms. Append `?version=latest` to pin
+(any other version is `not_found` until releases arrive in M3; `shapes.ttl` is also M3). Errors are
+MCP errors whose `data` is `{"error": {"code", "message", "hint"}}`: `not_found` and
+`validation_error` (for example an unknown `ext`, which lists `ttl, jsonld, owl, nt`) use the
+invalid-params code, the rest the internal-error code.
+
 ### Optional RDF store
 
 ```bash
