@@ -85,9 +85,11 @@ OM 2.1.0-rc1 (compose stack, `RDF_ENABLED=false`, no Fuseki container) on 2026-1
 
 ### Exports (Task 1 implementation, `src/lakeloom/rdf/`)
 
-- Export is OM's `exportOntology` (raw RDF). In rc1 it works with RDF off: the dev stack runs `RDF_ENABLED=false` with no Fuseki (the `rdf` compose profile is opt-in) and the export still returns full Turtle, so the graph is built by OM itself, not read from a triple store
-  post-processed for determinism (FR-GIT-03): canonical blank-node labels `b0..bn`, sorted
-  triples, LF, UTF-8, one trailing newline.
+- Export is OM's `exportOntology` (raw RDF). In rc1 it works with RDF off: the dev stack runs
+  `RDF_ENABLED=false` with no Fuseki (the `rdf` compose profile is opt-in) and the export still
+  returns full Turtle, so OM builds the graph itself rather than reading it from a triple store.
+- Lakeloom post-processes the export for determinism (FR-GIT-03): canonical blank-node labels
+  `b0..bn`, sorted triples, LF, UTF-8, one trailing newline.
 - Default prefixes: `dcterms`, `om` (`https://open-metadata.org/ontology/`, the namespace OM's
   own export binds), `owl`, `rdf`, `rdfs`, `skos`, `xsd`, plus the model prefix.
   Predicate/type namespaces without a bound prefix are named `ns1..nsN` in sorted namespace
