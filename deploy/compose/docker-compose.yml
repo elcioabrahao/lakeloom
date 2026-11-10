@@ -451,20 +451,23 @@ services:
         condition: service_healthy
     restart: "no"
 
-  # One-shot: seed the fixture lake's tables into OpenMetadata (idempotent PUT upserts).
+  # One-shot: seed the fixture lake's tables and the retail ontology into OpenMetadata
+  # (idempotent PUT upserts; ADR 0009).
   om-seed:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
     image: lakeloom:dev
     entrypoint: []
+    # Tables first, then the retail ontology and its glossary-term tags (needs the tables).
     command:
-      - python
-      - /opt/lakeloom/scripts/seed_om_fixture.py
-      - --om-url
-      - http://openmetadata-server:8585
-      - --lake
-      - /opt/lakeloom/fixtures/lake
+      - sh
+      - -c
+      - >-
+        python /opt/lakeloom/scripts/seed_om_fixture.py
+        --om-url http://openmetadata-server:8585 --lake /opt/lakeloom/fixtures/lake
+        && python /opt/lakeloom/scripts/seed_om_concepts.py
+        --om-url http://openmetadata-server:8585
     read_only: true
     tmpfs:
       - /tmp

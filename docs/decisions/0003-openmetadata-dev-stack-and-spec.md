@@ -233,3 +233,10 @@ idle (1 GB heap cap). Fits the 8 GB minimum with room for Lakeloom (Task 8).
   creates catalog `retail` / schema `sales`, then deletes and recreates the four tables with
   columns read from the Delta fixtures. Re-running is safe. `lakeloom` waits for it.
 - Contract tests reach UC at `http://localhost:8081` (override `LAKELOOM_TEST_UC_URL`).
+
+## Appendix (M1b Task 3): fixture ontology
+
+- `om-seed` now runs `seed_om_fixture.py` then `seed_om_concepts.py` (one `sh -c`), seeding
+  the glossary `retail`, 10 terms, custom relation types and glossary-term tags on the fixture
+  tables/columns. Details, IRIs and the OM rc1 behaviours observed are in
+  [ADR 0009](0009-semantic-read-path.md).
