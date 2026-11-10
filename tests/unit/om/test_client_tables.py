@@ -41,7 +41,9 @@ async def test_fr_src_07_get_table_by_fqn(client: OMClient) -> None:
     assert table.columns[0].tags[0].tag_fqn == "PII.Sensitive"
     assert table.owners[0].name == "a"
     request = route.calls.last.request
-    assert request.url.params["fields"] == "columns,tags,owners,tableConstraints"
+    assert (
+        request.url.params["fields"] == "columns,tags,owners,domains,dataProducts,tableConstraints"
+    )
     assert request.headers["Authorization"] == "Bearer t"
     await client.aclose()
 

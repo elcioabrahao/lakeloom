@@ -5,17 +5,47 @@ Paths are keys of the committed spec (``servers[0].url`` is ``/api``), verified 
 header; it is never part of an exception message, log line or repr.
 """
 
+import re
 from collections.abc import Sequence
-from typing import ClassVar
+from typing import ClassVar, Literal
 from urllib.parse import quote
 
 import httpx
 from pydantic import SecretStr
 
 from lakeloom.metrics import OM_REQUEST_SECONDS
-from lakeloom.om.models import OMCapabilities, OMTable, OMVersion, RdfStatus
+from lakeloom.om.models import (
+    OMCapabilities,
+    OMEntityRef,
+    OMGlossary,
+    OMGlossaryTerm,
+    OMLineage,
+    OMPage,
+    OMTable,
+    OMVersion,
+    RdfStatus,
+)
 
 API_PREFIX = "/api"
+
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+GLOSSARY_FIELDS = ("owners", "tags", "domains")
+TERM_FIELDS = ("parent", "synonyms", "relatedTerms", "conceptMappings", "owners", "tags", "iri")
+TABLE_FIELDS = (
+    "columns",
+    "tags",
+    "owners",
+    "domains",
+    "dataProducts",
+    "tableConstraints",
+)
+ExportFormat = Literal["turtle", "rdfxml", "ntriples", "jsonld"]
+_EXPORT_MIME: dict[str, str] = {
+    "turtle": "text/turtle",
+    "rdfxml": "application/rdf+xml",
+    "ntriples": "application/n-triples",
+    "jsonld": "application/ld+json",
+}
 
 
 class OMError(Exception):
@@ -35,6 +65,15 @@ class OMClient:
         "get_version": ("GET", "/v1/system/version"),
         "get_rdf_status": ("GET", "/v1/rdf/status"),
         "get_table_by_name": ("GET", "/v1/tables/name/{fqn}"),
+        "list_glossaries": ("GET", "/v1/glossaries"),
+        "get_glossary_by_name": ("GET", "/v1/glossaries/name/{name}"),
+        "list_terms": ("GET", "/v1/glossaryTerms"),
+        "get_term_by_id": ("GET", "/v1/glossaryTerms/{id}"),
+        "get_term_by_name": ("GET", "/v1/glossaryTerms/name/{fqn}"),
+        "search_terms": ("GET", "/v1/glossaryTerms/search"),
+        "get_term_assets": ("GET", "/v1/glossaryTerms/{id}/assets"),
+        "export_ontology": ("GET", "/v1/glossaries/{id}/exportOntology"),
+        "get_lineage": ("GET", "/v1/lineage/getLineage"),
     }
 
     def __init__(
@@ -63,12 +102,13 @@ class OMClient:
         *,
         path_args: dict[str, str] | None = None,
         params: dict[str, str] | None = None,
+        accept: str = "application/json",
     ) -> httpx.Response:
         method, path = self.PATHS[name]
         if path_args:
             # Every path segment is percent-encoded, including "/" (FQNs may hold quotes).
             path = path.format(**{k: quote(v, safe="") for k, v in path_args.items()})
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": accept}
         if self._token is not None:
             headers["Authorization"] = f"Bearer {self._token.get_secret_value()}"
         url = f"{self._base_url}{API_PREFIX}{path}"
@@ -96,7 +136,7 @@ class OMClient:
         self,
         fqn: str,
         *,
-        fields: Sequence[str] = ("columns", "tags", "owners", "tableConstraints"),
+        fields: Sequence[str] = TABLE_FIELDS,
     ) -> OMTable | None:
         """Look a table up by FQN; ``None`` when OM has no such table (FR-SRC-07)."""
         params = {"fields": ",".join(fields)} if fields else None
@@ -109,6 +149,131 @@ class OMClient:
                 return None
             raise
         return OMTable.model_validate(_json(response))
+
+    async def _get_or_none(
+        self,
+        name: str,
+        *,
+        path_args: dict[str, str] | None = None,
+        params: dict[str, str] | None = None,
+    ) -> httpx.Response | None:
+        try:
+            return await self._request(name, path_args=path_args, params=params)
+        except OMError as exc:
+            if exc.status == 404:
+                return None
+            raise
+
+    async def list_glossaries(
+        self, *, after: str | None = None, limit: int = 50
+    ) -> OMPage[OMGlossary]:
+        params = {"limit": str(limit), "fields": ",".join(GLOSSARY_FIELDS)}
+        if after:
+            params["after"] = after
+        response = await self._request("list_glossaries", params=params)
+        return OMPage[OMGlossary].model_validate(_json(response))
+
+    async def get_glossary_by_name(
+        self, name: str, fields: Sequence[str] = GLOSSARY_FIELDS
+    ) -> OMGlossary | None:
+        params = {"fields": ",".join(fields)} if fields else None
+        response = await self._get_or_none(
+            "get_glossary_by_name", path_args={"name": name}, params=params
+        )
+        return None if response is None else OMGlossary.model_validate(_json(response))
+
+    async def list_terms(
+        self,
+        glossary_fqn: str,
+        *,
+        after: str | None = None,
+        limit: int = 100,
+        fields: Sequence[str] = TERM_FIELDS,
+    ) -> OMPage[OMGlossaryTerm]:
+        """Terms of one glossary. OM filters by glossary *id*, so a name is resolved first.
+
+        Raises ``OMError`` (status 404) when the glossary does not exist.
+        """
+        glossary_id = glossary_fqn
+        if not _UUID.match(glossary_fqn):
+            glossary = await self.get_glossary_by_name(glossary_fqn, fields=())
+            if glossary is None:
+                raise OMError(f"glossary {glossary_fqn!r} not found", 404)
+            glossary_id = glossary.id
+        params = {"glossary": glossary_id, "limit": str(limit)}
+        if fields:
+            params["fields"] = ",".join(fields)
+        if after:
+            params["after"] = after
+        response = await self._request("list_terms", params=params)
+        return OMPage[OMGlossaryTerm].model_validate(_json(response))
+
+    async def get_term(
+        self, id_or_fqn: str, fields: Sequence[str] = TERM_FIELDS
+    ) -> OMGlossaryTerm | None:
+        params = {"fields": ",".join(fields)} if fields else None
+        if _UUID.match(id_or_fqn):
+            response = await self._get_or_none(
+                "get_term_by_id", path_args={"id": id_or_fqn}, params=params
+            )
+        else:
+            response = await self._get_or_none(
+                "get_term_by_name", path_args={"fqn": id_or_fqn}, params=params
+            )
+        return None if response is None else OMGlossaryTerm.model_validate(_json(response))
+
+    async def search_terms(
+        self, q: str, *, glossary_fqn: str | None = None, limit: int = 20
+    ) -> list[OMGlossaryTerm]:
+        params = {"q": q, "limit": str(limit)}
+        if glossary_fqn:
+            params["glossaryFqn"] = glossary_fqn
+        response = await self._request("search_terms", params=params)
+        return OMPage[OMGlossaryTerm].model_validate(_json(response)).data
+
+    async def get_term_assets(
+        self, term_id: str, *, offset: int = 0, limit: int = 50
+    ) -> OMPage[OMEntityRef]:
+        """Assets tagged with a term. The spec types the body as one ``EntityReference``;
+        the live server returns a ``{"data": [...], "paging": {"total": n}}`` list."""
+        params = {"offset": str(offset), "limit": str(limit)}
+        response = await self._request("get_term_assets", path_args={"id": term_id}, params=params)
+        return OMPage[OMEntityRef].model_validate(_json(response))
+
+    async def export_ontology(
+        self, glossary_id: str, fmt: ExportFormat = "turtle", *, include_relations: bool = True
+    ) -> str:
+        """Export a glossary as RDF text (needs RDF enabled in OM).
+
+        The live server answers with the serialisation itself (``text/turtle``,
+        ``application/rdf+xml``, ``application/n-triples`` or ``application/ld+json``), not
+        a JSON wrapper, so the response body is returned verbatim.
+        """
+        params = {"format": fmt, "includeRelations": "true" if include_relations else "false"}
+        response = await self._request(
+            "export_ontology",
+            path_args={"id": glossary_id},
+            params=params,
+            accept=_EXPORT_MIME[fmt],
+        )
+        return response.text
+
+    async def get_lineage(
+        self,
+        entity_type: str,
+        fqn: str,
+        *,
+        upstream_depth: int = 1,
+        downstream_depth: int = 1,
+    ) -> OMLineage:
+        params = {
+            "fqn": fqn,
+            "type": entity_type,
+            "upstreamDepth": str(upstream_depth),
+            "downstreamDepth": str(downstream_depth),
+        }
+        response = await self._request("get_lineage", params=params)
+        return OMLineage.model_validate(_json(response))
 
     async def get_capabilities(self) -> OMCapabilities:
         """Probe version and RDF status; never raises (FR-OM-06)."""
