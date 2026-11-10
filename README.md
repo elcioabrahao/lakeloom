@@ -317,6 +317,14 @@ Stop the stack and delete its data with `docker compose -f deploy/compose/docker
 
 For development setup see [CONTRIBUTING.md](CONTRIBUTING.md).
 
+### Observability
+
+- **Prometheus**: `GET /metrics` (no auth) always serves `lakeloom_tool_calls_total`, `lakeloom_resource_reads_total`, `lakeloom_om_request_seconds`, `lakeloom_scan_duration_seconds` and `lakeloom_http_requests_total`.
+- **OpenTelemetry (OTLP)**: off unless `LAKELOOM_OTEL_EXPORTER_OTLP_ENDPOINT` is set (for example `http://collector:4318`). Then traces go to `{endpoint}/v1/traces` and metrics to `{endpoint}/v1/metrics` over OTLP/HTTP, with `service.name=lakeloom` and the Lakeloom version. When unset, no exporter or thread is created. Works for both the HTTP and stdio transports.
+- **Spans**: `HTTP <method> <route>` (not for `/healthz`, `/readyz`, `/metrics`), `mcp.tool/<tool>` (tool name, outcome, principal type; never arguments), `mcp.resource` (resource kind and outcome), `om.<operation>` (status code) and `scan` (source, table counts, status). Tokens, headers, URLs and untrusted text are never recorded.
+- **OTel metrics**: `lakeloom.tool_calls`, `lakeloom.resource_reads`, `lakeloom.om.request.duration` (s) and `lakeloom.scan.duration` (s).
+- **Logs** are JSON lines with `request_id`, plus `trace_id` and `span_id` when a span is active.
+
 ## Project documents
 
 [Contributing](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md) ·

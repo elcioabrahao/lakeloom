@@ -6,11 +6,13 @@ header; it is never part of an exception message, log line or repr.
 """
 
 import re
+import time
 from collections.abc import Sequence
 from typing import ClassVar, Literal
 from urllib.parse import quote
 
 import httpx
+from opentelemetry.trace import Span, Status, StatusCode
 from pydantic import SecretStr
 
 from lakeloom.metrics import OM_REQUEST_SECONDS
@@ -25,6 +27,7 @@ from lakeloom.om.models import (
     OMVersion,
     RdfStatus,
 )
+from lakeloom.telemetry import record_om_request, tracer
 
 API_PREFIX = "/api"
 
@@ -96,6 +99,12 @@ class OMClient:
         if self._owns_http:
             await self._http.aclose()
 
+    @staticmethod
+    def _observe(span: Span, name: str, status: str, started: float, *, ok: bool = False) -> None:
+        if not ok:
+            span.set_status(Status(StatusCode.ERROR))
+        record_om_request(name, status, time.perf_counter() - started)
+
     async def _request(
         self,
         name: str,
@@ -112,14 +121,25 @@ class OMClient:
         if self._token is not None:
             headers["Authorization"] = f"Bearer {self._token.get_secret_value()}"
         url = f"{self._base_url}{API_PREFIX}{path}"
-        try:
-            with OM_REQUEST_SECONDS.labels(operation=name).time():
-                response = await self._http.request(method, url, headers=headers, params=params)
-        except httpx.TimeoutException as exc:
-            raise OMUnavailable(f"OpenMetadata timed out ({type(exc).__name__})") from None
-        except httpx.TransportError as exc:
-            raise OMUnavailable(f"cannot connect to OpenMetadata ({type(exc).__name__})") from None
-        status = response.status_code
+        started = time.perf_counter()
+        # Span attributes: the operation name and status only, never the URL or headers.
+        with tracer().start_as_current_span(
+            f"om.{name}", attributes={"lakeloom.om.operation": name, "http.method": method}
+        ) as span:
+            try:
+                with OM_REQUEST_SECONDS.labels(operation=name).time():
+                    response = await self._http.request(method, url, headers=headers, params=params)
+            except httpx.TimeoutException as exc:
+                self._observe(span, name, "error", started)
+                raise OMUnavailable(f"OpenMetadata timed out ({type(exc).__name__})") from None
+            except httpx.TransportError as exc:
+                self._observe(span, name, "error", started)
+                raise OMUnavailable(
+                    f"cannot connect to OpenMetadata ({type(exc).__name__})"
+                ) from None
+            status = response.status_code
+            span.set_attribute("http.status_code", status)
+            self._observe(span, name, str(status), started, ok=status < 400)
         if status >= 500:
             raise OMUnavailable(f"OpenMetadata returned HTTP {status}", status)
         if status >= 400:

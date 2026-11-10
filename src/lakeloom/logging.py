@@ -1,8 +1,8 @@
 """JSON logging with a per-request id (NFR-OPS-03, NFR-SEC-11).
 
 One JSON object per line on stdout: ``ts``, ``level``, ``logger``, ``message``,
-``request_id`` plus any ``extra`` fields. Callers must never pass secrets or request
-headers as log fields.
+``request_id`` (plus ``trace_id``/``span_id`` inside an active span) and any ``extra``
+fields. Callers must never pass secrets or request headers as log fields.
 """
 
 import json
@@ -11,6 +11,8 @@ import sys
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any, TextIO
+
+from opentelemetry import trace
 
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 
@@ -26,6 +28,10 @@ class JsonFormatter(logging.Formatter):
             "message": record.getMessage(),
             "request_id": request_id_var.get(),
         }
+        span_context = trace.get_current_span().get_span_context()
+        if span_context.is_valid:
+            data["trace_id"] = format(span_context.trace_id, "032x")
+            data["span_id"] = format(span_context.span_id, "016x")
         for key, value in record.__dict__.items():
             if key not in _STANDARD and key not in data:
                 data[key] = value

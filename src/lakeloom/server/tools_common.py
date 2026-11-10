@@ -13,11 +13,13 @@ from typing import Any
 
 from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, TextContent
+from opentelemetry.trace import Status, StatusCode
 from starlette.requests import Request
 
 from lakeloom.errors import ErrorCode, LakeloomError
 from lakeloom.metrics import TOOL_CALLS
 from lakeloom.server.auth import Principal
+from lakeloom.telemetry import record_tool_call, tracer
 
 __all__ = [
     "PROPOSE_SCOPE",
@@ -84,24 +86,48 @@ async def guarded(
     scope: str,
     body: Callable[[Principal], Awaitable[CallToolResult]],
 ) -> CallToolResult:
-    """Run ``body`` for a caller holding ``scope``; typed errors and metrics around it."""
+    """Run ``body`` for a caller holding ``scope`` inside a span; typed errors and metrics."""
     principal = current_principal(ctx)
+    # Only the tool name, outcome and principal type: never arguments (NFR-SEC-11).
+    with tracer().start_as_current_span(
+        f"mcp.tool/{tool}",
+        attributes={
+            "lakeloom.tool": tool,
+            "lakeloom.principal_type": "unknown" if principal is None else principal.type.value,
+        },
+    ) as span:
+        result, outcome = await _run(tool, scope, principal, body)
+        span.set_attribute("lakeloom.outcome", outcome)
+        if outcome != "ok":
+            span.set_status(Status(StatusCode.ERROR))
+    TOOL_CALLS.labels(tool=tool, outcome=outcome).inc()
+    record_tool_call(tool, outcome)
+    return result
+
+
+async def _run(
+    tool: str,
+    scope: str,
+    principal: Principal | None,
+    body: Callable[[Principal], Awaitable[CallToolResult]],
+) -> tuple[CallToolResult, str]:
     if principal is None or scope not in principal.scopes:
-        TOOL_CALLS.labels(tool=tool, outcome="forbidden").inc()
-        return tool_error("forbidden", f"{tool} requires the {scope} scope", f"token lacks {scope}")
+        return (
+            tool_error("forbidden", f"{tool} requires the {scope} scope", f"token lacks {scope}"),
+            "forbidden",
+        )
     try:
-        result = await body(principal)
+        return await body(principal), "ok"
     except LakeloomError as exc:
-        TOOL_CALLS.labels(tool=tool, outcome="error").inc()
-        return tool_error(exc.code, exc.message, exc.hint)
+        return tool_error(exc.code, exc.message, exc.hint), "error"
     except Exception as exc:
-        TOOL_CALLS.labels(tool=tool, outcome="error").inc()
         # Only the type: the text may carry upstream detail or a connection URL (NFR-SEC-11).
         _log.error("tool %s failed unexpectedly (%s)", tool, type(exc).__name__)
-        return tool_error(
-            "upstream_unavailable",
-            f"{tool} failed unexpectedly ({type(exc).__name__})",
-            "retry; if it keeps failing, check the Lakeloom server logs",
+        return (
+            tool_error(
+                "upstream_unavailable",
+                f"{tool} failed unexpectedly ({type(exc).__name__})",
+                "retry; if it keeps failing, check the Lakeloom server logs",
+            ),
+            "error",
         )
-    TOOL_CALLS.labels(tool=tool, outcome="ok").inc()
-    return result

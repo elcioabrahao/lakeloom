@@ -20,6 +20,7 @@ from lakeloom.server.http_app import (
 from lakeloom.server.mcp_app import create_mcp
 from lakeloom.server.tools_common import local_principal
 from lakeloom.state.db import upgrade
+from lakeloom.telemetry import configure_telemetry, is_active
 
 __all__ = ["StdioStartupError", "run_stdio", "stdio_principal"]
 
@@ -44,6 +45,8 @@ async def run_stdio(deps: AppDeps) -> None:
     """Migrate the state store, start the sources and serve MCP on stdin/stdout."""
     mcp = create_mcp(deps)
     local_principal.set(stdio_principal(deps.settings))
+    owns_telemetry = not is_active()
+    telemetry = configure_telemetry(deps.settings)
     try:
         try:
             await upgrade(deps.engine)
@@ -60,3 +63,5 @@ async def run_stdio(deps: AppDeps) -> None:
             await deps.idp_http.aclose()
         await deps.om.aclose()
         await deps.engine.dispose()
+        if owns_telemetry:
+            telemetry.shutdown()

@@ -32,3 +32,9 @@ OM_REQUEST_SECONDS = Histogram(
     ["operation"],
     registry=REGISTRY,
 )
+SCAN_SECONDS = Histogram(
+    "lakeloom_scan_duration_seconds",
+    "Lake source scan duration.",
+    ["source"],
+    registry=REGISTRY,
+)

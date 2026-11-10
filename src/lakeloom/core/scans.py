@@ -7,17 +7,20 @@ A profiling failure is recorded separately (``profile_error``) and never fails t
 """
 
 import asyncio
+import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
 
 from lakeloom.config import Settings
 from lakeloom.core.sources import describe_with_version
 from lakeloom.errors import LakeloomError
+from lakeloom.metrics import SCAN_SECONDS
 from lakeloom.om.client import OMClient, OMUnavailable
 from lakeloom.om.fqn import build_fqn
 from lakeloom.sources.base import LakeSource, ProfilePolicy
 from lakeloom.sources.models import TableRef, TableVersion
 from lakeloom.state.scans import ScannedTable, ScanRecord, ScanRepository, new_scan_id
+from lakeloom.telemetry import record_scan, tracer
 from lakeloom.untrusted import code_span, single_line
 
 __all__ = ["ScanService", "summarize"]
@@ -143,6 +146,42 @@ class ScanService:
             return row
 
     async def scan(
+        self,
+        source: str,
+        *,
+        catalogs: list[str] | None = None,
+        schemas: list[str] | None = None,
+        tables: list[str] | None = None,
+        profile: bool = False,
+        principal_subject: str,
+        principal_type: str,
+        client: str | None,
+    ) -> ScanRecord:
+        started = time.perf_counter()
+        # Span: source name (operator-configured), counts and status only (NFR-SEC-14).
+        with tracer().start_as_current_span(
+            "scan", attributes={"lakeloom.source": source, "lakeloom.profile": profile}
+        ) as span:
+            record = await self._scan(
+                source,
+                catalogs=catalogs,
+                schemas=schemas,
+                tables=tables,
+                profile=profile,
+                principal_subject=principal_subject,
+                principal_type=principal_type,
+                client=client,
+            )
+            failed = sum(1 for t in record.tables if t.error)
+            span.set_attribute("lakeloom.scan.tables", len(record.tables))
+            span.set_attribute("lakeloom.scan.tables_failed", failed)
+            span.set_attribute("lakeloom.scan.status", record.status)
+            elapsed = time.perf_counter() - started
+            SCAN_SECONDS.labels(source=source).observe(elapsed)
+            record_scan(source, elapsed)
+            return record
+
+    async def _scan(
         self,
         source: str,
         *,

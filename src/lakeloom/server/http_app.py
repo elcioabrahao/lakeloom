@@ -12,7 +12,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
-from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import cast
 
@@ -22,6 +22,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from opentelemetry.trace import SpanKind, Status, StatusCode
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.exc import ArgumentError, InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -60,9 +61,12 @@ from lakeloom.sources.config import load_sources_config
 from lakeloom.sources.registry import build_sources
 from lakeloom.state.db import create_engine, upgrade
 from lakeloom.state.scans import ScanRepository
+from lakeloom.telemetry import configure_telemetry, is_active, tracer
 
 _log = logging.getLogger("lakeloom.http")
 _IDP_TIMEOUT = 5.0
+# Probes and scrapes would drown the traces.
+_UNTRACED_PATHS = frozenset({"/healthz", "/readyz", "/metrics"})
 _CONNECTION_ERRORS: tuple[type[BaseException], ...] = (
     OperationalError,
     InterfaceError,
@@ -182,23 +186,37 @@ class RequestContextMiddleware:
                 message = {**message, "headers": headers}
             await send(message)
 
-        try:
-            await self.app(scope, receive, send_wrapper)
-        finally:
-            label = _route_label(scope)
-            HTTP_REQUESTS.labels(
-                method=scope["method"], route=label or "unmatched", status=str(status)
-            ).inc()
-            _log.info(
-                "request",
-                extra={
-                    "method": scope["method"],
-                    "route": label or "unmatched",
-                    "status": status,
-                    "duration_ms": round((time.perf_counter() - started) * 1000, 2),
-                },
-            )
-            request_id_var.reset(token)
+        traced = scope["path"] not in _UNTRACED_PATHS
+        span_cm = (
+            tracer().start_as_current_span(f"HTTP {scope['method']}", kind=SpanKind.SERVER)
+            if traced
+            else nullcontext(None)
+        )
+        with span_cm as span:
+            try:
+                await self.app(scope, receive, send_wrapper)
+            finally:
+                label = _route_label(scope)
+                if span is not None:
+                    span.update_name(f"HTTP {scope['method']} {label or 'unmatched'}")
+                    span.set_attribute("http.method", scope["method"])
+                    span.set_attribute("http.route", label or "unmatched")
+                    span.set_attribute("http.status_code", status)
+                    if status >= 500:
+                        span.set_status(Status(StatusCode.ERROR))
+                HTTP_REQUESTS.labels(
+                    method=scope["method"], route=label or "unmatched", status=str(status)
+                ).inc()
+                _log.info(
+                    "request",
+                    extra={
+                        "method": scope["method"],
+                        "route": label or "unmatched",
+                        "status": status,
+                        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                    },
+                )
+                request_id_var.reset(token)
 
 
 def _route_label(scope: Scope) -> str | None:
@@ -274,6 +292,9 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
         nonlocal upgrade_pending
         retry: asyncio.Task[None] | None = None
+        # Off unless an OTLP endpoint is set; an already-active setup is not ours to stop.
+        owns_telemetry = not is_active()
+        telemetry = configure_telemetry(settings)
         try:
             try:
                 await upgrade_fn(deps.engine)
@@ -303,6 +324,8 @@ def create_app(
                 await deps.idp_http.aclose()
             await deps.om.aclose()
             await deps.engine.dispose()
+            if owns_telemetry:
+                telemetry.shutdown()
 
     # No web UI (spec §0.7): Swagger/ReDoc pages off; /openapi.json stays, behind auth.
     app = FastAPI(title="Lakeloom", lifespan=lifespan, docs_url=None, redoc_url=None)

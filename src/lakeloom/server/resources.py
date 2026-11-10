@@ -30,6 +30,7 @@ from mcp.types import (
     Resource,
     ResourceTemplate,
 )
+from opentelemetry.trace import Span, Status, StatusCode
 from pydantic import AnyUrl
 
 from lakeloom.errors import LakeloomError
@@ -43,6 +44,7 @@ from lakeloom.publish.artifacts import (
 )
 from lakeloom.publish.negotiation import MediaType
 from lakeloom.server.tools_common import READ_SCOPE, current_principal
+from lakeloom.telemetry import record_resource_read, tracer
 
 if TYPE_CHECKING:
     from lakeloom.server.http_app import AppDeps
@@ -175,22 +177,39 @@ class LakeloomMCP(MCPServer[Any]):
         self, uri: AnyUrl | str, context: Context[Any, Any] | None = None
     ) -> Iterable[ReadResourceContents]:
         text = str(uri)
+        # The span names the resource kind only, never the URI (it can carry an FQN).
+        with tracer().start_as_current_span("mcp.resource") as span:
+            try:
+                return await self._read(text, context, span)
+            except BaseException:
+                span.set_status(Status(StatusCode.ERROR))
+                raise
+
+    def _count(self, span: Span, kind: str, outcome: str) -> None:
+        span.set_attribute("lakeloom.resource", kind)
+        span.set_attribute("lakeloom.outcome", outcome)
+        RESOURCE_READS.labels(resource=kind, outcome=outcome).inc()
+        record_resource_read(kind, outcome)
+
+    async def _read(
+        self, text: str, context: Context[Any, Any] | None, span: Span
+    ) -> Iterable[ReadResourceContents]:
         kind: Kind | None = None
         try:
             self._require_read(context)  # before routing: no not_found/validation oracle
         except MCPError:
-            RESOURCE_READS.labels(resource="any", outcome="forbidden").inc()
+            self._count(span, "any", "forbidden")
             raise
         try:
             kind, build = self._route(text)
             artifact = await build()
         except LakeloomError as exc:
-            RESOURCE_READS.labels(resource=kind or "unknown", outcome="error").inc()
+            self._count(span, kind or "unknown", "error")
             raise _mcp_error(exc) from exc
         except MCPError:
             raise
         except Exception as exc:
-            RESOURCE_READS.labels(resource=kind or "unknown", outcome="error").inc()
+            self._count(span, kind or "unknown", "error")
             # Only the type: the text may carry upstream detail (NFR-SEC-11).
             _log.error("resource %s failed unexpectedly (%s)", text, type(exc).__name__)
             raise _mcp_error(
@@ -200,7 +219,7 @@ class LakeloomMCP(MCPServer[Any]):
                     "retry; if it keeps failing, check the Lakeloom server logs",
                 )
             ) from exc
-        RESOURCE_READS.labels(resource=kind, outcome="ok").inc()
+        self._count(span, kind, "ok")
         return [ReadResourceContents(content=artifact.body.decode(), mime_type=artifact.media_type)]
 
     def _route(self, uri: str) -> tuple[Kind, Callable[[], Awaitable[Artifact]]]:
