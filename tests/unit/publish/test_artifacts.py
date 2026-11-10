@@ -33,8 +33,8 @@ r:Order a skos:Concept, om:GlossaryTerm ;
     om:fullyQualifiedName "retail.Order" .
 """
 ORDERS = "svc.lake.retail.orders"
-GLOSSARY_MS = 1_794_270_923_681  # 2026-11-10T...
-TABLE_MS = 1_790_000_000_000
+GLOSSARY_MS = 4_102_444_800_000  # year 2100: later than any graph load time
+TABLE_MS = 4_000_000_000_000
 
 
 class FakeOM:
@@ -222,7 +222,7 @@ async def test_asset_context_artifact(media: Any) -> None:
     models, om = make()
     art = await asset_context_artifact(models, om, {}, ORDERS, media)  # pyright: ignore[reportArgumentType]
     assert art.media_type == media
-    assert art.last_modified == _dt(TABLE_MS)
+    assert art.last_modified == _dt(GLOSSARY_MS)  # max(table, realized model)
     assert art.links == [f'<http://om:8585/table/{ORDERS}>; rel="via"']
     assert art.etag == etag_for(art.body)
 
@@ -238,3 +238,43 @@ async def test_asset_link_percent_encodes_fqn_segment() -> None:
         == '<http://om:8585/table/svc.%22my%20db%22.s%2Fx>; rel="via"'
     )
     del models, om
+
+
+async def test_last_modified_is_max_of_updated_at_and_load_time() -> None:
+    models, _ = make(glossary_ms=1_000_000_000_000)  # 2001: older than the graph load
+    art = await model_artifact(models, "retail", "text/turtle", version=None)
+    assert art.last_modified == (await models.loaded_at("retail")).replace(microsecond=0)
+
+
+async def test_models_list_without_updated_at_uses_clock_and_links_glossaries() -> None:
+    models, _ = make(glossary_ms=None)
+    now = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    art = await models_list_artifact(models, clock=lambda: now)
+    assert art.last_modified == now
+    assert art.links == ['<http://om:8585/glossary>; rel="via"']
+
+
+async def test_asset_without_any_timestamp_uses_clock() -> None:
+    models, om = make()
+
+    async def get_table(fqn: str, **_: object) -> OMTable | None:
+        return OMTable.model_validate({"id": ORDERS, "fullyQualifiedName": ORDERS})
+
+    om.get_table_by_fqn = get_table  # type: ignore[method-assign]
+    now = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    art = await asset_context_artifact(
+        models,
+        om,  # pyright: ignore[reportArgumentType]
+        {},
+        ORDERS,
+        "text/markdown",
+        clock=lambda: now,  # pyright: ignore[reportArgumentType]
+    )
+    assert art.last_modified == now
+
+
+async def test_om_url_userinfo_is_stripped_from_links() -> None:
+    models, _ = make(om_url="http://user:secret@om:8585/base/")
+    art = await model_artifact(models, "retail", "text/turtle", version=None)
+    assert art.links == ['<http://om:8585/base/glossary/retail>; rel="via"']
+    assert "secret" not in "".join(art.links)

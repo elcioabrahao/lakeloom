@@ -8,7 +8,7 @@ artefact was built from (``rel="via"``; Git links arrive with M2, ADR 0010).
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal
 from urllib.parse import quote
@@ -42,7 +42,13 @@ __all__ = [
     "table_link",
 ]
 
-_EPOCH = datetime.fromtimestamp(0, UTC)
+type Clock = Callable[[], datetime]
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
 _LIST_LIMIT = 200
 _MODELS_LIST_PAGES = 50  # safety bound on pagination while building the models list
 
@@ -112,8 +118,15 @@ def _make(body: bytes, media_type: str, last_modified: datetime, links: list[str
     )
 
 
+async def _model_modified(models: ModelService, info: ModelInfo) -> datetime:
+    """Best-effort lower bound: the later of OM's ``updatedAt`` and the graph load time."""
+    loaded = await models.loaded_at(info.slug)
+    updated = _from_ms(info.updated_at)
+    return max(loaded, updated) if updated else loaded
+
+
 async def _model_stamp(models: ModelService, info: ModelInfo) -> tuple[datetime, list[str]]:
-    modified = _from_ms(info.updated_at) or await models.loaded_at(info.slug)
+    modified = await _model_modified(models, info)
     om_url = models.om_url
     return modified, [] if om_url is None else [glossary_link(om_url, info.slug)]
 
@@ -148,7 +161,7 @@ async def model_context_artifact(
     return _make(_json_bytes({"@context": context}), "application/ld+json", modified, links)
 
 
-async def models_list_artifact(models: ModelService) -> Artifact:
+async def models_list_artifact(models: ModelService, *, clock: Clock = _utcnow) -> Artifact:
     items: list[dict[str, Any]] = []
     cursor: str | None = None
     for _ in range(_MODELS_LIST_PAGES):
@@ -158,7 +171,10 @@ async def models_list_artifact(models: ModelService) -> Artifact:
         if cursor is None:
             break
     newest = max((m["updated_at"] for m in items if m.get("updated_at")), default=None)
-    return _make(_json_bytes({"items": items}), "application/json", _from_ms(newest) or _EPOCH, [])
+    om_url = models.om_url
+    links = [] if om_url is None else [f'<{om_url}/glossary>; rel="via"']
+    modified = _from_ms(newest) or clock()  # never a made-up date: caches would extrapolate it
+    return _make(_json_bytes({"items": items}), "application/json", modified, links)
 
 
 async def concept_artifact(
@@ -183,6 +199,8 @@ async def asset_context_artifact(
     sources: Mapping[str, LakeSource],
     fqn: str,
     media: Literal["text/markdown", "application/json", "application/ld+json"],
+    *,
+    clock: Clock = _utcnow,
 ) -> Artifact:
     ctx = await get_asset_context(fqn, models=models, om=om, sources=sources)
     model = await models.get_model(ctx.model) if ctx.model else None
@@ -193,9 +211,15 @@ async def asset_context_artifact(
     else:
         body = _json_bytes(render_jsonld(ctx, model).payload)
     table = (await fetch_tables(models, om, [ctx.asset.table_fqn]))[ctx.asset.table_fqn]
-    modified = _from_ms(table.updated_at if table else None)
-    if modified is None:
-        modified = await models.loaded_at(model.slug) if model else _EPOCH
+    # Best-effort lower bound: the table's updatedAt and every realized model's freshness.
+    slugs = {r.model for r in ctx.table_concepts} | {
+        r.model for col in ctx.columns for r in col.concepts
+    }
+    stamps = [_from_ms(table.updated_at if table else None)]
+    for slug in sorted(slugs):
+        stamps.append(await _model_modified(models, await models.get_model(slug)))
+    known = [t for t in stamps if t is not None]
+    modified = max(known) if known else clock()
     om_url = models.om_url
     links = [] if om_url is None else [table_link(om_url, ctx.asset.table_fqn)]
     return _make(body, media, modified, links)

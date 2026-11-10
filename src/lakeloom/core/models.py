@@ -153,9 +153,12 @@ class ModelService:
 
     @property
     def om_url(self) -> str | None:
-        """The OpenMetadata base URL without a trailing slash, or None when unconfigured."""
+        """The OpenMetadata base URL without trailing slash or userinfo, or None."""
         url = self._settings.om_url
-        return None if url is None else str(url).rstrip("/")
+        if url is None:
+            return None
+        port = f":{url.port}" if url.port is not None else ""  # userinfo is never exposed
+        return f"{url.scheme}://{url.host}{port}{(url.path or '').rstrip('/')}"
 
     async def loaded_at(self, slug: str) -> datetime:
         """Wall-clock time the model's current graph was loaded (stable while cached)."""

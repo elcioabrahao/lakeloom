@@ -1,5 +1,6 @@
 """``Accept`` negotiation (RFC 9110 section 12.5.1) over the media types Lakeloom publishes."""
 
+import math
 from collections.abc import Sequence
 from typing import Literal
 
@@ -32,15 +33,20 @@ def _parse(accept: str) -> list[tuple[str, float]] | None:
         rng = head.lower()
         if rng.count("/") != 1 or not all(rng.split("/")):
             continue  # malformed range: ignored, never an error
-        q = 1.0
+        q: float | None = 1.0
         for param in params:
             name, _, value = param.partition("=")
             if name.strip().lower() == "q":
                 try:
-                    q = min(max(float(value.strip()), 0.0), 1.0)
+                    parsed = float(value.strip())
                 except ValueError:
-                    q = 1.0
-        ranges.append((rng, q))
+                    parsed = math.nan
+                if math.isnan(parsed):
+                    q = None  # unusable q: the range is ignored, as if not listed
+                    break
+                q = min(max(parsed, 0.0), 1.0)
+        if q is not None:
+            ranges.append((rng, q))
     return ranges or None
 
 
@@ -56,7 +62,9 @@ def _specificity(rng: str, media: str) -> int:
 
 
 def choose(accept: str | None, offered: Sequence[MediaType]) -> MediaType | None:
-    """The offered media type with the highest q; ties keep the order of ``offered``.
+    """The offered media type with the highest q.
+
+    Ties go to the more specific range, then to the order of ``offered``.
 
     The most specific matching range decides a type's q (so ``text/turtle;q=0, */*`` refuses
     turtle only). Absent, empty or entirely malformed headers select ``offered[0]``; ``None``
@@ -68,12 +76,15 @@ def choose(accept: str | None, offered: Sequence[MediaType]) -> MediaType | None
     if ranges is None:
         return offered[0]
     best: MediaType | None = None
-    best_q = 0.0
-    for media in offered:
+    best_key: tuple[float, int, int] | None = None
+    for index, media in enumerate(offered):
         matches = [(_specificity(r, media), q) for r, q in ranges if _specificity(r, media)]
         if not matches:
             continue
-        q = max(matches)[1]  # highest specificity wins (max by specificity first)
-        if q > best_q:
-            best, best_q = media, q
+        specificity, q = max(matches)  # the most specific matching range decides the q
+        if q <= 0:
+            continue
+        key = (q, specificity, -index)  # q, then explicit > type/* > */*, then route order
+        if best_key is None or key > best_key:
+            best, best_key = media, key
     return best
