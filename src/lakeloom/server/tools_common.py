@@ -8,6 +8,7 @@ and counts the call in ``lakeloom_tool_calls_total`` with outcome ok/error/forbi
 
 import logging
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import Any
 
 from mcp.server.mcpserver import Context
@@ -24,6 +25,7 @@ __all__ = [
     "client_name",
     "current_principal",
     "guarded",
+    "local_principal",
     "principal_of",
     "tool_error",
 ]
@@ -32,6 +34,10 @@ READ_SCOPE = "lakeloom:read"
 PROPOSE_SCOPE = "lakeloom:propose"
 
 _log = logging.getLogger("lakeloom.mcp")
+
+# The stdio transport has no HTTP request: its configured local principal (NFR-SEC-04) lives
+# here. Set only by :func:`lakeloom.server.stdio.run_stdio`; HTTP never reads or sets it.
+local_principal: ContextVar[Principal | None] = ContextVar("lakeloom_local_principal", default=None)
 
 
 def tool_error(code: ErrorCode, message: str, hint: str) -> CallToolResult:
@@ -45,10 +51,13 @@ def tool_error(code: ErrorCode, message: str, hint: str) -> CallToolResult:
 
 
 def current_principal(ctx: Context) -> Principal | None:
-    """The caller: the principal :class:`BearerAuthMiddleware` stored in the ASGI state."""
+    """The caller: the HTTP principal :class:`BearerAuthMiddleware` stored in the ASGI state.
+
+    Without an HTTP request (stdio) it is the configured local principal, if any.
+    """
     request = ctx.request_context.request
     if not isinstance(request, Request):
-        return None
+        return local_principal.get()
     state: dict[str, Any] = request.scope.get("state") or {}
     principal = state.get("principal")
     return principal if isinstance(principal, Principal) else None

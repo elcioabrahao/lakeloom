@@ -96,6 +96,9 @@ class Settings(BaseSettings):
     # None means "auto": False in production, True in development (resolved after validation).
     stdio_enabled: bool | None = None
     otel_exporter_otlp_endpoint: str | None = None
+    # M1c: the configured local principal of the stdio transport (NFR-SEC-04). JSON or comma list.
+    stdio_principal: str = Field(default="local", min_length=1)
+    stdio_scopes: Annotated[list[str], NoDecode] = ["lakeloom:read"]
 
     # M0 additions (docs/decisions/0002-additional-m0-settings.md)
     data_dir: Path = Path("/data")
@@ -118,6 +121,27 @@ class Settings(BaseSettings):
             return [part.strip() for part in value.split(",") if part.strip()]
         if isinstance(value, str):
             return json.loads(value)
+        return value
+
+    @field_validator("stdio_scopes", mode="before")
+    @classmethod
+    def _parse_stdio_scopes(cls, value: Any) -> Any:
+        if isinstance(value, str) and value.lstrip().startswith("["):
+            return json.loads(value)
+        if isinstance(value, str):
+            return [part.strip() for part in value.split(",") if part.strip()]
+        return value
+
+    @field_validator("stdio_scopes", mode="after")
+    @classmethod
+    def _check_stdio_scopes(cls, value: list[str]) -> list[str]:
+        from lakeloom.server.auth import SCOPES  # lazy: auth imports this module
+
+        unknown = sorted(set(value) - set(SCOPES))
+        if unknown:
+            raise ConfigError(
+                f"LAKELOOM_STDIO_SCOPES names unknown scopes {unknown}; known: {list(SCOPES)}"
+            )
         return value
 
     @model_validator(mode="after")

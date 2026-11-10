@@ -118,6 +118,42 @@ Any other MCP client that supports Streamable HTTP works the same way: point it 
 `http://localhost:8000/mcp` and send the bearer token. Tokens are short-lived; fetch a new one
 when it expires.
 
+### stdio transport (local use)
+
+For a local client that launches the server itself (Claude Code, Claude Desktop), Lakeloom can
+speak MCP over stdin/stdout. It is treated as the configured local principal
+(`LAKELOOM_STDIO_PRINCIPAL`, default `local`, an agent) with only the scopes in
+`LAKELOOM_STDIO_SCOPES` (JSON or comma list, default `lakeloom:read`); there is no bearer
+token and no OIDC setup. It is disabled in production unless `LAKELOOM_STDIO_ENABLED=true`
+(default on in development), and **the container image disables it**. Logs go to stderr;
+stdout carries only the protocol.
+
+```bash
+claude mcp add lakeloom \
+  -e LAKELOOM_STDIO_ENABLED=true -e LAKELOOM_OM_URL=http://localhost:8585 \
+  -e LAKELOOM_OM_BOT_TOKEN=... -e LAKELOOM_DB_URL=sqlite:////tmp/lakeloom.db \
+  -- lakeloom serve --transport stdio
+```
+
+The same as a project `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "lakeloom": {
+      "command": "lakeloom",
+      "args": ["serve", "--transport", "stdio"],
+      "env": {
+        "LAKELOOM_STDIO_ENABLED": "true",
+        "LAKELOOM_OM_URL": "http://localhost:8585",
+        "LAKELOOM_OM_BOT_TOKEN": "...",
+        "LAKELOOM_DB_URL": "sqlite:////tmp/lakeloom.db"
+      }
+    }
+  }
+}
+```
+
 ### Lake sources and scans
 
 Lake sources are configured by the operator in a YAML file named by `LAKELOOM_CONFIG_FILE`;

@@ -56,12 +56,19 @@ def serve(
     port: Annotated[
         int | None, typer.Option(help="Bind port [default: LAKELOOM_PORT or 8000].")
     ] = None,
+    transport: Annotated[
+        Literal["http", "stdio"],
+        typer.Option(help="http: /mcp, health and metrics; stdio: local MCP over stdin/stdout."),
+    ] = "http",
 ) -> None:
-    """Serve the MCP endpoint (/mcp), health checks and metrics over HTTP."""
+    """Serve the MCP endpoint (/mcp), health checks and metrics over HTTP, or MCP over stdio."""
     # Imported here so `lakeloom version` stays fast and needs no server dependencies.
     from lakeloom.server.http_app import build_deps
     from lakeloom.server.mcp_app import create_server_app
 
+    if transport == "stdio":
+        _serve_stdio()
+        return
     try:
         settings = get_settings()
         configure_logging(settings.log_level)
@@ -78,6 +85,28 @@ def serve(
         # RequestContextMiddleware writes the access log; uvicorn's would duplicate it.
         access_log=False,
     )
+
+
+def _serve_stdio() -> None:
+    """MCP over stdio as the configured local principal (NFR-SEC-04); stdout is protocol only."""
+    from lakeloom.server.http_app import build_deps
+    from lakeloom.server.stdio import StdioStartupError, run_stdio
+
+    try:
+        settings = get_settings()
+        configure_logging(settings.log_level, stream=sys.stderr)
+        if not settings.stdio_enabled:
+            typer.echo("stdio transport is disabled (set LAKELOOM_STDIO_ENABLED=true)", err=True)
+            raise typer.Exit(code=2)
+        deps = build_deps(settings, http_auth=False)
+    except (ConfigError, ValidationError) as exc:
+        typer.echo(f"configuration error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    try:
+        asyncio.run(run_stdio(deps))
+    except StdioStartupError as exc:
+        typer.echo(f"stdio startup failed: {exc}", err=True)
+        raise typer.Exit(code=1) from None
 
 
 db_app = typer.Typer(name="db", help="State store commands.", no_args_is_help=True)
@@ -408,3 +437,7 @@ def export_cmd(
                 raise typer.Exit(code=1) from None
 
     _run(_go())
+
+
+if __name__ == "__main__":
+    app()

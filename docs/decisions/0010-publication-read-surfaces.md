@@ -51,6 +51,15 @@ yet (M2/M3).
 - **Concept names.** A plain name resolves when the best-ranked tier of matches (exact name
   1.0 > synonym 0.95 > local name 0.9) holds exactly one concept; otherwise a
   `validation_error` lists the candidates. The HTTP route and the resources rely on this.
+- **stdio principal (NFR-SEC-04).** `lakeloom serve --transport stdio` exits 2 unless
+  `LAKELOOM_STDIO_ENABLED` resolves true (off in production and in the image). The caller is
+  a `PrincipalType.AGENT` named by `LAKELOOM_STDIO_PRINCIPAL` (local tools are driven by an
+  agent), with exactly `LAKELOOM_STDIO_SCOPES` (validated against the known scopes, default
+  `lakeloom:read`) and an empty token, so on-behalf-of exchange is unavailable. It lives in a
+  contextvar that `current_principal()` falls back to when there is no HTTP request. stdio
+  needs no OIDC issuer or public URL (`build_deps(..., http_auth=False)`), applies migrations
+  once and fails fast when the state store is unreachable (no background retry), and logs
+  only to stderr.
 
 ## Consequences
 

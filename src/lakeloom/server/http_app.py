@@ -91,21 +91,26 @@ class AppDeps:
         self.scans = ScanService(self.sources, ScanRepository(self.engine), self.om, self.settings)
 
 
-def build_deps(settings: Settings) -> AppDeps:
-    """Wire settings into live dependencies; fail fast when required config is missing."""
-    required = {
-        "LAKELOOM_OM_URL": settings.om_url,
-        "LAKELOOM_OIDC_ISSUER": settings.oidc_issuer,
-        "LAKELOOM_PUBLIC_URL": settings.public_url,
-    }
+def build_deps(settings: Settings, *, http_auth: bool = True) -> AppDeps:
+    """Wire settings into live dependencies; fail fast when required config is missing.
+
+    ``http_auth=False`` (stdio) does not require the OIDC issuer or public URL: no
+    bearer token is ever validated, so the validator is a placeholder that is never used.
+    """
+    required = {"LAKELOOM_OM_URL": settings.om_url}
+    if http_auth:
+        required |= {
+            "LAKELOOM_OIDC_ISSUER": settings.oidc_issuer,
+            "LAKELOOM_PUBLIC_URL": settings.public_url,
+        }
     missing = [name for name, value in required.items() if not value]
-    if missing or settings.om_url is None or settings.oidc_issuer is None:
+    if missing or settings.om_url is None or (http_auth and settings.oidc_issuer is None):
         raise ConfigError(f"missing required configuration: set {', '.join(missing)}")
     sources = load_lake_sources(settings)
     engine = _create_engine_or_config_error(settings.db_url)
     idp_http = httpx.AsyncClient(timeout=_IDP_TIMEOUT)
     validator = TokenValidator(
-        issuer=settings.oidc_issuer,
+        issuer=settings.oidc_issuer or "urn:lakeloom:stdio",
         audience=settings.oidc_audience,
         http=idp_http,
         jwks_url=settings.oidc_jwks_url,
