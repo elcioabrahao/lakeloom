@@ -209,6 +209,12 @@ class DeltaStorageSource:
             name = entry.name or entry.uri.rstrip("/").rsplit("/", 1)[-1]
             self._entries[(entry.catalog, entry.schema_, name)] = entry
 
+    def table_uris(self) -> dict[str, TableRef]:
+        """Configured storage URI -> table address (asset resolution, FR-CTX-01)."""
+        return {
+            e.uri: TableRef(catalog=c, schema=s, name=n) for (c, s, n), e in self._entries.items()
+        }
+
     def _entry(self, ref: TableRef) -> DeltaTableEntry:
         entry = self._entries.get((ref.catalog, ref.schema_, ref.name))
         if entry is None:

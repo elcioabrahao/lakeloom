@@ -38,16 +38,20 @@ __all__ = [
     "AssetPage",
     "AssetRef",
     "AttributeInfo",
+    "ConceptBundle",
     "ConceptDetail",
     "ConceptMatch",
     "ConceptRef",
     "ConceptSummary",
     "MappingInfo",
     "RelationInfo",
+    "concept_bundles",
     "concept_markdown",
     "explain_concept",
+    "fetch_tables",
     "find_assets_for_concept",
     "find_concepts",
+    "realizing_tables",
     "summarize_concept",
 ]
 
@@ -745,6 +749,63 @@ async def find_assets_for_concept(
         next_cursor=_encode_offset(offset + limit) if more else None,
         truncated=truncated,
     )
+
+
+# --- helpers for asset contexts (Task 6) ---------------------------------------------------
+
+
+class ConceptBundle(BaseModel):
+    """Everything an asset context embeds about one concept."""
+
+    ref: ConceptRef
+    summary: ConceptSummary
+    attributes: list[AttributeInfo] = []
+    relations: list[RelationInfo] = []
+
+
+async def fetch_tables(
+    models: ModelService, om: OMClient, fqns: list[str]
+) -> dict[str, OMTable | None]:
+    """OM tables by FQN through the per-service TTL cache (``None`` = not in OM)."""
+    return await _fetch_tables(om, _cache_for(models), fqns)
+
+
+async def concept_bundles(models: ModelService, fqns: Iterable[str]) -> dict[str, ConceptBundle]:
+    """Bundles for the term FQNs known to a model graph; unknown FQNs are left out."""
+    by_slug: dict[str, list[str]] = {}
+    for fqn in dict.fromkeys(fqns):
+        by_slug.setdefault(fqn.split(".", 1)[0], []).append(fqn)
+    out: dict[str, ConceptBundle] = {}
+    for slug, members in by_slug.items():
+        try:
+            g = await _graph(models, slug)
+        except LakeloomError as exc:
+            if exc.code == "not_found":
+                continue  # a glossary that is not a model, or deleted meanwhile
+            raise
+        for fqn in members:
+            node = g.by_fqn.get(fqn)
+            if node is None:
+                continue
+            out[fqn] = ConceptBundle(
+                ref=g.concepts[node],
+                summary=ConceptSummary(
+                    definition=_definition(g, node),
+                    synonyms=_synonyms(g, node),
+                    iri=g.concepts[node].iri,
+                    parents=_sorted_refs(g, _parents(g, node)),
+                ),
+                attributes=_attributes(g, node),
+                relations=_relations(g, node),
+            )
+    return out
+
+
+async def realizing_tables(models: ModelService, om: OMClient, concept_fqn: str) -> list[str]:
+    """Sorted FQNs of the tables realizing a concept directly (first OM page of assets)."""
+    res = await _resolve(models, om, concept_fqn)
+    assets, _, _ = await _term_assets_all(om, _cache_for(models), res, _ASSET_PAGE)
+    return sorted({a.fqn for a in assets})
 
 
 # --- Markdown -----------------------------------------------------------------------------

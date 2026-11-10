@@ -1,0 +1,419 @@
+{
+  "$defs": {
+    "AttributeInfo": {
+      "properties": {
+        "allowed_values": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Values",
+          "type": "array"
+        },
+        "datatype": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Datatype"
+        },
+        "iri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Iri"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "AttributeInfo",
+      "type": "object"
+    },
+    "ColumnContext": {
+      "properties": {
+        "attributes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AttributeInfo"
+          },
+          "title": "Attributes",
+          "type": "array"
+        },
+        "concepts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ConceptRef"
+          },
+          "title": "Concepts",
+          "type": "array"
+        },
+        "data_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Data Type"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UntrustedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ColumnContext",
+      "type": "object"
+    },
+    "ConceptRef": {
+      "properties": {
+        "fqn": {
+          "title": "Fqn",
+          "type": "string"
+        },
+        "iri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Iri"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        }
+      },
+      "required": [
+        "iri",
+        "fqn",
+        "model",
+        "label"
+      ],
+      "title": "ConceptRef",
+      "type": "object"
+    },
+    "ConceptSummary": {
+      "description": "The slice of a concept an asset context embeds (Task 6).",
+      "properties": {
+        "definition": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UntrustedText"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "iri": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Iri"
+        },
+        "parents": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ConceptRef"
+          },
+          "title": "Parents",
+          "type": "array"
+        },
+        "synonyms": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/UntrustedText"
+          },
+          "title": "Synonyms",
+          "type": "array"
+        }
+      },
+      "title": "ConceptSummary",
+      "type": "object"
+    },
+    "LineageSummary": {
+      "properties": {
+        "downstream": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Downstream",
+          "type": "array"
+        },
+        "upstream": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Upstream",
+          "type": "array"
+        }
+      },
+      "title": "LineageSummary",
+      "type": "object"
+    },
+    "RelatedAsset": {
+      "properties": {
+        "concept": {
+          "$ref": "#/$defs/ConceptRef"
+        },
+        "relation": {
+          "title": "Relation",
+          "type": "string"
+        },
+        "tables": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Tables",
+          "type": "array"
+        }
+      },
+      "required": [
+        "relation",
+        "concept",
+        "tables"
+      ],
+      "title": "RelatedAsset",
+      "type": "object"
+    },
+    "ResolvedAsset": {
+      "properties": {
+        "column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Column"
+        },
+        "fqn": {
+          "title": "Fqn",
+          "type": "string"
+        },
+        "om_id": {
+          "title": "Om Id",
+          "type": "string"
+        },
+        "table_fqn": {
+          "title": "Table Fqn",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fqn",
+        "table_fqn",
+        "om_id"
+      ],
+      "title": "ResolvedAsset",
+      "type": "object"
+    },
+    "UntrustedText": {
+      "description": "Text from outside Lakeloom's trust boundary, flagged for structured output.",
+      "properties": {
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "untrusted": {
+          "const": true,
+          "default": true,
+          "title": "Untrusted",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "source"
+      ],
+      "title": "UntrustedText",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "asset": {
+      "$ref": "#/$defs/ResolvedAsset"
+    },
+    "columns": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ColumnContext"
+      },
+      "title": "Columns",
+      "type": "array"
+    },
+    "concept_details": {
+      "additionalProperties": {
+        "$ref": "#/$defs/ConceptSummary"
+      },
+      "default": {},
+      "title": "Concept Details",
+      "type": "object"
+    },
+    "data_products": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Data Products",
+      "type": "array"
+    },
+    "description": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/UntrustedText"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "domains": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Domains",
+      "type": "array"
+    },
+    "lineage": {
+      "$ref": "#/$defs/LineageSummary",
+      "default": {
+        "downstream": [],
+        "upstream": []
+      }
+    },
+    "model": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model"
+    },
+    "owners": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Owners",
+      "type": "array"
+    },
+    "relationships": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/RelatedAsset"
+      },
+      "title": "Relationships",
+      "type": "array"
+    },
+    "release": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Release"
+    },
+    "table_concepts": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ConceptRef"
+      },
+      "title": "Table Concepts",
+      "type": "array"
+    },
+    "token_estimate": {
+      "default": 0,
+      "title": "Token Estimate",
+      "type": "integer"
+    },
+    "truncated": {
+      "default": false,
+      "title": "Truncated",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "asset"
+  ],
+  "title": "AssetContext",
+  "type": "object"
+}
