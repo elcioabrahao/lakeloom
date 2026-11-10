@@ -29,6 +29,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from lakeloom.config import Settings
+from lakeloom.scopes import SCOPES
 
 __all__ = [
     "MAX_TOKEN_LENGTH",
@@ -46,13 +47,6 @@ __all__ = [
 
 _log = logging.getLogger(__name__)
 
-SCOPES: Final = (
-    "lakeloom:read",
-    "lakeloom:propose",
-    "lakeloom:review",
-    "lakeloom:publish",
-    "lakeloom:admin",
-)
 PRM_PATH: Final = "/.well-known/oauth-protected-resource"
 PUBLIC_PATHS: Final = ("/healthz", "/readyz", "/metrics", PRM_PATH)
 

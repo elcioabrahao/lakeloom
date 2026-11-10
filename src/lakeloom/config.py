@@ -18,6 +18,8 @@ from pydantic import AnyHttpUrl, Field, SecretStr, ValidationError, field_valida
 from pydantic_core import InitErrorDetails, PydanticCustomError
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from lakeloom.scopes import SCOPES
+
 ENV_PREFIX = "LAKELOOM_"
 SECRET_FILE_FIELDS = ("om_bot_token", "git_token", "db_url")
 
@@ -135,8 +137,6 @@ class Settings(BaseSettings):
     @field_validator("stdio_scopes", mode="after")
     @classmethod
     def _check_stdio_scopes(cls, value: list[str]) -> list[str]:
-        from lakeloom.server.auth import SCOPES  # lazy: auth imports this module
-
         unknown = sorted(set(value) - set(SCOPES))
         if unknown:
             raise ConfigError(
