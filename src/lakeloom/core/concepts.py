@@ -872,10 +872,14 @@ async def concept_bundles(models: ModelService, fqns: Iterable[str]) -> dict[str
 
 
 async def realizing_tables(models: ModelService, om: OMClient, concept_fqn: str) -> list[str]:
-    """Sorted FQNs of the tables realizing a concept directly (first OM page of assets)."""
+    """Sorted FQNs of the tables realizing a concept directly (first OM page of assets).
+
+    A realizing column contributes its table; other asset types (dashboards, topics...)
+    are left out.
+    """
     res = await _resolve(models, om, concept_fqn)
     assets, _, _ = await _term_assets_all(om, _cache_for(models), res, _ASSET_PAGE)
-    return sorted({a.fqn for a in assets})
+    return sorted({a.fqn for a in assets if a.type in ("table", "column")})
 
 
 # --- Markdown -----------------------------------------------------------------------------

@@ -599,3 +599,10 @@ async def test_derived_table_tags_do_not_count_like_columns() -> None:
     parsed = om.tables[ORDERS].tags
     assert direct_glossary_tags(parsed, column=False) == direct_glossary_tags(parsed, column=True)
     assert direct_glossary_tags(parsed, column=False) == ["retail.Order"]
+
+
+async def test_relationships_list_only_tables() -> None:
+    om = FakeOM()
+    om.assets["retail.Customer"] = [_ref(CUSTOMERS), _ref("svc.dash.customers", "dashboard")]
+    ctx = await ctx_for(om=om)
+    assert [r.tables for r in ctx.relationships] == [[CUSTOMERS]]
