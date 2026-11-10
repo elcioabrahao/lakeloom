@@ -130,7 +130,8 @@ speak MCP over stdin/stdout. It is treated as the configured local principal
 (`LAKELOOM_STDIO_PRINCIPAL`, default `local`, an agent) with only the scopes in
 `LAKELOOM_STDIO_SCOPES` (JSON or comma list, default `lakeloom:read`); there is no bearer
 token and no OIDC setup. It is disabled in production unless `LAKELOOM_STDIO_ENABLED=true`
-(default on in development), and **the container image disables it**. Logs go to stderr;
+(default on in development), and **the container image disables it**. `LAKELOOM_STDIO_SCOPES` may
+grant any known scope, including `lakeloom:admin`: grant only what the local user should have. Logs go to stderr;
 stdout carries only the protocol.
 
 ```bash
