@@ -143,9 +143,11 @@ cycle-safe.
 
 ## Asset context (Task 6)
 
-- Column realizations are Glossary tags with `labelType != Derived`: OM propagates table-level
-  glossary tags to columns as `Derived`, and counting them would repeat the table concept on
-  every column. Table realizations are all Glossary tags on the table.
+- Realizations are Glossary tags with `labelType != Derived`, for tables and columns alike (one
+  helper, `direct_glossary_tags`, used by the asset context and by realizing-asset lists): OM
+  propagates table-level glossary tags to columns as `Derived`, and counting them would repeat
+  the table concept on every column; a `Derived` table tag comes from a parent or a data
+  product, so it is excluded too for consistency.
 - `AssetContext` carries no `token_estimate` or `truncated`. Each renderer (`render_markdown`,
   `render_json`, `render_jsonld`) returns `Rendered(payload, token_estimate, truncated)` computed
   for that very rendering; tools echo those values, so text and metadata cannot disagree.

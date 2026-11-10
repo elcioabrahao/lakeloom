@@ -25,6 +25,7 @@ from lakeloom.core.concepts import (
     ConceptRef,
     ConceptSummary,
     concept_bundles,
+    direct_glossary_tags,
     fetch_tables,
     realizing_tables,
 )
@@ -330,16 +331,6 @@ async def _relationships(
     return related[:_MAX_RELATIONS]
 
 
-def _glossary(tags: list[Any], *, direct_only: bool) -> list[str]:
-    return sorted(
-        {
-            t.tag_fqn
-            for t in tags
-            if t.source == "Glossary" and not (direct_only and t.label_type == "Derived")
-        }
-    )
-
-
 def _sorted_refs(fqns: list[str], bundles: Mapping[str, ConceptBundle]) -> list[ConceptRef]:
     refs = [bundles[f].ref for f in fqns if f in bundles]
     return sorted(refs, key=lambda r: (r.label, r.fqn))
@@ -357,8 +348,8 @@ async def get_asset_context(
 
     resolved, table = await _resolve(asset, sources, fetch)
     columns = [c for c in table.columns if resolved.column in (None, c.name)]
-    table_fqns = _glossary(table.tags, direct_only=False)
-    column_fqns = {c.name: _glossary(c.tags, direct_only=True) for c in columns}
+    table_fqns = direct_glossary_tags(table.tags, column=False)
+    column_fqns = {c.name: direct_glossary_tags(c.tags, column=True) for c in columns}
     wanted = [*table_fqns, *(f for fqns in column_fqns.values() for f in fqns)]
     bundles, lineage = await asyncio.gather(concept_bundles(models, wanted), _lineage(om, table))
     table_concepts = _sorted_refs(table_fqns, bundles)

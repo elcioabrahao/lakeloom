@@ -584,3 +584,18 @@ async def test_fr_ctx_06_unreachable_budget_is_minimal_and_truncated() -> None:
         assert cut.token_estimate > 1  # the skeleton cannot fit; flagged, not hidden
     cut = render_json(ctx, max_tokens=1).payload
     assert cut["description"] is None and cut["relationships"] == []
+
+
+async def test_derived_table_tags_do_not_count_like_columns() -> None:
+    from lakeloom.core.concepts import direct_glossary_tags
+
+    tags = [_tag("retail.Order"), _tag("retail.Customer", "Derived")]
+    om = FakeOM({ORDERS: _table(ORDERS, [], [])})
+    om.tables[ORDERS].tags = OMTable.model_validate(
+        {"id": "x", "fullyQualifiedName": ORDERS, "tags": tags}
+    ).tags
+    ctx = await ctx_for(om=om)
+    assert [c.fqn for c in ctx.table_concepts] == ["retail.Order"]
+    parsed = om.tables[ORDERS].tags
+    assert direct_glossary_tags(parsed, column=False) == direct_glossary_tags(parsed, column=True)
+    assert direct_glossary_tags(parsed, column=False) == ["retail.Order"]

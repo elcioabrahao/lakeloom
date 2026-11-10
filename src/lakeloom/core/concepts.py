@@ -48,6 +48,7 @@ __all__ = [
     "asset_line",
     "concept_bundles",
     "concept_markdown",
+    "direct_glossary_tags",
     "explain_concept",
     "fetch_tables",
     "find_assets_for_concept",
@@ -565,13 +566,27 @@ async def find_concepts(
 # --- realizations -------------------------------------------------------------------------
 
 
-def _direct(tags: Iterable[object], term_fqn: str) -> bool:
-    return any(
-        getattr(t, "tag_fqn", None) == term_fqn
-        and getattr(t, "source", None) == "Glossary"
-        and getattr(t, "label_type", None) != "Derived"
-        for t in tags
+def direct_glossary_tags(tags: Iterable[object], *, column: bool) -> list[str]:
+    """Sorted term FQNs an asset realizes directly: Glossary tags not ``Derived``.
+
+    One rule for tables and columns (ADR 0009): OM propagates table-level glossary tags to
+    columns as ``Derived``, and a ``Derived`` table tag comes from elsewhere (a parent or a
+    data product), so neither counts as a realization. ``column`` names the asset kind for
+    the caller's clarity; the rule is the same for both.
+    """
+    return sorted(
+        {
+            fqn
+            for t in tags
+            if isinstance(fqn := getattr(t, "tag_fqn", None), str)
+            and getattr(t, "source", None) == "Glossary"
+            and getattr(t, "label_type", None) != "Derived"
+        }
     )
+
+
+def _direct(tags: Iterable[object], term_fqn: str, *, column: bool) -> bool:
+    return term_fqn in direct_glossary_tags(tags, column=column)
 
 
 class _Cache:
@@ -671,9 +686,9 @@ async def _realizing(
         if table is not None:
             if is_column:
                 col = next((c for c in table.columns if c.name == column), None)
-                if col is None or not _direct(col.tags, term_fqn):
+                if col is None or not _direct(col.tags, term_fqn, column=True):
                     continue
-            elif not _direct(table.tags, term_fqn):
+            elif not _direct(table.tags, term_fqn, column=False):
                 continue
         out.append(AssetRef(fqn=table_fqn, type="column" if is_column else "table", column=column))
     return out
