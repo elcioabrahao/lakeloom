@@ -26,6 +26,7 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from lakeloom.config import ConfigError, Settings
+from lakeloom.core.models import ModelService
 from lakeloom.core.scans import ScanService
 from lakeloom.core.sources import close_sources, start_sources
 from lakeloom.logging import request_id_var
@@ -74,8 +75,10 @@ class AppDeps:
     # Operator-configured lake sources (NFR-SEC-13); started and closed by the lifespan.
     sources: dict[str, LakeSource] = field(default_factory=dict[str, LakeSource])
     scans: ScanService = field(init=False)
+    models: ModelService = field(init=False)
 
     def __post_init__(self) -> None:
+        self.models = ModelService(self.om, self.settings)
         self.scans = ScanService(self.sources, ScanRepository(self.engine), self.om, self.settings)
 
 

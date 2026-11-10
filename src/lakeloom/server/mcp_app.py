@@ -6,8 +6,9 @@ guards ``/mcp`` and stores the :class:`Principal` in the ASGI scope state, which
 read through ``ctx.request_context.request``. Tools check their own scope and answer a
 missing one with a typed ``forbidden`` error result (FR-AGT-05).
 
-Tools: ``get_server_info`` (FR-OM-06, §7: scope ``lakeloom:read``, no side effects) and
-the source/scan tools of :mod:`lakeloom.server.tools_sources` (M1a). Shared plumbing
+Tools: ``get_server_info`` (FR-OM-06, §7: scope ``lakeloom:read``, no side effects), the
+source/scan tools of :mod:`lakeloom.server.tools_sources` (M1a) and the semantic read
+tools of :mod:`lakeloom.server.tools_semantic` (M1b). Shared plumbing
 (scope checks, typed errors, metrics) lives in :mod:`lakeloom.server.tools_common`.
 """
 
@@ -26,6 +27,7 @@ from lakeloom.server.auth import Principal
 from lakeloom.server.http_app import AppDeps, create_app
 from lakeloom.server.server_info import ServerInfo, build_server_info, summarize
 from lakeloom.server.tools_common import READ_SCOPE, guarded, tool_error
+from lakeloom.server.tools_semantic import register_semantic_tools
 from lakeloom.server.tools_sources import register_source_tools
 
 __all__ = ["MCP_PATH", "create_mcp", "create_server_app", "tool_error", "transport_security"]
@@ -57,7 +59,9 @@ def create_mcp(deps: AppDeps) -> MCPServer:
             "Lakeloom builds semantic models of a data lake in OpenMetadata. "
             "Start with get_server_info to see versions, enabled features and your scopes; "
             "list_sources, list_tables and describe_table explore the configured lake "
-            "sources, and scan_lake_source records a scan of one."
+            "sources, and scan_lake_source records a scan of one. The semantic tools list_models, "
+            "find_concepts, explain_concept, find_assets_for_concept, get_asset_context and "
+            "export_model read the business vocabulary and what each asset means."
         ),
         log_level="WARNING",
     )
@@ -85,6 +89,7 @@ def create_mcp(deps: AppDeps) -> MCPServer:
         ),
     )
     register_source_tools(mcp, deps)
+    register_semantic_tools(mcp, deps)
     return mcp
 
 

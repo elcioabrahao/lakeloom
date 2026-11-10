@@ -36,3 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dev stack: Unity Catalog OSS, fixture seeding for OpenMetadata and Unity Catalog, and three
   configured sources (`fixture_delta`, `fixture_uc`, `openmetadata_mcp`).
 - A warning at startup when an upstream MCP tool used by a mapping is not annotated read-only.
+- M1b semantic read path: model service over OpenMetadata glossaries with deterministic RDF
+  export (Turtle, RDF/XML, N-Triples, JSON-LD, SKOS), concept search and explanation, and asset
+  context in Markdown, JSON and JSON-LD with token estimates and `max_tokens` truncation.
+- MCP tools `list_models`, `get_model`, `find_concepts`, `explain_concept`,
+  `find_assets_for_concept`, `get_asset_context` and `export_model`.
+- CLI commands `lakeloom models`, `lakeloom concept`, `lakeloom context` and `lakeloom export`.
+- Setting `LAKELOOM_MODEL_CACHE_TTL_SECONDS` (default 60).

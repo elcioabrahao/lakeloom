@@ -4,7 +4,9 @@
 ``lakeloom sources``, ``lakeloom tables SOURCE`` and ``lakeloom scan SOURCE`` use the
 sources in ``LAKELOOM_CONFIG_FILE`` directly, as the operator (FR-AGT-07, FR-SRC-10).
 Configuration errors are printed to stderr and exit with code 2, without a traceback;
-typed errors (``not_found``, ``upstream_unavailable``, ...) exit with code 1.
+``lakeloom models``, ``concept``, ``context`` and ``export`` read the semantic models in
+OpenMetadata (FR-CTX-01..04, FR-IO-01). Typed errors (``not_found``,
+``upstream_unavailable``, ...) exit with code 1.
 """
 
 import asyncio
@@ -12,7 +14,8 @@ import getpass
 import sys
 from collections.abc import AsyncGenerator, Coroutine
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Annotated, Any
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import typer
 import uvicorn
@@ -25,6 +28,8 @@ from lakeloom.logging import configure_logging
 from lakeloom.untrusted import single_line
 
 if TYPE_CHECKING:
+    from lakeloom.core.models import ModelService
+    from lakeloom.om.client import OMClient
     from lakeloom.sources.base import LakeSource
 
 CLI_CLIENT = "lakeloom-cli"
@@ -261,3 +266,145 @@ def scan_cmd(
         # a DB URL or upstream text).
         typer.echo(f"scan failed ({type(exc).__name__})", err=True)
         raise typer.Exit(code=1) from None
+
+
+# --- semantic read path (operator side; the same operations as the MCP semantic tools) -----
+
+
+@asynccontextmanager
+async def _open_semantic(
+    settings: Settings, *, with_sources: bool = False
+) -> AsyncGenerator[tuple["OMClient", "ModelService", dict[str, "LakeSource"]]]:
+    from lakeloom.core.models import ModelService
+    from lakeloom.om.client import OMClient
+
+    if settings.om_url is None:
+        raise ConfigError("LAKELOOM_OM_URL is required")
+    om = OMClient(str(settings.om_url), settings.om_bot_token)
+    try:
+        if with_sources:
+            async with _open_sources(settings) as sources:
+                yield om, ModelService(om, settings), sources
+        else:
+            yield om, ModelService(om, settings), {}
+    finally:
+        await om.aclose()
+
+
+@app.command("models")
+def models_cmd() -> None:
+    """List the semantic models (OpenMetadata glossaries)."""
+    settings = _cli_settings()
+
+    async def _go() -> None:
+        async with _open_semantic(settings) as (_, models, _s):
+            cursor: str | None = None
+            while True:
+                page = await models.list_models(cursor, 100)
+                for m in page.items:
+                    terms = "?" if m.term_count is None else str(m.term_count)
+                    typer.echo(f"{single_line(m.slug)}\t{terms}\t{single_line(m.base_iri or '')}")
+                cursor = page.next_cursor
+                if cursor is None:
+                    break
+
+    _run(_go())
+
+
+@app.command("concept")
+def concept_cmd(
+    query: Annotated[str, typer.Argument(help="Concept name, FQN or IRI, or a search text.")],
+    max_tokens: Annotated[int | None, typer.Option(help="Shorten the output.")] = None,
+) -> None:
+    """Explain a concept; when QUERY is not one concept, list the matching concepts."""
+    from lakeloom.core.concepts import concept_markdown, explain_concept, find_concepts
+
+    settings = _cli_settings()
+
+    async def _go() -> None:
+        async with _open_semantic(settings) as (om, models, _s):
+            try:
+                detail = await explain_concept(models, om, query)
+            except LakeloomError as exc:
+                # not_found or ambiguous: fall back to a search; other errors are real.
+                if exc.code not in ("not_found", "validation_error"):
+                    raise
+                page = await find_concepts(models, om, query)
+                if not page.items:
+                    raise
+                for m in page.items:
+                    c = m.concept
+                    typer.echo(
+                        f"{single_line(c.fqn)}\t{single_line(c.label)}\t{m.matched_on}"
+                        f"\t{m.score:.2f}"
+                    )
+                return
+            text, _ = concept_markdown(detail, max_tokens=max_tokens)
+            typer.echo(text, nl=False)
+
+    _run(_go())
+
+
+@app.command("context")
+def context_cmd(
+    asset: Annotated[str, typer.Argument(help="OM FQN, Unity Catalog name or storage URI.")],
+    format: Annotated[
+        Literal["md", "json", "jsonld"], typer.Option("--format", help="Output format.")
+    ] = "md",
+    max_tokens: Annotated[int | None, typer.Option(help="Cut the output to ~N tokens.")] = None,
+) -> None:
+    """Print the semantic context of an asset (Markdown by default)."""
+    import json
+
+    from lakeloom.core.context import (
+        get_asset_context,
+        render_json,
+        render_jsonld,
+        render_markdown,
+    )
+
+    settings = _cli_settings()
+
+    async def _go() -> None:
+        async with _open_semantic(settings, with_sources=True) as (om, models, sources):
+            context = await get_asset_context(asset, models=models, om=om, sources=sources)
+            if format == "md":
+                typer.echo(render_markdown(context, max_tokens=max_tokens).payload, nl=False)
+                return
+            if format == "json":
+                payload = render_json(context, max_tokens=max_tokens).payload
+            else:
+                info = await models.get_model(context.model) if context.model else None
+                payload = render_jsonld(context, info, max_tokens=max_tokens).payload
+            typer.echo(json.dumps(payload, indent=2, ensure_ascii=False))
+
+    _run(_go())
+
+
+@app.command("export")
+def export_cmd(
+    model: Annotated[str, typer.Argument(help="Model slug (see `lakeloom models`).")],
+    format: Annotated[
+        Literal["turtle", "rdfxml", "ntriples", "jsonld", "skos"],
+        typer.Option("--format", help="RDF serialisation."),
+    ] = "turtle",
+    out: Annotated[Path | None, typer.Option("--out", help="Write here instead of stdout.")] = None,
+) -> None:
+    """Export a model as deterministic RDF; the bytes are written exactly."""
+    settings = _cli_settings()
+
+    async def _go() -> None:
+        async with _open_semantic(settings) as (_, models, _s):
+            data = await models.export(model, format)
+        if out is None:
+            sys.stdout.flush()
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+        else:
+            try:
+                out.write_bytes(data)
+            except OSError as exc:
+                typer.echo(f"cannot write {out} ({type(exc).__name__})", err=True)
+                raise typer.Exit(code=1) from None
+
+    _run(_go())

@@ -181,6 +181,39 @@ Unity Catalog OSS keeps its state inside its container, so recreating the contai
 the fixture registrations; re-seed them with
 `docker compose -f deploy/compose/docker-compose.yml run --rm uc-init`.
 
+### Semantic tools
+
+The semantic read path serves the business vocabulary kept in OpenMetadata (one glossary is one
+model; its `slug` is the glossary name). All seven tools need scope `lakeloom:read` and are
+read-only.
+
+| Tool | What it does |
+| --- | --- |
+| `list_models`, `get_model` | The models Lakeloom serves, with base IRI, prefixes and term count. |
+| `find_concepts` | Find concepts by name, synonym, FQN or IRI (fuzzy), optionally within one model. |
+| `explain_concept` | Definition, synonyms, hierarchy, typed relations, attributes, mappings and realizing assets of one concept. |
+| `find_assets_for_concept` | Tables and columns that realize a concept, optionally including narrower concepts. |
+| `get_asset_context` | Everything known about an asset: description, owners, concepts per column, related assets, lineage. |
+| `export_model` | The model as Turtle, RDF/XML (OWL), N-Triples, JSON-LD or SKOS, byte-identical for the same model state. |
+
+`get_asset_context` takes the asset in any of three forms: an OpenMetadata FQN
+(`lakeloom_fixture.retail.sales.orders`), a Unity Catalog name (`retail.sales.orders`) or the
+storage URI of a configured source; add a column name to get one column. `format` is `markdown`
+(default, for LLM context windows), `json` (schema in `docs/schemas/asset-context.schema.json`)
+or `jsonld`. Every response carries a `token_estimate` (about one token per four characters);
+`max_tokens` cuts the content at section (or column) boundaries and sets `truncated: true`.
+Descriptions and definitions come from OpenMetadata and the lake: they are shown as quoted
+blocks and flagged untrusted. An `export_model` result above 8 MiB is refused; use the CLI.
+
+The same operations are available to operators:
+
+```bash
+lakeloom models
+lakeloom concept Customer                       # or an FQN or IRI
+lakeloom context lakeloom_fixture.retail.sales.orders --format md --max-tokens 2000
+lakeloom export retail --format turtle --out retail.ttl
+```
+
 ### Optional RDF store
 
 ```bash
