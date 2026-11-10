@@ -50,6 +50,7 @@ async def test_m1_acceptance_orders_context_lists_column_concepts(
 
     md = text_of(result)
     data = result.structured_content
+    assert "content" not in data
     assert data["truncated"] is False and data["token_estimate"] == math.ceil(len(md) / 4)
     for name, concept in COLUMN_CONCEPTS.items():
         assert f"`{name}`" in md and f"`{concept}`" in md

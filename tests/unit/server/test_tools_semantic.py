@@ -224,7 +224,7 @@ async def test_get_asset_context_markdown_and_estimates(
     data = structured(result)
     md = text(result)
     assert data["format"] == "markdown"
-    assert data["content"] == md
+    assert "content" not in data
     assert data["truncated"] is False
     assert data["token_estimate"] == -(-len(md) // 4)
     for name, concept in COLUMNS.items():
@@ -384,3 +384,22 @@ def test_cli_models_concept_and_export(tmp_path: Path) -> None:
     assert searched.exit_code == 0 and searched.output.startswith("retail.Order\t")
     assert exported.exit_code == 0, exported.output
     assert len(Graph().parse(data=out.read_bytes().decode(), format="turtle")) > 0
+
+
+async def test_explain_concept_structured_matches_truncated_text(
+    make_deps: DepsFactory, kit: AuthKit
+) -> None:
+    full = await call(make_deps, kit, "explain_concept", {"concept": "retail.Order"})
+    short = await call(
+        make_deps, kit, "explain_concept", {"concept": "retail.Order", "max_tokens": 1}
+    )
+
+    f, t = structured(full), structured(short)
+    assert f["definition"] is not None and f["synonyms"] and f["realizations"]["items"]
+    assert t["truncated"] is True
+    assert t["token_estimate"] == -(-len(text(short)) // 4)
+    assert t["definition"] is None
+    assert t["synonyms"] == []
+    assert t["realizations"]["items"] == []
+    assert t["concept"]["fqn"] == "retail.Order"
+    assert "## Definition" not in text(short)

@@ -45,6 +45,7 @@ __all__ = [
     "ConceptSummary",
     "MappingInfo",
     "RelationInfo",
+    "asset_line",
     "concept_bundles",
     "concept_markdown",
     "explain_concept",
@@ -817,7 +818,7 @@ def _ref_line(label: str, ref: ConceptRef) -> str:
     return f"- {label}: {code_span(ref.label)} ({code_span(ref.fqn)})"
 
 
-def _asset_line(a: AssetRef) -> str:
+def asset_line(a: AssetRef) -> str:
     if a.column:
         return f"- {code_span(a.fqn)} (column {code_span(a.column)})"
     return f"- {code_span(a.fqn)} (type {code_span(a.type)})"
@@ -869,7 +870,7 @@ def concept_markdown(detail: ConceptDetail, *, max_tokens: int | None = None) ->
     if items:
         chunks = [items[i : i + _ASSET_CHUNK] for i in range(0, len(items), _ASSET_CHUNK)]
         for n, chunk in enumerate(chunks):
-            body = "\n".join(_asset_line(a) for a in chunk)
+            body = "\n".join(asset_line(a) for a in chunk)
             if n == 0:
                 body = "## Realizing assets\n\n" + body
             if n == len(chunks) - 1 and detail.realizations.next_cursor:
