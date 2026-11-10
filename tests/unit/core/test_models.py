@@ -244,3 +244,21 @@ async def test_parse_failure_is_not_cached() -> None:
     om.export_ontology = good  # type: ignore[method-assign]
     assert len(await svc.graph("retail")) > 0
     assert parse_rdf(TURTLE, "turtle")
+
+
+async def test_unknown_slug_allocates_no_lock_or_cache() -> None:
+    svc, _, _ = make()
+    for slug in ("nope", "nope2"):
+        with pytest.raises(LakeloomError):
+            await svc.graph(slug)
+    assert svc._locks == {}  # pyright: ignore[reportPrivateUsage]
+    assert svc._cache == {}  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("cursor", ["abcd", "aGVsbG8", "a b", "MQ"])
+async def test_garbage_cursor_is_validation_error(cursor: str) -> None:
+    svc, om, _ = make()
+    with pytest.raises(LakeloomError) as e:
+        await svc.list_models(cursor, 10)
+    assert e.value.code == "validation_error"
+    assert om.list_calls == []

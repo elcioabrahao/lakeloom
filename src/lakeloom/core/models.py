@@ -111,7 +111,10 @@ class ModelService:
         after: str | None = None
         if cursor:
             try:
-                after = base64.urlsafe_b64decode(cursor.encode()).decode()
+                raw = base64.b64decode(cursor.replace("-", "+").replace("_", "/"), validate=True)
+                after = raw.decode()
+                if base64.urlsafe_b64encode(raw).decode() != cursor:
+                    raise ValueError(cursor)
             except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
                 raise LakeloomError(
                     "validation_error",
@@ -153,13 +156,14 @@ class ModelService:
         cached = self._fresh(slug)
         if cached is not None:
             return cached
+        # Validate the slug first so unknown slugs (tool input) never allocate a lock.
+        info = await self.get_model(slug)
         lock = self._locks.setdefault(slug, asyncio.Lock())
         async with lock:
             cached = self._fresh(slug)  # another caller may have loaded while we waited
             if cached is not None:
                 return cached
             self._cache.pop(slug, None)  # expired: never serve it if the reload fails
-            info = await self.get_model(slug)
             try:
                 text = await self._om.export_ontology(info.glossary_id, "turtle")
             except OMError as exc:
