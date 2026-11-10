@@ -31,9 +31,14 @@ RDF_FORMATS = {
 
 
 def _assert_lists_concepts(markdown: str) -> None:
+    lines = markdown.splitlines()
     assert f"`{TABLE_CONCEPT}`" in markdown
     for name, concept in COLUMN_CONCEPTS.items():
-        assert f"`{name}`" in markdown and f"`{concept}`" in markdown
+        rows = [line for line in lines if line.startswith(f"- `{name}` (")]
+        assert len(rows) == 1, name
+        assert f"(`{concept}`)" in rows[0], (name, rows[0])
+        others = [c for n, c in COLUMN_CONCEPTS.items() if n != name]
+        assert not any(f"(`{c}`)" in rows[0] for c in others), rows[0]
 
 
 async def test_scan_returns_all_tables_with_versions(lakeloom_url: str, agent_token: str) -> None:

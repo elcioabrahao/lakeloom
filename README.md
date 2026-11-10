@@ -270,10 +270,11 @@ lakeloom export retail --format turtle --out retail.ttl
 | Capability | MCP tool | MCP resource | HTTP route |
 | --- | --- | --- | --- |
 | List models | `list_models` | `lakeloom://models` | `GET /v1/models` |
-| Model summary | `get_model` | | `GET /v1/models/{slug}/versions` |
+| Model summary | `get_model` | | none (`GET /v1/models` lists summaries) |
+| Versions | | | `GET /v1/models/{slug}/versions`, `GET /v1/models/{slug}/versions/{version}` |
 | Ontology export | `export_model` | `lakeloom://models/{slug}/ontology.{ttl,jsonld,owl,nt}` | `GET /v1/models/{slug}` (`Accept`) |
 | JSON-LD context | | `lakeloom://models/{slug}/context.jsonld` | `GET /v1/models/{slug}/context.jsonld` |
-| Concept lookup | `explain_concept`, `find_concepts` | | `GET /v1/concepts/{iri-or-id}` |
+| Concept lookup | `explain_concept`, `find_concepts` | | `GET /v1/concepts/{concept}` (IRI, FQN, id or name, percent-encoded) |
 | Asset context | `get_asset_context` | `lakeloom://assets/{fqn}/context.md` | `GET /v1/assets/{fqn}/context` |
 
 ### HTTP API
