@@ -88,7 +88,9 @@ OM 2.1.0-rc1 (compose stack, `RDF_ENABLED=false`, no Fuseki container) on 2026-1
 - Export is OM's `exportOntology` (raw RDF). In rc1 it works with RDF off: the dev stack runs `RDF_ENABLED=false` with no Fuseki (the `rdf` compose profile is opt-in) and the export still returns full Turtle, so the graph is built by OM itself, not read from a triple store
   post-processed for determinism (FR-GIT-03): canonical blank-node labels `b0..bn`, sorted
   triples, LF, UTF-8, one trailing newline.
-- Predicate/type namespaces without a bound prefix are named `ns1..nsN` in sorted namespace
+- Default prefixes: `dcterms`, `om` (`https://open-metadata.org/ontology/`, the namespace OM's
+  own export binds), `owl`, `rdf`, `rdfs`, `skos`, `xsd`, plus the model prefix.
+  Predicate/type namespaces without a bound prefix are named `ns1..nsN` in sorted namespace
   order, skipping any `nsN` already used by a caller prefix.
 - JSON-LD is an **expanded** top-level array of nodes (full IRIs, no `@context`). Lakeloom
   asset JSON-LD uses a minimal `@context` built from the model's prefixes and base IRI; M3's

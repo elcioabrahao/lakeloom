@@ -7,7 +7,7 @@ Algorithm
    identifier, so labels are short and independent of rdflib internals and of
    ``PYTHONHASHSEED`` (verified by a cross-process test).
 2. ``serialize`` copies the canonical graph into a fresh graph with exactly the allowed prefix
-   bindings (given prefixes plus rdf, rdfs, owl, xsd, skos, dcterms, bound in sorted order) and
+   bindings (given prefixes plus dcterms, om, owl, rdf, rdfs, skos, xsd, bound in sorted order) and
    inserts the triples in sorted order, then:
    * turtle: rdflib's Turtle writer (sorted subjects, predicates and objects);
    * ntriples: serialised lines are sorted and de-duplicated;
@@ -74,6 +74,8 @@ _RDFLIB_FORMAT: dict[InputFormat, str] = {
 }
 _DEFAULT_PREFIXES: dict[str, Namespace] = {
     "dcterms": Namespace(str(DCTERMS)),
+    # OpenMetadata's own vocabulary, as OM's exportOntology binds it (om:fullyQualifiedName).
+    "om": Namespace("https://open-metadata.org/ontology/"),
     "owl": Namespace(str(OWL)),
     "rdf": Namespace(str(RDF)),
     "rdfs": Namespace(str(RDFS)),

@@ -226,3 +226,14 @@ def test_cross_process_hash_seed_independence() -> None:
         )
         digests.append(res.stdout.strip())
     assert len(set(digests)) == 1, digests
+
+
+def test_om_vocabulary_has_its_own_prefix() -> None:
+    g = parse_rdf(
+        '<http://x/T> <https://open-metadata.org/ontology/fullyQualifiedName> "retail.T" .',
+        "turtle",
+    )
+    out = serialize(g, "turtle").decode()
+    assert "@prefix om: <https://open-metadata.org/ontology/> ." in out
+    assert 'om:fullyQualifiedName "retail.T"' in out
+    assert "ns1" not in out
