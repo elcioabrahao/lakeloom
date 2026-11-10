@@ -35,6 +35,7 @@ from lakeloom.sources.models import Page
 from lakeloom.untrusted import UntrustedText, code_span, quote_untrusted
 
 __all__ = [
+    "MORE_ASSETS_LINE",
     "AssetPage",
     "AssetRef",
     "AttributeInfo",
@@ -79,6 +80,7 @@ _NEGATIVE_TTL = 10.0  # seconds a "not in OM" lookup is remembered
 _CONCURRENCY = 8
 MAX_DESCENDANT_TERMS = 200
 MAX_ASSETS_EXAMINED = 2000
+MORE_ASSETS_LINE = "- _more assets: call find_assets_for_concept_"
 _ARROWS = {"out": "->", "in": "<-", "both": "<->"}
 
 
@@ -945,6 +947,6 @@ def concept_markdown(detail: ConceptDetail, *, max_tokens: int | None = None) ->
             if n == 0:
                 body = "## Realizing assets\n\n" + body
             if n == len(chunks) - 1 and detail.realizations.next_cursor:
-                body += "\n- _more assets: call find_assets_for_concept_"
+                body += "\n" + MORE_ASSETS_LINE
             sections.append(body)
     return truncate_markdown(sections, max_tokens)

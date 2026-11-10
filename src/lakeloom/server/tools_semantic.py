@@ -16,6 +16,7 @@ from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import BaseModel, Field
 
 from lakeloom.core.concepts import (
+    MORE_ASSETS_LINE,
     AssetPage,
     ConceptDetail,
     ConceptMatch,
@@ -179,21 +180,26 @@ def _trim_detail(detail: ConceptDetail, text: str) -> ConceptDetail:
 
     Sections are recognised by their own heading lines (quoted untrusted text always
     starts with ``>``, so it cannot forge one). Dropped lists become empty, the
-    definition becomes null; realizing assets keep only the lines that are in the text.
+    definition becomes null; realizing assets keep only the lines that are in the text, and
+    ``next_cursor`` survives only with its "more assets" line (a cursor past assets that were
+    cut would skip them).
     """
     lines = set(text.splitlines())
 
     def has(heading: str) -> bool:
         return f"## {heading}" in lines
 
-    realizations = detail.realizations
-    if has("Realizing assets"):
-        kept = [a for a in realizations.items if asset_line(a) in lines]
-        realizations = realizations.model_copy(update={"items": kept})
-    else:
-        realizations = realizations.model_copy(update={"items": []})
-    if len(realizations.items) < len(detail.realizations.items) and not realizations.next_cursor:
-        realizations = realizations.model_copy(update={"next_cursor": None})
+    kept = (
+        [a for a in detail.realizations.items if asset_line(a) in lines]
+        if has("Realizing assets")
+        else []
+    )
+    realizations = detail.realizations.model_copy(
+        update={
+            "items": kept,
+            "next_cursor": detail.realizations.next_cursor if MORE_ASSETS_LINE in lines else None,
+        }
+    )
     keep_hierarchy = has("Hierarchy")
     return detail.model_copy(
         update={
@@ -285,8 +291,7 @@ def _matches_text(query: str, page: Page[ConceptMatch]) -> str:
 def _assets_text(concept: str, page: AssetPage) -> str:
     lines = [f"**{len(page.items)} asset(s)** realizing {_code(concept)}"]
     for a in page.items:
-        col = f" column {_code(a.column)}" if a.column else ""
-        lines.append(f"- {_code(a.fqn)} ({a.type}){col}")
+        lines.append(asset_line(a))
     if page.truncated:
         lines.append("\nResults were capped (`truncated: true`); narrow the concept.")
     return "\n".join([*lines, *_more(page)])

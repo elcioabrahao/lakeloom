@@ -405,3 +405,49 @@ async def test_explain_concept_structured_matches_truncated_text(
     assert t["realizations"]["items"] == []
     assert t["concept"]["fqn"] == "retail.Order"
     assert "## Definition" not in text(short)
+
+
+def _detail_with_assets(n: int, next_cursor: str | None) -> Any:
+    from lakeloom.core.concepts import AssetRef, ConceptDetail, ConceptRef
+    from lakeloom.sources.models import Page
+
+    return ConceptDetail(
+        concept=ConceptRef(iri=None, fqn="retail.Order", model="retail", label="Order"),
+        realizations=Page[AssetRef](
+            items=[AssetRef(fqn=f"svc.db.s.table_{i:03d}", type="table") for i in range(n)],
+            next_cursor=next_cursor,
+        ),
+    )
+
+
+def test_trim_detail_partial_assets_drop_cursor() -> None:
+    from lakeloom.core.concepts import MORE_ASSETS_LINE, concept_markdown
+    from lakeloom.server.tools_semantic import _trim_detail  # pyright: ignore[reportPrivateUsage]
+
+    detail = _detail_with_assets(60, "Y3Vyc29y")
+    full, _ = concept_markdown(detail)
+    assert MORE_ASSETS_LINE in full
+    text_, truncated = concept_markdown(detail, max_tokens=len(full) // 4 // 2)
+    assert truncated and MORE_ASSETS_LINE not in text_
+    trimmed = _trim_detail(detail, text_)
+    kept = trimmed.realizations.items
+    assert 0 < len(kept) < 60
+    assert kept == detail.realizations.items[: len(kept)]
+    assert all(f"`{a.fqn}`" in text_ for a in kept)
+    assert trimmed.realizations.next_cursor is None  # its "more" line was cut
+    # the cursor survives when the "more" line (hence every asset) was kept
+    kept_all, truncated = concept_markdown(detail, max_tokens=len(full) // 4)
+    assert not truncated
+    whole = _trim_detail(detail, kept_all + "\n\n> cut")
+    assert whole.realizations.next_cursor == "Y3Vyc29y"
+    assert len(whole.realizations.items) == 60
+
+
+def test_nfr_sec_14_asset_list_type_is_code_span() -> None:
+    from lakeloom.core.concepts import AssetPage, AssetRef
+    from lakeloom.server.tools_semantic import _assets_text  # pyright: ignore[reportPrivateUsage]
+
+    page = AssetPage(items=[AssetRef(fqn="a.b", type="evil)\n# H [x](http://e)")])
+    out = _assets_text("retail.Order", page)
+    assert "\n# H" not in out
+    assert "(type `evil) # H [x](http://e)`)" in out
