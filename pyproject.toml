@@ -35,6 +35,7 @@ dependencies = [
     "pydantic-settings>=2.16.2",
     "pyjwt[crypto]>=2.15.1",
     "pyyaml>=6.0.3",
+    "rdflib>=7.6.0",
     "sqlalchemy[asyncio]>=2.1.8",
     "typer>=0.28.0",
     "uvicorn[standard]>=0.54.0",
@@ -97,5 +98,9 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 # macOS: uv can flag the editable .pth as hidden, which Python then skips; keep tests independent of it.
 pythonpath = ["src"]
+filterwarnings = [
+    "ignore:Code. _mock_name is not defined in namespace:UserWarning",
+    "ignore:ConjunctiveGraph is deprecated:DeprecationWarning",
+]
 addopts = "-m 'not contract'"
 markers = ["contract: needs the docker compose dev stack"]
