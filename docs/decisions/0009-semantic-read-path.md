@@ -115,3 +115,28 @@ OM 2.1.0-rc1 (compose stack, `RDF_ENABLED=false`, no Fuseki container) on 2026-1
   itself.
 - If a later OM build persists `namespaces` or directed relations, the seed and tools
   should adopt them.
+
+## Graph vocabulary used by Lakeloom
+
+Read from OM rc1's Turtle export (Task 5, `src/lakeloom/core/concepts.py`). A concept is a
+`URIRef` subject typed `skos:Concept`.
+
+| Need | Predicate |
+|---|---|
+| FQN | `om:fullyQualifiedName` (`https://open-metadata.org/ontology/`); fallback `<slug>.<local name>` |
+| Label | `skos:prefLabel`, then `rdfs:label`, then the IRI local name |
+| Synonyms | `skos:altLabel` |
+| Definition | `skos:definition` (untagged or English preferred) |
+| Parent / child | `skos:broader` / `skos:narrower`, each also read inversely; `rdfs:subClassOf` between concepts is accepted as parent |
+| Relations | an `owl:ObjectProperty` (other than `skos:*`) between two concepts; the type is the predicate's local name (`placedBy`). OM stores each relation on both terms with no direction, so both stored triples collapse into one relation with `direction: "both"` |
+| Mappings | `skos:exactMatch`, `closeMatch`, `broadMatch`, `narrowMatch`, `relatedMatch`; `kind` is the local name |
+| Attributes | `owl:DatatypeProperty` with `rdfs:domain` = the concept; datatype from `rdfs:range`, unit from `qudt:unit`, allowed values from `owl:oneOf` on the property or its range. OM rc1 exports none, so they are empty until a model carries them |
+
+Realizations come from `get_term_assets`. OM returns, for a term, its tagged tables, its tagged
+columns, the *parent table* of a tagged column and the columns that merely inherit a table-level
+tag. Lakeloom keeps only assets whose table or column carries the term as a direct glossary tag
+(`labelType != Derived`), which needs one cached `get_table_by_fqn` per table. A column
+(`type: tableColumn`) is reported as `AssetRef(fqn=<table FQN>, type="column", column=<name>)`.
+`find_concepts` ranks graph candidates plus OM `search_terms` hits (rc1 search finds nothing for
+synonyms such as "client"; the graph answers). `include_descendants` walks children to depth 10,
+cycle-safe.
