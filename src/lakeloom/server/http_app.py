@@ -14,10 +14,13 @@ import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
+from typing import cast
 
 import asyncpg  # pyright: ignore[reportMissingTypeStubs]
 import httpx
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy.exc import ArgumentError, InterfaceError, OperationalError
@@ -29,6 +32,7 @@ from lakeloom.config import ConfigError, Settings
 from lakeloom.core.models import ModelService
 from lakeloom.core.scans import ScanService
 from lakeloom.core.sources import close_sources, start_sources
+from lakeloom.errors import LakeloomError
 from lakeloom.logging import request_id_var
 from lakeloom.metrics import HTTP_REQUESTS, REGISTRY
 from lakeloom.om.client import OMClient
@@ -45,6 +49,11 @@ from lakeloom.server.health import (
     om_check,
     run_checks,
     state_store_check,
+)
+from lakeloom.server.http_api import (
+    create_router,
+    lakeloom_error_handler,
+    request_validation_handler,
 )
 from lakeloom.sources.base import LakeSource
 from lakeloom.sources.config import load_sources_config
@@ -203,6 +212,13 @@ def _clean_request_id(raw: bytes | None) -> str | None:
     return value
 
 
+async def _validation_handler(request: Request, exc: Exception) -> Response:
+    """Typed errors on ``/v1``; FastAPI's default 422 elsewhere."""
+    if request.url.path.startswith("/v1/"):
+        return await request_validation_handler(request, exc)
+    return await request_validation_exception_handler(request, cast(RequestValidationError, exc))
+
+
 def create_app(
     deps: AppDeps,
     *,
@@ -308,6 +324,9 @@ def create_app(
     async def prm() -> dict[str, object]:  # pyright: ignore[reportUnusedFunction]
         return protected_resource_metadata(settings)
 
+    app.include_router(create_router(deps))
+    app.add_exception_handler(LakeloomError, lakeloom_error_handler)
+    app.add_exception_handler(RequestValidationError, _validation_handler)
     for path, endpoint in endpoints:
         app.router.routes.append(Route(path, endpoint=endpoint))
     for path, mounted in extra_mounts:

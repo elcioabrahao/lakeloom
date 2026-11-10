@@ -161,20 +161,36 @@ async def model_context_artifact(
     return _make(_json_bytes({"@context": context}), "application/ld+json", modified, links)
 
 
-async def models_list_artifact(models: ModelService, *, clock: Clock = _utcnow) -> Artifact:
+async def models_list_artifact(
+    models: ModelService,
+    *,
+    cursor: str | None = None,
+    limit: int | None = None,
+    clock: Clock = _utcnow,
+) -> Artifact:
+    """All models, or one page (with ``next_cursor``) when ``cursor`` or ``limit`` is given."""
     items: list[dict[str, Any]] = []
-    cursor: str | None = None
-    for _ in range(_MODELS_LIST_PAGES):
-        page = await models.list_models(cursor, _LIST_LIMIT)
-        items += [m.model_dump(mode="json") for m in page.items]
-        cursor = page.next_cursor
-        if cursor is None:
-            break
+    next_cursor: str | None = None
+    paged = cursor is not None or limit is not None
+    if paged:
+        page = await models.list_models(cursor, limit or _LIST_LIMIT)
+        items = [m.model_dump(mode="json") for m in page.items]
+        next_cursor = page.next_cursor
+    else:
+        for _ in range(_MODELS_LIST_PAGES):
+            page = await models.list_models(cursor, _LIST_LIMIT)
+            items += [m.model_dump(mode="json") for m in page.items]
+            cursor = page.next_cursor
+            if cursor is None:
+                break
     newest = max((m["updated_at"] for m in items if m.get("updated_at")), default=None)
     om_url = models.om_url
     links = [] if om_url is None else [f'<{om_url}/glossary>; rel="via"']
     modified = _from_ms(newest) or clock()  # never a made-up date: caches would extrapolate it
-    return _make(_json_bytes({"items": items}), "application/json", modified, links)
+    data: dict[str, Any] = {"items": items}
+    if paged:
+        data["next_cursor"] = next_cursor
+    return _make(_json_bytes(data), "application/json", modified, links)
 
 
 async def concept_artifact(
@@ -200,16 +216,17 @@ async def asset_context_artifact(
     fqn: str,
     media: Literal["text/markdown", "application/json", "application/ld+json"],
     *,
+    max_tokens: int | None = None,
     clock: Clock = _utcnow,
 ) -> Artifact:
     ctx = await get_asset_context(fqn, models=models, om=om, sources=sources)
     model = await models.get_model(ctx.model) if ctx.model else None
     if media == "text/markdown":
-        body = render_markdown(ctx).payload.encode()
+        body = render_markdown(ctx, max_tokens=max_tokens).payload.encode()
     elif media == "application/json":
-        body = _json_bytes(render_json(ctx).payload)
+        body = _json_bytes(render_json(ctx, max_tokens=max_tokens).payload)
     else:
-        body = _json_bytes(render_jsonld(ctx, model).payload)
+        body = _json_bytes(render_jsonld(ctx, model, max_tokens=max_tokens).payload)
     table = (await fetch_tables(models, om, [ctx.asset.table_fqn]))[ctx.asset.table_fqn]
     # Best-effort lower bound: the table's updatedAt and every realized model's freshness.
     slugs = {r.model for r in ctx.table_concepts} | {

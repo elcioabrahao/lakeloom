@@ -224,6 +224,34 @@ lakeloom context lakeloom_fixture.retail.sales.orders --format md --max-tokens 2
 lakeloom export retail --format turtle --out retail.ttl
 ```
 
+### HTTP API
+
+A read-only HTTP API serves the same artefacts to non-MCP clients. Every route is a `GET`, needs a
+bearer token with `lakeloom:read` (`401` without a token, `403` without the scope) and is described
+in [`docs/api/openapi.json`](docs/api/openapi.json) (also served, behind auth, at `/openapi.json`;
+regenerate with `uv run python scripts/gen_openapi.py`).
+
+| Route | Representations (first is the default) |
+| --- | --- |
+| `/v1/models` (`cursor`, `limit` 1-200) | `application/json` |
+| `/v1/models/{slug}`, `/v1/models/{slug}/versions/{version}` | `text/turtle`, `application/ld+json`, `application/rdf+xml`, `application/n-triples` |
+| `/v1/models/{slug}/versions` | `application/json` |
+| `/v1/models/{slug}/context.jsonld` | `application/ld+json` (minimal context; the full one arrives in M3) |
+| `/v1/concepts/{iri-or-fqn-or-id-or-name}` | `text/markdown`, `application/json` |
+| `/v1/assets/{fqn}/context` (`max_tokens`) | `text/markdown`, `application/json`, `application/ld+json` |
+
+Pick the representation with `Accept` (q-values are honoured; no `Accept` or `*/*` gives the
+default; an unsupported type gives `406` listing the supported ones). IRIs and FQNs in paths may be
+percent-encoded. Only `latest` exists until releases arrive in M3 (any other version is `404`);
+`shapes.ttl` is also M3.
+
+Every `200` carries a strong `ETag` (`"sha256:<hex of the body>"`), `Last-Modified` (the
+OpenMetadata `updatedAt` of the glossary or table, never earlier than the model load), a `Link`
+header pointing at the OpenMetadata entity (`rel="via"`; Git links arrive in M2),
+`Vary: Accept` and `Cache-Control: private, max-age=0, must-revalidate`. Send `If-None-Match` to get
+`304` with no body. Errors are JSON, `{"error": {"code", "message", "hint"}}`, with `404`
+`not_found`, `403` `forbidden`, `400` `validation_error`, `503` `upstream_unavailable`.
+
 ### Optional RDF store
 
 ```bash
