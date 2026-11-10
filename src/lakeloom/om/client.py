@@ -29,7 +29,7 @@ from lakeloom.om.models import (
 API_PREFIX = "/api"
 
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
-GLOSSARY_FIELDS = ("owners", "tags", "domains")
+GLOSSARY_FIELDS = ("owners", "tags", "domains", "termCount")
 TERM_FIELDS = ("parent", "synonyms", "relatedTerms", "conceptMappings", "owners", "tags", "iri")
 TABLE_FIELDS = (
     "columns",

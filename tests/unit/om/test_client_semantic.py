@@ -88,7 +88,7 @@ async def test_fr_om_01_get_glossary_by_name(client: OMClient) -> None:
     got = await client.get_glossary_by_name("retail")
 
     assert got is not None and got.id == GID
-    assert route.calls.last.request.url.params["fields"] == "owners,tags,domains"
+    assert route.calls.last.request.url.params["fields"] == "owners,tags,domains,termCount"
 
 
 @respx.mock

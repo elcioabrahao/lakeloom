@@ -154,3 +154,29 @@ async def test_export_ontology_contains_terms(
     subjects = {str(s) for s in graph.subjects() if isinstance(s, URIRef)}
     for name in TERM_NAMES:
         assert f"{BASE_IRI}{name}" in subjects, name
+
+
+async def test_model_service_export_retail_all_formats_deterministic(
+    client: OMClient, om_url: str, om_bot_token: str, tmp_path: Path
+) -> None:
+    from rdflib import Graph as RdfGraph
+
+    from lakeloom.config import Settings
+    from lakeloom.core.models import ModelService
+    from lakeloom.rdf.canonical import ExportFormat
+
+    _run_seed(om_url, om_bot_token, tmp_path)
+    settings = Settings(public_url="http://localhost:8000")  # pyright: ignore[reportArgumentType]
+    service = ModelService(client, settings)
+    rdflib_format = {"skos": "turtle", "rdfxml": "xml", "ntriples": "nt", "jsonld": "json-ld"}
+    formats: list[ExportFormat] = ["turtle", "rdfxml", "ntriples", "jsonld", "skos"]
+    try:
+        for fmt in formats:
+            first = await service.export("retail", fmt)
+            RdfGraph().parse(data=first, format=rdflib_format.get(fmt, fmt))
+            service.clear_cache()
+            assert await service.export("retail", fmt) == first
+        info = await service.get_model("retail")
+        assert info.term_count == len(TERM_NAMES)
+    finally:
+        await client.aclose()

@@ -92,6 +92,7 @@ class Settings(BaseSettings):
     profile_value_max_length: int = Field(default=64, ge=1, le=10_000)
     scan_concurrency: int = Field(default=8, ge=1, le=256)
     triplestore_enabled: bool = False
+    model_cache_ttl_seconds: int = Field(60, ge=0, le=3600)
     # None means "auto": False in production, True in development (resolved after validation).
     stdio_enabled: bool | None = None
     otel_exporter_otlp_endpoint: str | None = None

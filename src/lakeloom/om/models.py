@@ -131,6 +131,7 @@ class OMGlossary(BaseModel):
     display_name: str | None = Field(default=None, alias="displayName")
     description: str | None = None
     namespaces: list[OMNamespace] = []
+    term_count: int | None = Field(default=None, alias="termCount")
 
 
 class OMTermRelation(BaseModel):
