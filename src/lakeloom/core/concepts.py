@@ -8,13 +8,17 @@ Only direct (non-Derived) glossary tags count as realizations; a column realizat
 reported as its table FQN plus ``column`` (FR-CTX-03, FR-CTX-04, FR-CTX-06).
 """
 
+import asyncio
 import base64
 import binascii
 import difflib
 import re
-from collections.abc import Iterable
+import time
+from collections import OrderedDict
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Literal
+from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel
 from rdflib import BNode, Graph, URIRef
@@ -31,6 +35,7 @@ from lakeloom.sources.models import Page
 from lakeloom.untrusted import UntrustedText, code_span, quote_untrusted
 
 __all__ = [
+    "AssetPage",
     "AssetRef",
     "AttributeInfo",
     "ConceptDetail",
@@ -61,6 +66,10 @@ _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 _FIND_HINT = "use find_concepts to look up the concept's IRI or FQN"
 _FUZZY_MIN = 0.6
 _ASSET_CHUNK = 25
+_CACHE_MAX = 1024
+_CONCURRENCY = 8
+MAX_DESCENDANT_TERMS = 200
+MAX_ASSETS_EXAMINED = 2000
 _ARROWS = {"out": "->", "in": "<-", "both": "<->"}
 
 
@@ -100,6 +109,12 @@ class AssetRef(BaseModel):
     fqn: str
     type: str
     column: str | None = None
+
+
+class AssetPage(Page[AssetRef]):
+    """Assets realizing a concept; ``truncated`` is set when a descendant or asset cap hit."""
+
+    truncated: bool = False
 
 
 class ConceptSummary(BaseModel):
@@ -501,31 +516,98 @@ def _direct(tags: Iterable[object], term_fqn: str) -> bool:
     )
 
 
+class _Cache:
+    """Per-ModelService caches with the model TTL: OM tables and per-term realizations."""
+
+    def __init__(self) -> None:
+        self.tables: OrderedDict[str, tuple[float, OMTable | None]] = OrderedDict()
+        self.lists: OrderedDict[str, tuple[float, tuple[list[AssetRef], int]]] = OrderedDict()
+        self.ttl = 0.0
+        self.now: Callable[[], float] = time.monotonic
+
+    def _get[V](self, store: OrderedDict[str, tuple[float, V]], key: str) -> tuple[bool, V | None]:
+        hit = store.get(key)
+        if hit is None or self.ttl <= 0 or self.now() - hit[0] >= self.ttl:
+            store.pop(key, None)
+            return False, None
+        store.move_to_end(key)
+        return True, hit[1]
+
+    def _put[V](self, store: OrderedDict[str, tuple[float, V]], key: str, value: V) -> None:
+        if self.ttl <= 0:
+            return
+        store[key] = (self.now(), value)
+        store.move_to_end(key)
+        while len(store) > _CACHE_MAX:
+            store.popitem(last=False)
+
+
+_caches: WeakKeyDictionary[ModelService, _Cache] = WeakKeyDictionary()
+
+
+def _cache_for(models: ModelService) -> _Cache:
+    cache = _caches.get(models)
+    if cache is None:
+        cache = _caches[models] = _Cache()
+    cache.ttl = models.cache_ttl
+    cache.now = models.now
+    return cache
+
+
+async def _fetch_tables(om: OMClient, cache: _Cache, fqns: list[str]) -> dict[str, OMTable | None]:
+    found: dict[str, OMTable | None] = {}
+    missing: list[str] = []
+    for fqn in dict.fromkeys(fqns):
+        hit, table = cache._get(cache.tables, fqn)  # pyright: ignore[reportPrivateUsage]
+        if hit:
+            found[fqn] = table
+        else:
+            missing.append(fqn)
+    sem = asyncio.Semaphore(_CONCURRENCY)
+
+    async def one(fqn: str) -> tuple[str, OMTable | None]:
+        async with sem:
+            try:
+                return fqn, await om.get_table_by_fqn(fqn)
+            except OMError as exc:
+                raise _upstream(exc) from exc
+
+    for fqn, table in await asyncio.gather(*(one(f) for f in missing)):
+        found[fqn] = table
+        cache._put(cache.tables, fqn, table)  # pyright: ignore[reportPrivateUsage]
+    return found
+
+
+_COLUMN_TYPES = {"tablecolumn", "column"}
+
+
 async def _realizing(
-    om: OMClient, term_fqn: str, refs: list[OMEntityRef], tables: dict[str, OMTable | None]
+    om: OMClient, cache: _Cache, term_fqn: str, refs: list[OMEntityRef]
 ) -> list[AssetRef]:
-    out: list[AssetRef] = []
+    plan: list[tuple[str, str, str | None, bool]] = []  # (fqn, table_fqn, column, is_column)
     for ref in refs:
         fqn = ref.fully_qualified_name
         if not fqn:
             continue
-        is_column = (ref.type or "").lower() in {"tablecolumn", "column"}
-        column = ref.name if is_column else None
+        kind = (ref.type or "").lower()
+        is_column = kind in _COLUMN_TYPES
+        column = (ref.name or fqn.rsplit(".", 1)[-1]) if is_column else None
         table_fqn = fqn
-        if is_column:
-            suffix = f".{column}" if column else ""
-            table_fqn = (
-                fqn[: -len(suffix)] if suffix and fqn.endswith(suffix) else fqn.rsplit(".", 1)[0]
-            )
-            column = column or fqn.rsplit(".", 1)[-1]
-        if (ref.type or "").lower() not in {"table", "tablecolumn", "column"}:
-            out.append(AssetRef(fqn=fqn, type=ref.type or "unknown"))
+        if column is not None:
+            suffix = f".{column}"
+            table_fqn = fqn[: -len(suffix)] if fqn.endswith(suffix) else fqn.rsplit(".", 1)[0]
+        plan.append((fqn, table_fqn, column, is_column))
+    kinds = {r.fully_qualified_name: (r.type or "").lower() for r in refs}
+    tables = await _fetch_tables(
+        om,
+        cache,
+        [t for f, t, _, c in plan if c or kinds[f] == "table"],
+    )
+    out: list[AssetRef] = []
+    for fqn, table_fqn, column, is_column in plan:
+        if not is_column and kinds[fqn] != "table":
+            out.append(AssetRef(fqn=fqn, type=kinds[fqn] or "unknown"))
             continue
-        if table_fqn not in tables:
-            try:
-                tables[table_fqn] = await om.get_table_by_fqn(table_fqn)
-            except OMError as exc:
-                raise _upstream(exc) from exc
         table = tables[table_fqn]
         if table is not None:
             if is_column:
@@ -549,12 +631,12 @@ async def _term_id(om: OMClient, res: _Resolved) -> str | None:
 
 
 async def _assets_page(
-    om: OMClient, res: _Resolved, offset: int, limit: int
-) -> tuple[list[AssetRef], int | None]:
-    """One page of OM's asset list for a term -> (realizing assets, next OM offset)."""
+    om: OMClient, cache: _Cache, res: _Resolved, offset: int, limit: int
+) -> tuple[list[AssetRef], int | None, int]:
+    """One OM page for a term -> (realizing assets, next OM offset, assets examined)."""
     term_id = await _term_id(om, res)
     if term_id is None:
-        return [], None
+        return [], None, 0
     try:
         page = await om.get_term_assets(term_id, offset=offset, limit=limit)
     except OMError as exc:
@@ -563,8 +645,28 @@ async def _assets_page(
     more = bool(page.data) and (
         page.after is not None or (page.total is not None and taken < page.total)
     )
-    assets = await _realizing(om, res.ref.fqn, page.data, {})
-    return assets, taken if more else None
+    assets = await _realizing(om, cache, res.ref.fqn, page.data)
+    return assets, taken if more else None, len(page.data)
+
+
+async def _term_assets_all(
+    om: OMClient, cache: _Cache, res: _Resolved, budget: int
+) -> tuple[list[AssetRef], int, bool]:
+    """Every realizing asset of one term -> (assets, examined, complete). Cached when complete."""
+    hit, value = cache._get(cache.lists, res.ref.fqn)  # pyright: ignore[reportPrivateUsage]
+    if hit and value is not None:
+        return value[0], value[1], True
+    out: list[AssetRef] = []
+    examined = 0
+    pos: int | None = 0
+    while pos is not None:
+        if examined >= budget:
+            return out, examined, False
+        assets, pos, n = await _assets_page(om, cache, res, pos, _ASSET_PAGE)
+        out += assets
+        examined += n
+    cache._put(cache.lists, res.ref.fqn, (out, examined))  # pyright: ignore[reportPrivateUsage]
+    return out, examined, True
 
 
 # --- explain / assets ---------------------------------------------------------------------
@@ -573,7 +675,7 @@ async def _assets_page(
 async def explain_concept(models: ModelService, om: OMClient, concept: str) -> ConceptDetail:
     res = await _resolve(models, om, concept)
     g, node = res.g, res.node
-    assets, nxt = await _assets_page(om, res, 0, 50)
+    assets, nxt, _ = await _assets_page(om, _cache_for(models), res, 0, 50)
     return ConceptDetail(
         concept=res.ref,
         definition=_definition(g, node),
@@ -607,28 +709,41 @@ async def find_assets_for_concept(
     include_descendants: bool = False,
     cursor: str | None = None,
     limit: int = 50,
-) -> Page[AssetRef]:
+) -> AssetPage:
     offset = _decode_offset(cursor, "find_assets_for_concept")
     res = await _resolve(models, om, concept)
+    cache = _cache_for(models)
     if not include_descendants:
-        assets, nxt = await _assets_page(om, res, offset, limit)
-        return Page[AssetRef](
-            items=assets, next_cursor=_encode_offset(nxt) if nxt is not None else None
-        )
-    nodes = [res.node, *_descendants(res.g, res.node)]
+        assets, nxt, _ = await _assets_page(om, cache, res, offset, limit)
+        return AssetPage(items=assets, next_cursor=_encode_offset(nxt) if nxt is not None else None)
+    descendants = _descendants(res.g, res.node)
+    truncated = len(descendants) > MAX_DESCENDANT_TERMS - 1
+    nodes = [res.node, *descendants[: MAX_DESCENDANT_TERMS - 1]]
     merged: dict[tuple[str, str | None], AssetRef] = {}
-    for node in nodes:
-        sub = _Resolved(res.g, node, res.term_id if node == res.node else None)
-        pos: int | None = 0
-        while pos is not None:
-            assets, pos = await _assets_page(om, sub, pos, _ASSET_PAGE)
+    remaining = MAX_ASSETS_EXAMINED
+    for start in range(0, len(nodes), _CONCURRENCY):
+        if remaining <= 0:
+            truncated = True
+            break
+        batch = [
+            _Resolved(res.g, n, res.term_id if n == res.node else None)
+            for n in nodes[start : start + _CONCURRENCY]
+        ]
+        results = await asyncio.gather(
+            *(_term_assets_all(om, cache, sub, remaining) for sub in batch)
+        )
+        for assets, examined, complete in results:
+            remaining -= examined
+            truncated = truncated or not complete
             for a in assets:
                 merged.setdefault((a.fqn, a.column), a)
     ordered = sorted(merged.values(), key=lambda a: (a.fqn, a.column or ""))
     window = ordered[offset : offset + limit]
     more = offset + limit < len(ordered)
-    return Page[AssetRef](
-        items=window, next_cursor=_encode_offset(offset + limit) if more else None
+    return AssetPage(
+        items=window,
+        next_cursor=_encode_offset(offset + limit) if more else None,
+        truncated=truncated,
     )
 
 
@@ -642,7 +757,7 @@ def _ref_line(label: str, ref: ConceptRef) -> str:
 def _asset_line(a: AssetRef) -> str:
     if a.column:
         return f"- {code_span(a.fqn)} (column {code_span(a.column)})"
-    return f"- {code_span(a.fqn)} ({a.type})"
+    return f"- {code_span(a.fqn)} (type {code_span(a.type)})"
 
 
 def concept_markdown(detail: ConceptDetail, *, max_tokens: int | None = None) -> tuple[str, bool]:

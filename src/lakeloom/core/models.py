@@ -139,6 +139,14 @@ class ModelService:
 
     # --- graph and export -------------------------------------------------------------
 
+    @property
+    def cache_ttl(self) -> float:
+        """Seconds a cached graph (and anything derived from it) stays fresh."""
+        return float(self._settings.model_cache_ttl_seconds)
+
+    def now(self) -> float:
+        return self._clock()
+
     def clear_cache(self) -> None:
         self._cache.clear()
 

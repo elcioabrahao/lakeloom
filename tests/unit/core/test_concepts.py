@@ -1,5 +1,6 @@
 """Concept search, explanation and realizations (FR-CTX-03, FR-CTX-04, FR-CTX-06, NFR-SEC-14)."""
 
+import asyncio
 import base64
 
 import pytest
@@ -407,10 +408,149 @@ async def test_fr_ctx_06_truncation_keeps_sections_whole() -> None:
         assert section in full
     for line in body.splitlines():
         if line.startswith("- `lake."):
-            assert line.endswith("(table)"), line
+            assert line.endswith("(type `table`)"), line
 
 
 def _asset(i: int):
     from lakeloom.core.concepts import AssetRef
 
     return AssetRef(fqn=f"lake.retail.t{i}", type="table", column=None)
+
+
+class CountingOM(FakeOM):
+    """Records table fetches and the max number in flight."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.table_calls: list[str] = []
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self.term_asset_calls = 0
+
+    async def get_table_by_fqn(self, fqn: str, *_: object, **__: object) -> OMTable | None:
+        self.table_calls.append(fqn)
+        self.in_flight += 1
+        self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        await asyncio.sleep(0.01)
+        self.in_flight -= 1
+        return TABLES.get(fqn) or _table(fqn, ["retail.Customer"], {})
+
+    async def get_term_assets(self, term_id: str, *, offset: int = 0, limit: int = 50):
+        self.term_asset_calls += 1
+        return await super().get_term_assets(term_id, offset=offset, limit=limit)
+
+
+def make_counting(ttl: int = 60) -> tuple[ModelService, CountingOM]:
+    om = CountingOM()
+    settings = Settings(public_url="http://x", model_cache_ttl_seconds=ttl)  # pyright: ignore[reportArgumentType]
+    return ModelService(om, settings), om  # pyright: ignore[reportArgumentType]
+
+
+async def test_tables_fetched_concurrently_and_cached_within_ttl() -> None:
+    models, om = make_counting()
+    om.assets["retail.Customer"] = [_ref(f"lake.retail.t{i}") for i in range(20)]
+    first = await explain_concept(models, om, "retail.Customer")  # pyright: ignore[reportArgumentType]
+    assert len(first.realizations.items) == 20
+    assert 1 < om.max_in_flight <= 8
+    calls = len(om.table_calls)
+    await explain_concept(models, om, "retail.Customer")  # pyright: ignore[reportArgumentType]
+    assert len(om.table_calls) == calls
+
+
+async def test_ttl_zero_does_not_cache_tables() -> None:
+    models, om = make_counting(ttl=0)
+    await explain_concept(models, om, "retail.Customer")  # pyright: ignore[reportArgumentType]
+    calls = len(om.table_calls)
+    await explain_concept(models, om, "retail.Customer")  # pyright: ignore[reportArgumentType]
+    assert len(om.table_calls) == 2 * calls
+
+
+async def test_descendant_page_two_reuses_cache() -> None:
+    models, om = make_counting()
+    p1 = await find_assets_for_concept(
+        models,
+        om,  # pyright: ignore[reportArgumentType]
+        "retail.Order",
+        include_descendants=True,
+        limit=1,
+    )
+    assert p1.next_cursor is not None
+    calls = (len(om.table_calls), om.term_asset_calls)
+    p2 = await find_assets_for_concept(
+        models,
+        om,  # pyright: ignore[reportArgumentType]
+        "retail.Order",
+        include_descendants=True,
+        limit=1,
+        cursor=p1.next_cursor,
+    )
+    assert p2.items
+    assert (len(om.table_calls), om.term_asset_calls) == calls
+
+
+async def test_descendant_term_cap_sets_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
+    import lakeloom.core.concepts as mod
+
+    monkeypatch.setattr(mod, "MAX_DESCENDANT_TERMS", 2)  # Order + OrderStatus; Delivered cut
+    models, om = make_counting()
+    page = await find_assets_for_concept(
+        models,
+        om,  # pyright: ignore[reportArgumentType]
+        "retail.Order",
+        include_descendants=True,
+    )
+    assert page.truncated is True
+    assert {(a.fqn, a.column) for a in page.items} == {(ORDERS, None), (ORDERS, "status")}
+    full = await find_assets_for_concept(
+        models,
+        om,  # pyright: ignore[reportArgumentType]
+        "retail.Order",
+        include_descendants=True,
+    )
+    assert full.truncated is True  # cap still 2 here
+
+
+async def test_asset_examined_cap_sets_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
+    import lakeloom.core.concepts as mod
+
+    monkeypatch.setattr(mod, "MAX_ASSETS_EXAMINED", 1)
+    monkeypatch.setattr(mod, "_ASSET_PAGE", 1)
+    models, om = make_counting()
+    om.assets["retail.Order"] = [_ref(f"lake.retail.t{i}") for i in range(5)]
+    page = await find_assets_for_concept(
+        models,
+        om,  # pyright: ignore[reportArgumentType]
+        "retail.Order",
+        include_descendants=True,
+    )
+    assert page.truncated is True
+    assert len(page.items) <= 2
+
+
+async def test_uncapped_descendants_not_truncated() -> None:
+    models, om = make_counting()
+    page = await find_assets_for_concept(
+        models,
+        om,  # pyright: ignore[reportArgumentType]
+        "retail.Order",
+        include_descendants=True,
+    )
+    assert page.truncated is False
+
+
+async def test_asset_type_is_code_span() -> None:
+    from lakeloom.core.concepts import AssetRef
+
+    detail_md = None
+    models, om = make()
+    d = await explain_concept(models, om, "retail.Customer")  # pyright: ignore[reportArgumentType]
+    d = d.model_copy(
+        update={
+            "realizations": d.realizations.model_copy(
+                update={"items": [AssetRef(fqn="a.b", type="evil\n# H")]}
+            )
+        }
+    )
+    detail_md, _ = concept_markdown(d)
+    assert "\n# H" not in detail_md
+    assert "(type `evil # H`)" in detail_md
