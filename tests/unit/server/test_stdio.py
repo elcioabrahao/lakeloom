@@ -117,3 +117,20 @@ def test_no_stdout_logging_on_stdio(
     assert len(streams) == 1
     assert streams[0] is not None
     assert streams[0] is not sys.stdout
+
+
+def test_nfr_sec_11_stdio_migration_failure_is_sanitized(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    for k, v in _env(tmp_path).items():
+        monkeypatch.setenv(k, v)
+
+    async def boom(_: object) -> None:
+        raise RuntimeError("postgresql://u:secret@h/db")
+
+    monkeypatch.setattr("lakeloom.server.stdio.upgrade", boom)
+    result = CliRunner().invoke(app, ["serve", "--transport", "stdio"])
+    captured = capsys.readouterr()
+    assert result.exit_code == 1
+    assert "secret" not in result.output + captured.err + captured.out
+    assert "state store migration failed (RuntimeError)" in result.output

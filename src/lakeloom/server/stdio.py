@@ -43,17 +43,23 @@ def stdio_principal(settings: Settings) -> Principal:
 
 async def run_stdio(deps: AppDeps) -> None:
     """Migrate the state store, start the sources and serve MCP on stdin/stdout."""
-    mcp = create_mcp(deps)
     local_principal.set(stdio_principal(deps.settings))
     owns_telemetry = not is_active()
-    telemetry = configure_telemetry(deps.settings)
+    telemetry = None
     try:
+        telemetry = configure_telemetry(deps.settings)
+        mcp = create_mcp(deps)
         try:
             await upgrade(deps.engine)
         except _CONNECTION_ERRORS as exc:
             # Never the exception text: it can embed the DB URL (NFR-SEC-11).
             raise StdioStartupError(
                 f"state store unreachable ({type(exc).__name__}); check LAKELOOM_DB_URL"
+            ) from None
+        except Exception as exc:
+            # Same rule for anything else (corrupt file, alembic error): class name only.
+            raise StdioStartupError(
+                f"state store migration failed ({type(exc).__name__})"
             ) from None
         await start_sources(deps.sources)
         await mcp.run_stdio_async()
@@ -63,5 +69,5 @@ async def run_stdio(deps: AppDeps) -> None:
             await deps.idp_http.aclose()
         await deps.om.aclose()
         await deps.engine.dispose()
-        if owns_telemetry:
+        if owns_telemetry and telemetry is not None:
             telemetry.shutdown()

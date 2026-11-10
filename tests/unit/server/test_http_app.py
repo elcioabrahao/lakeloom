@@ -282,14 +282,22 @@ async def test_upgrade_retries_when_state_store_unreachable(deps: AppDeps) -> No
     assert calls == 3
 
 
-async def test_upgrade_non_connection_error_stops_startup(deps: AppDeps) -> None:
+async def test_nfr_sec_11_upgrade_non_connection_error_stops_startup_sanitized(
+    deps: AppDeps, caplog: pytest.LogCaptureFixture
+) -> None:
     async def broken(_: AsyncEngine) -> None:
-        raise RuntimeError("bad migration")
+        raise RuntimeError("postgresql://u:secret@h/db")
 
+    caplog.set_level(logging.DEBUG)
     app = create_app(deps, upgrade_fn=broken)
-    with pytest.raises(RuntimeError, match="bad migration"):
+    with pytest.raises(RuntimeError, match="state store migration failed") as info:
         async with app.router.lifespan_context(app):
             pass
+    assert "secret" not in str(info.value)
+    assert info.value.__cause__ is None
+    assert info.value.__suppress_context__
+    assert "secret" not in "\n".join(r.getMessage() for r in caplog.records)
+    assert "RuntimeError" in str(info.value)
 
 
 async def test_unreachable_db_app_starts_and_cancels_retry(tmp_path: Path) -> None:

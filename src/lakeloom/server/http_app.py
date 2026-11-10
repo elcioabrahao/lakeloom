@@ -307,8 +307,9 @@ def create_app(
                 upgrade_pending = True
                 retry = asyncio.create_task(retry_upgrade())
             except Exception as exc:
+                # Class only, and a sanitized error: uvicorn prints the exception text.
                 _log.error("state store migration failed (%s)", type(exc).__name__)
-                raise
+                raise RuntimeError(f"state store migration failed ({type(exc).__name__})") from None
             # Upstream MCP sources connect here, bounded; an unavailable one never fails startup.
             await start_sources(deps.sources)
             async with AsyncExitStack() as stack:
