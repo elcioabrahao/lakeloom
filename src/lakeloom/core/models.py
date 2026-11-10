@@ -12,6 +12,7 @@ import binascii
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from pydantic import BaseModel
@@ -39,6 +40,7 @@ class ModelInfo(BaseModel):
     base_iri: str | None = None
     prefixes: dict[str, str] = {}
     term_count: int | None = None
+    updated_at: int | None = None  # OM updatedAt, epoch milliseconds
 
 
 @dataclass
@@ -46,6 +48,7 @@ class _Entry:
     graph: Graph
     info: ModelInfo
     loaded_at: float
+    loaded_wall: datetime
     derived: dict[str, Any] = field(default_factory=dict[str, Any])  # e.g. the concept index
 
 
@@ -108,6 +111,7 @@ class ModelService:
             base_iri=base_iri,
             prefixes=prefixes,
             term_count=glossary.term_count,
+            updated_at=glossary.updated_at,
         )
 
     async def list_models(self, cursor: str | None, limit: int) -> Page[ModelInfo]:
@@ -146,6 +150,16 @@ class ModelService:
     def cache_ttl(self) -> float:
         """Seconds a cached graph (and anything derived from it) stays fresh."""
         return float(self._settings.model_cache_ttl_seconds)
+
+    @property
+    def om_url(self) -> str | None:
+        """The OpenMetadata base URL without a trailing slash, or None when unconfigured."""
+        url = self._settings.om_url
+        return None if url is None else str(url).rstrip("/")
+
+    async def loaded_at(self, slug: str) -> datetime:
+        """Wall-clock time the model's current graph was loaded (stable while cached)."""
+        return (await self._load(slug)).loaded_wall
 
     def now(self) -> float:
         return self._clock()
@@ -211,7 +225,7 @@ class ModelService:
                     f"OpenMetadata returned an unreadable export for {slug!r}",
                     hint="check the OpenMetadata RDF export; retry shortly",
                 ) from exc
-            entry = _Entry(graph, info, self._clock())
+            entry = _Entry(graph, info, self._clock(), datetime.now(UTC))
             self._cache[slug] = entry
             return entry
 

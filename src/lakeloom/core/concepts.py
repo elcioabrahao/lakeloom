@@ -393,8 +393,9 @@ def _not_found(concept: str) -> LakeloomError:
 
 
 async def _resolve_by_name(models: ModelService, concept: str) -> _Resolved:
-    """A plain name: exactly one name/synonym/local-name match across the models resolves."""
-    hits: list[tuple[_Graph, URIRef]] = []
+    """A plain name: the highest-ranked tier of matches (name > synonym > local name) resolves
+    when it holds exactly one concept; otherwise the candidates are listed."""
+    hits: list[tuple[float, _Graph, URIRef]] = []
     for slug in await _all_slugs(models):
         try:
             g = await _graph(models, slug)
@@ -405,12 +406,15 @@ async def _resolve_by_name(models: ModelService, concept: str) -> _Resolved:
         for node, ref in g.concepts.items():
             scored = _score(concept, _Candidate(ref, g.synonyms[node]))
             if scored is not None and scored[0] >= _EXACT_MIN:
-                hits.append((g, node))
-    if len(hits) == 1:
-        return _Resolved(*hits[0])
+                hits.append((scored[0], g, node))
     if not hits:
         raise _not_found(concept)
-    fqns = sorted(g.concepts[n].fqn for g, n in hits)
+    # Rank: exact name (1.0) > synonym (0.95) > local name (0.9); the top tier must be unique.
+    top = max(score for score, _, _ in hits)
+    hits = [h for h in hits if h[0] == top]
+    if len(hits) == 1:
+        return _Resolved(hits[0][1], hits[0][2])
+    fqns = sorted(g.concepts[n].fqn for _, g, n in hits)
     shown = ", ".join(f"`{f}`" for f in fqns[:_MAX_CANDIDATES])
     more = f" and {len(fqns) - _MAX_CANDIDATES} more" if len(fqns) > _MAX_CANDIDATES else ""
     raise LakeloomError(

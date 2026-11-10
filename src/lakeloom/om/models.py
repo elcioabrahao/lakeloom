@@ -86,6 +86,7 @@ class OMTable(BaseModel):
     tags: list[OMTagLabel] = []
     owners: list[OMEntityRef] = []
     domains: list[OMEntityRef] = []
+    updated_at: int | None = Field(default=None, alias="updatedAt")  # epoch milliseconds
 
 
 class OMPage[T](BaseModel):
@@ -132,6 +133,7 @@ class OMGlossary(BaseModel):
     description: str | None = None
     namespaces: list[OMNamespace] = []
     term_count: int | None = Field(default=None, alias="termCount")
+    updated_at: int | None = Field(default=None, alias="updatedAt")  # epoch milliseconds
 
 
 class OMTermRelation(BaseModel):

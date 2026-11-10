@@ -641,3 +641,35 @@ async def test_invalidate_drops_index_tables_and_realizations() -> None:
     models.invalidate()
     await find_assets_for_concept(models, om, "retail.Customer", include_descendants=True)  # pyright: ignore[reportArgumentType]
     assert len(om.table_calls) > calls[0] and om.term_asset_calls > calls[1]
+
+
+async def test_concept_name_exact_beats_synonym() -> None:
+    """A name that is exactly one concept's label and another's synonym resolves to the former."""
+    models, om = make()
+    om.glossaries = [
+        OMGlossary.model_validate(
+            {"id": "id-retail", "name": "retail", "fullyQualifiedName": "retail"}
+        )
+    ]
+    # Customer carries the altLabel "Order" in this variant of the model
+    turtle = TURTLE.replace('skos:altLabel "Client", "Buyer"', 'skos:altLabel "Order", "Buyer"')
+
+    async def export(glossary_id: str, fmt: str, **_: object) -> str:
+        return turtle
+
+    om.export_ontology = export  # type: ignore[method-assign]
+    detail = await explain_concept(models, om, "Order")  # pyright: ignore[reportArgumentType]
+    assert detail.concept.fqn == "retail.Order"
+
+
+async def test_concept_name_two_exact_names_still_ambiguous() -> None:
+    models, om = make()
+
+    async def export(glossary_id: str, fmt: str, **_: object) -> str:
+        return TURTLE.replace('skos:prefLabel "Customer"', 'skos:prefLabel "Order"')
+
+    om.export_ontology = export  # type: ignore[method-assign]
+    with pytest.raises(LakeloomError) as e:
+        await explain_concept(models, om, "Order")  # pyright: ignore[reportArgumentType]
+    assert e.value.code == "validation_error"
+    assert "retail.Customer" in (e.value.hint or "")

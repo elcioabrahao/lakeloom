@@ -597,18 +597,24 @@ def _asset_iri(fqn: str) -> str:
     return "urn:lakeloom:asset:" + quote(fqn, safe="")
 
 
+def minimal_jsonld_context(model: ModelInfo | None) -> dict[str, str]:
+    """``@vocab`` (the model's base IRI), its prefixes, ``dcterms`` and ``skos``."""
+    context: dict[str, str] = {}
+    if model is not None:
+        context.update(model.prefixes)
+        if model.base_iri:
+            context["@vocab"] = model.base_iri
+    context.update({"dcterms": _DCTERMS, "skos": _SKOS})  # fixed: never overridden
+    return context
+
+
 def render_jsonld(
     ctx: AssetContext, model: ModelInfo | None = None, *, max_tokens: int | None = None
 ) -> Rendered[dict[str, Any]]:
     """JSON-LD with a minimal ``@context``; concepts link through ``dcterms:subject``."""
 
     def build(c: AssetContext) -> dict[str, Any]:
-        context: dict[str, str] = {}
-        if model is not None:
-            context.update(model.prefixes)
-            if model.base_iri:
-                context["@vocab"] = model.base_iri
-        context.update({"dcterms": _DCTERMS, "skos": _SKOS})  # fixed: never overridden
+        context = minimal_jsonld_context(model)
 
         def subjects(refs: list[ConceptRef]) -> list[dict[str, str]]:
             return [{"@id": r.iri} for r in refs if r.iri]
