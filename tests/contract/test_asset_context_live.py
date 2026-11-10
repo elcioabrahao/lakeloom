@@ -54,10 +54,10 @@ async def test_orders_context_live_three_forms(client: OMClient) -> None:
             assert [c.fqn for c in ctx.table_concepts] == ["retail.Order"]
             got = {c.name: [r.fqn for r in c.concepts] for c in ctx.columns}
             assert got == {k: [v] for k, v in COLUMN_CONCEPTS.items()}
-            md = render_markdown(ctx)
+            md = render_markdown(ctx).payload
             for name, concept in COLUMN_CONCEPTS.items():
                 assert f"`{name}`" in md and f"`{concept}`" in md
-            assert render_json(ctx)["asset"]["table_fqn"] == ORDERS
+            assert render_json(ctx).payload["asset"]["table_fqn"] == ORDERS
         started = time.perf_counter()
         await get_asset_context(ORDERS, models=models, om=client, sources=sources)
         elapsed = time.perf_counter() - started

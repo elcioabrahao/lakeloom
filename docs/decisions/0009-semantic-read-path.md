@@ -140,3 +140,20 @@ tag. Lakeloom keeps only assets whose table or column carries the term as a dire
 `find_concepts` ranks graph candidates plus OM `search_terms` hits (rc1 search finds nothing for
 synonyms such as "client"; the graph answers). `include_descendants` walks children to depth 10,
 cycle-safe.
+
+## Asset context (Task 6)
+
+- Column realizations are Glossary tags with `labelType != Derived`: OM propagates table-level
+  glossary tags to columns as `Derived`, and counting them would repeat the table concept on
+  every column. Table realizations are all Glossary tags on the table.
+- `AssetContext` carries no `token_estimate` or `truncated`. Each renderer (`render_markdown`,
+  `render_json`, `render_jsonld`) returns `Rendered(payload, token_estimate, truncated)` computed
+  for that very rendering; tools echo those values, so text and metadata cannot disagree.
+- Markdown truncation drops whole trailing sections. JSON and JSON-LD trimming keeps the longest
+  prefix of columns whose serialised payload fits `max_tokens`; `truncated` is true only when
+  columns were dropped (concept details are not pruned).
+- A lookup that finds no table in OM is cached for at most 10 seconds; found tables keep the model
+  cache TTL, so a table ingested moments after a failed guess becomes visible quickly.
+- Relationships are built from table-level concepts only, through their graph relations to
+  concepts realized by other tables; `realizing_tables` examines at most the first 100 OM assets
+  of a term, and a context shows at most 20 relations with 20 tables each.

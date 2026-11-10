@@ -71,6 +71,7 @@ _FIND_HINT = "use find_concepts to look up the concept's IRI or FQN"
 _FUZZY_MIN = 0.6
 _ASSET_CHUNK = 25
 _CACHE_MAX = 1024
+_NEGATIVE_TTL = 10.0  # seconds a "not in OM" lookup is remembered
 _CONCURRENCY = 8
 MAX_DESCENDANT_TERMS = 200
 MAX_ASSETS_EXAMINED = 2000
@@ -531,7 +532,8 @@ class _Cache:
 
     def _get[V](self, store: OrderedDict[str, tuple[float, V]], key: str) -> tuple[bool, V | None]:
         hit = store.get(key)
-        if hit is None or self.ttl <= 0 or self.now() - hit[0] >= self.ttl:
+        ttl = min(self.ttl, _NEGATIVE_TTL) if hit is not None and hit[1] is None else self.ttl
+        if hit is None or ttl <= 0 or self.now() - hit[0] >= ttl:
             store.pop(key, None)
             return False, None
         store.move_to_end(key)

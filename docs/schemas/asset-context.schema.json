@@ -399,16 +399,6 @@
       },
       "title": "Table Concepts",
       "type": "array"
-    },
-    "token_estimate": {
-      "default": 0,
-      "title": "Token Estimate",
-      "type": "integer"
-    },
-    "truncated": {
-      "default": false,
-      "title": "Truncated",
-      "type": "boolean"
     }
   },
   "required": [

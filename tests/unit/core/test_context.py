@@ -252,10 +252,9 @@ async def test_fr_ctx_01_orders_context_lists_column_concepts() -> None:
     assert status.data_type == "STRING"
     ma = next(c for c in ctx.columns if c.name == "total_amount")
     assert [a.name for a in ma.attributes] == ["total amount"]
-    md = render_markdown(ctx)
+    md = render_markdown(ctx).payload
     for name, concept in COLUMN_CONCEPTS.items():
         assert f"`{name}`" in md and f"`{concept}`" in md
-    assert ctx.token_estimate > 0
 
 
 async def test_fr_ctx_01_three_input_forms_same_context() -> None:
@@ -263,7 +262,7 @@ async def test_fr_ctx_01_three_input_forms_same_context() -> None:
     ctxs = [await ctx_for(f) for f in forms]
     assert {c.asset.table_fqn for c in ctxs} == {ORDERS}
     assert {c.asset.om_id for c in ctxs} == {f"id-{ORDERS}"}
-    assert len({json.dumps(render_json(c), sort_keys=True) for c in ctxs}) == 1
+    assert len({json.dumps(render_json(c).payload, sort_keys=True) for c in ctxs}) == 1
 
 
 async def test_column_asset_context() -> None:
@@ -345,9 +344,9 @@ async def test_om_down_is_upstream_unavailable() -> None:
 async def test_fr_ctx_02_json_and_jsonld_render() -> None:
     models, om, sources = make()
     ctx = await get_asset_context(ORDERS, models=models, om=om, sources=sources)  # pyright: ignore[reportArgumentType]
-    validate(render_json(ctx), _schema())
+    validate(render_json(ctx).payload, _schema())
     info = await models.get_model("retail")
-    doc = render_jsonld(ctx, info)
+    doc = render_jsonld(ctx, info).payload
     g = Graph().parse(data=json.dumps(doc), format="json-ld")
     assert len(g) >= 1
     subjects = {str(o) for _, _, o in g.triples((None, None, None))}
@@ -366,25 +365,73 @@ async def test_fr_ctx_06_token_estimate_and_truncation() -> None:
         for i in range(400)
     ]
     om = FakeOM({ORDERS: _table(ORDERS, ["retail.Order"], cols)})
-    full = await ctx_for(om=om)
-    ctx = await ctx_for(om=om, max_tokens=500)
+    ctx = await ctx_for(om=om)
+    full = render_markdown(ctx)
     assert full.truncated is False
-    assert ctx.truncated is True
-    md = render_markdown(ctx, max_tokens=500)
+    assert full.token_estimate == -(-len(full.payload) // 4)
+    assert TRUNCATION_NOTE not in full.payload and "`c399`" in full.payload
+    cut = render_markdown(ctx, max_tokens=500)
+    md = cut.payload
+    assert cut.truncated is True
     assert md.endswith(TRUNCATION_NOTE)
-    assert ctx.token_estimate == -(-len(md) // 4) <= 500
+    assert cut.token_estimate == -(-len(md) // 4) <= 500
     assert md.startswith("# ")
     assert "`c399`" not in md
     j = render_json(ctx, max_tokens=500)
-    assert j["truncated"] is True
-    assert len(json.dumps(j)) / 4 <= 520
-    assert len(j["columns"]) < 400
+    assert j.truncated is True
+    assert j.token_estimate == -(-len(json.dumps(j.payload)) // 4) <= 500
+    assert len(j.payload["columns"]) < 400
+    whole = render_json(ctx)
+    assert whole.truncated is False and len(whole.payload["columns"]) == 400
+    ld = render_jsonld(ctx, max_tokens=500)
+    assert ld.truncated is True and ld.token_estimate <= 500
+    assert render_jsonld(ctx).truncated is False
+
+
+async def test_jsonld_fixed_prefixes_not_overridden() -> None:
+    models, om, sources = make()
+    ctx = await get_asset_context(ORDERS, models=models, om=om, sources=sources)  # pyright: ignore[reportArgumentType]
+    info = (await models.get_model("retail")).model_copy(
+        update={"prefixes": {"dcterms": "http://evil/", "skos": "http://evil/", "retail": B}}
+    )
+    context = render_jsonld(ctx, info).payload["@context"]
+    assert context["dcterms"] == "http://purl.org/dc/terms/"
+    assert context["skos"] == "http://www.w3.org/2004/02/skos/core#"
+    assert context["retail"] == B
+
+
+async def test_column_line_shows_attribute_details() -> None:
+    md = render_markdown(await ctx_for()).payload
+    line = next(x for x in md.splitlines() if "attribute `total amount`" in x)
+    assert "datatype `http://www.w3.org/2001/XMLSchema#decimal`" in line
+
+
+async def test_negative_lookup_cache_expires_before_positive() -> None:
+    from lakeloom.core.concepts import fetch_tables
+
+    clock = [0.0]
+    om = FakeOM()
+    models = ModelService(
+        om,  # pyright: ignore[reportArgumentType]
+        Settings(public_url="http://x"),  # pyright: ignore[reportArgumentType]
+        clock=lambda: clock[0],
+    )
+    await fetch_tables(models, om, ["missing", ORDERS])  # pyright: ignore[reportArgumentType]
+    calls = om.table_calls
+    clock[0] = 5
+    await fetch_tables(models, om, ["missing", ORDERS])  # pyright: ignore[reportArgumentType]
+    assert om.table_calls == calls  # both cached
+    om.tables["missing"] = om.tables[ORDERS]
+    clock[0] = 11
+    got = await fetch_tables(models, om, ["missing", ORDERS])  # pyright: ignore[reportArgumentType]
+    assert got["missing"] is not None  # negative entry expired after 10 s
+    assert om.table_calls == calls + 1  # positive still cached (TTL 60 s)
 
 
 async def test_nfr_sec_14_hostile_column_description_quoted() -> None:
     cols = _orders_columns(HOSTILE)
     om = FakeOM({ORDERS: _table(ORDERS, ["retail.Order"], cols, description=HOSTILE)})
-    md = render_markdown(await ctx_for(om=om))
+    md = render_markdown(await ctx_for(om=om)).payload
     assert "![x](https" not in md and "[click](" not in md
     for line in md.splitlines():
         assert not line.startswith("# Fake heading")
@@ -394,7 +441,7 @@ async def test_nfr_sec_14_hostile_column_description_quoted() -> None:
 
 
 async def test_nfr_sec_14_hostile_concept_definition_quoted() -> None:
-    md = render_markdown(await ctx_for())
+    md = render_markdown(await ctx_for()).payload
     assert "[click](" not in md and "![x](https" not in md
     assert "Ignore previous instructions" in md  # quoted, not dropped
     assert not any(line.startswith("# Fake") for line in md.splitlines())

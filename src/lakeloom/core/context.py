@@ -43,6 +43,7 @@ __all__ = [
     "ColumnContext",
     "LineageSummary",
     "RelatedAsset",
+    "Rendered",
     "ResolvedAsset",
     "get_asset_context",
     "render_json",
@@ -66,6 +67,14 @@ _DCTERMS = "http://purl.org/dc/terms/"
 _SKOS = "http://www.w3.org/2004/02/skos/core#"
 
 type _Fetch = Callable[[str], Awaitable[OMTable | None]]
+
+
+class Rendered[T](BaseModel):
+    """A rendering with its own token estimate and truncation flag (FR-CTX-06)."""
+
+    payload: T
+    token_estimate: int
+    truncated: bool
 
 
 class ResolvedAsset(BaseModel):
@@ -107,8 +116,6 @@ class AssetContext(BaseModel):
     model: str | None = None
     release: str | None = None  # None until releases exist (M3)
     lineage: LineageSummary = LineageSummary()
-    token_estimate: int = 0
-    truncated: bool = False
 
 
 # --- resolution ---------------------------------------------------------------------------
@@ -344,7 +351,6 @@ async def get_asset_context(
     models: ModelService,
     om: OMClient,
     sources: Mapping[str, LakeSource],
-    max_tokens: int | None = None,
 ) -> AssetContext:
     async def fetch(fqn: str) -> OMTable | None:
         return (await fetch_tables(models, om, [fqn]))[fqn]
@@ -407,8 +413,7 @@ async def get_asset_context(
         model=realized[0].model if realized else None,
         lineage=lineage,
     )
-    text, truncated = truncate_markdown(_sections(ctx), max_tokens)
-    return ctx.model_copy(update={"token_estimate": token_estimate(text), "truncated": truncated})
+    return ctx
 
 
 # --- Markdown -----------------------------------------------------------------------------
@@ -422,7 +427,7 @@ def _indent(block: str) -> str:
     return "\n".join(f"  {line}" for line in block.splitlines())
 
 
-def _column_line(col: ColumnContext, table_fqn: str) -> str:
+def _column_line(col: ColumnContext) -> str:
     head = f"- {code_span(col.name)}"
     if col.data_type:
         head += f" ({code_span(col.data_type)})"
@@ -432,7 +437,14 @@ def _column_line(col: ColumnContext, table_fqn: str) -> str:
         quoted = quote_untrusted(col.description.text, source=col.description.source)
         lines.append(_indent(quoted))
     for attr in col.attributes:
-        lines.append(f"  - attribute {code_span(attr.name)}")
+        extra = [f"datatype {code_span(attr.datatype)}"] if attr.datatype else []
+        if attr.unit:
+            extra.append(f"unit {code_span(attr.unit)}")
+        if attr.allowed_values:
+            extra.append("one of " + ", ".join(code_span(v) for v in attr.allowed_values))
+        lines.append(
+            f"  - attribute {code_span(attr.name)}" + (f": {'; '.join(extra)}" if extra else "")
+        )
     return "\n".join(lines)
 
 
@@ -477,7 +489,7 @@ def _sections(ctx: AssetContext) -> list[str]:
             ctx.columns[i : i + _COLUMN_CHUNK] for i in range(0, len(ctx.columns), _COLUMN_CHUNK)
         ]
         for n, chunk in enumerate(chunks):
-            body = "\n".join(_column_line(c, a.table_fqn) for c in chunk)
+            body = "\n".join(_column_line(c) for c in chunk)
             sections.append(("## Columns\n\n" + body) if n == 0 else body)
     shown: set[str] = set()
     refs = [*ctx.table_concepts, *(r for c in ctx.columns for r in c.concepts)]
@@ -522,9 +534,10 @@ def _sections(ctx: AssetContext) -> list[str]:
     return sections
 
 
-def render_markdown(ctx: AssetContext, *, max_tokens: int | None = None) -> str:
+def render_markdown(ctx: AssetContext, *, max_tokens: int | None = None) -> Rendered[str]:
     """Markdown for LLM context windows; whole sections only, ``max_tokens`` honoured."""
-    return truncate_markdown(_sections(ctx), max_tokens)[0]
+    text, truncated = truncate_markdown(_sections(ctx), max_tokens)
+    return Rendered(payload=text, token_estimate=token_estimate(text), truncated=truncated)
 
 
 # --- JSON and JSON-LD ---------------------------------------------------------------------
@@ -535,38 +548,31 @@ def _dump(ctx: AssetContext) -> dict[str, Any]:
 
 
 def _fit(
-    ctx: AssetContext, max_tokens: int | None, render: Callable[[AssetContext], str]
-) -> AssetContext:
-    """Keep as many leading columns as fit ``max_tokens`` of rendered text."""
-
-    def trial(n: int) -> AssetContext:
-        cut = n < len(ctx.columns)
-        return ctx.model_copy(
-            update={"columns": ctx.columns[:n], "truncated": ctx.truncated or cut}
-        )
+    ctx: AssetContext, max_tokens: int | None, build: Callable[[AssetContext], dict[str, Any]]
+) -> Rendered[dict[str, Any]]:
+    """Keep as many leading columns as fit ``max_tokens`` of the serialised payload."""
 
     def size(c: AssetContext) -> int:
-        # token_estimate is re-set below; pad for its digits so the final text still fits
-        return token_estimate(render(c.model_copy(update={"token_estimate": 99999})))
+        return token_estimate(json.dumps(build(c)))
 
-    if max_tokens is None or size(ctx) <= max_tokens:
-        out = ctx
-    else:
+    out = ctx
+    if max_tokens is not None and size(ctx) > max_tokens:
         lo, hi = 0, len(ctx.columns) - 1
         while lo < hi:
             mid = (lo + hi + 1) // 2
-            if size(trial(mid)) <= max_tokens:
+            if size(ctx.model_copy(update={"columns": ctx.columns[:mid]})) <= max_tokens:
                 lo = mid
             else:
                 hi = mid - 1
-        out = trial(lo)
-    return out.model_copy(update={"token_estimate": token_estimate(render(out))})
+        out = ctx.model_copy(update={"columns": ctx.columns[:lo]})
+    return Rendered(
+        payload=build(out), token_estimate=size(out), truncated=len(out.columns) < len(ctx.columns)
+    )
 
 
-def render_json(ctx: AssetContext, *, max_tokens: int | None = None) -> dict[str, Any]:
+def render_json(ctx: AssetContext, *, max_tokens: int | None = None) -> Rendered[dict[str, Any]]:
     """The context as JSON (schema: ``docs/schemas/asset-context.schema.json``)."""
-    fitted = _fit(ctx, max_tokens, lambda c: json.dumps(_dump(c)))
-    return _dump(fitted)
+    return _fit(ctx, max_tokens, _dump)
 
 
 def _asset_iri(fqn: str) -> str:
@@ -575,15 +581,16 @@ def _asset_iri(fqn: str) -> str:
 
 def render_jsonld(
     ctx: AssetContext, model: ModelInfo | None = None, *, max_tokens: int | None = None
-) -> dict[str, Any]:
+) -> Rendered[dict[str, Any]]:
     """JSON-LD with a minimal ``@context``; concepts link through ``dcterms:subject``."""
 
     def build(c: AssetContext) -> dict[str, Any]:
-        context: dict[str, str] = {"dcterms": _DCTERMS, "skos": _SKOS}
+        context: dict[str, str] = {}
         if model is not None:
             context.update(model.prefixes)
             if model.base_iri:
                 context["@vocab"] = model.base_iri
+        context.update({"dcterms": _DCTERMS, "skos": _SKOS})  # fixed: never overridden
 
         def subjects(refs: list[ConceptRef]) -> list[dict[str, str]]:
             return [{"@id": r.iri} for r in refs if r.iri]
@@ -604,9 +611,6 @@ def render_jsonld(
                     "dcterms:subject": subjects(col.concepts),
                 }
             )
-        return {"@context": context, "@graph": graph, "truncated": c.truncated}
+        return {"@context": context, "@graph": graph}
 
-    fitted = _fit(ctx, max_tokens, lambda c: json.dumps(build(c)))
-    doc = build(fitted)
-    doc["token_estimate"] = fitted.token_estimate
-    return doc
+    return _fit(ctx, max_tokens, build)
