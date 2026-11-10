@@ -28,7 +28,6 @@ __all__ = [
     "current_principal",
     "guarded",
     "local_principal",
-    "principal_of",
     "tool_error",
 ]
 
@@ -63,9 +62,6 @@ def current_principal(ctx: Context) -> Principal | None:
     state: dict[str, Any] = request.scope.get("state") or {}
     principal = state.get("principal")
     return principal if isinstance(principal, Principal) else None
-
-
-principal_of = current_principal  # the name tools used before the shared helper
 
 
 def client_name(ctx: Context) -> str | None:
