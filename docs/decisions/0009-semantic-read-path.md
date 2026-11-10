@@ -150,8 +150,11 @@ cycle-safe.
   `render_json`, `render_jsonld`) returns `Rendered(payload, token_estimate, truncated)` computed
   for that very rendering; tools echo those values, so text and metadata cannot disagree.
 - Markdown truncation drops whole trailing sections. JSON and JSON-LD trimming keeps the longest
-  prefix of columns whose serialised payload fits `max_tokens`; `truncated` is true only when
-  columns were dropped (concept details are not pruned).
+  prefix of columns whose serialised payload fits `max_tokens`, with `concept_details` pruned to
+  the table concepts and the kept columns' concepts; when even no column fits, it drops whole
+  sections in this order: relationships, lineage, owners/domains/data products, concept
+  details, description. `truncated` is true when anything was dropped, or when the remaining
+  skeleton (asset, table concepts, model) still exceeds `max_tokens`.
 - A lookup that finds no table in OM is cached for at most 10 seconds; found tables keep the model
   cache TTL, so a table ingested moments after a failed guess becomes visible quickly.
 - Relationships are built from table-level concepts only, through their graph relations to

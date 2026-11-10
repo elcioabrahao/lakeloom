@@ -547,27 +547,54 @@ def _dump(ctx: AssetContext) -> dict[str, Any]:
     return ctx.model_dump(mode="json", by_alias=True)
 
 
+def _keep_columns(ctx: AssetContext, n: int) -> AssetContext:
+    """The first ``n`` columns, with concept details only for the concepts still shown."""
+    columns = ctx.columns[:n]
+    shown = {r.fqn for r in ctx.table_concepts} | {r.fqn for c in columns for r in c.concepts}
+    details = {k: v for k, v in ctx.concept_details.items() if k in shown}
+    return ctx.model_copy(update={"columns": columns, "concept_details": details})
+
+
+# Dropped in this order when no column fits (relationships, lineage, stewardship, concept
+# details, description), leaving the asset, its table concepts and the model at worst.
+_DROPS: tuple[dict[str, Any], ...] = (
+    {"relationships": []},
+    {"lineage": LineageSummary()},
+    {"owners": [], "domains": [], "data_products": []},
+    {"concept_details": {}},
+    {"description": None},
+)
+
+
 def _fit(
     ctx: AssetContext, max_tokens: int | None, build: Callable[[AssetContext], dict[str, Any]]
 ) -> Rendered[dict[str, Any]]:
-    """Keep as many leading columns as fit ``max_tokens`` of the serialised payload."""
+    """Fit the serialised payload into ``max_tokens`` (FR-CTX-06).
+
+    Keeps the longest prefix of columns that fits (concept details pruned to the concepts
+    still shown); when even no column fits, drops whole sections in ``_DROPS`` order.
+    ``truncated`` is true when anything was dropped or the minimal skeleton still exceeds
+    ``max_tokens``.
+    """
 
     def size(c: AssetContext) -> int:
         return token_estimate(json.dumps(build(c)))
 
-    out = ctx
-    if max_tokens is not None and size(ctx) > max_tokens:
-        lo, hi = 0, len(ctx.columns) - 1
-        while lo < hi:
-            mid = (lo + hi + 1) // 2
-            if size(ctx.model_copy(update={"columns": ctx.columns[:mid]})) <= max_tokens:
-                lo = mid
-            else:
-                hi = mid - 1
-        out = ctx.model_copy(update={"columns": ctx.columns[:lo]})
-    return Rendered(
-        payload=build(out), token_estimate=size(out), truncated=len(out.columns) < len(ctx.columns)
-    )
+    if max_tokens is None or size(ctx) <= max_tokens:
+        return Rendered(payload=build(ctx), token_estimate=size(ctx), truncated=False)
+    lo, hi = 0, len(ctx.columns) - 1
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if size(_keep_columns(ctx, mid)) <= max_tokens:
+            lo = mid
+        else:
+            hi = mid - 1
+    out = _keep_columns(ctx, max(lo, 0))
+    for drop in _DROPS:
+        if size(out) <= max_tokens:
+            break
+        out = out.model_copy(update=drop)
+    return Rendered(payload=build(out), token_estimate=size(out), truncated=True)
 
 
 def render_json(ctx: AssetContext, *, max_tokens: int | None = None) -> Rendered[dict[str, Any]]:

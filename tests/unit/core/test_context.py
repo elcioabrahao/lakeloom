@@ -514,3 +514,73 @@ async def test_nfr_perf_01_warm_context_on_10k_term_model() -> None:
     elapsed = time.perf_counter() - start
     assert warm == cold
     assert elapsed < 1.5, f"warm get_asset_context took {elapsed:.2f}s"
+
+
+def _skeleton_size(ctx: AssetContext, jsonld: bool = False) -> int:
+    bare = ctx.model_copy(
+        update={
+            "columns": [],
+            "concept_details": {},
+            "relationships": [],
+            "owners": [],
+            "domains": [],
+            "data_products": [],
+            "description": None,
+            "lineage": type(ctx.lineage)(),
+        }
+    )
+    r = render_jsonld(bare) if jsonld else render_json(bare)
+    return r.token_estimate
+
+
+@pytest.mark.parametrize("render", [render_json, render_jsonld])
+async def test_fr_ctx_06_structured_budget_bounds_whole_payload(render: Any) -> None:
+    ctx = await ctx_for()
+    full = render(ctx)
+    floor = _skeleton_size(ctx, jsonld=render is render_jsonld)
+    for budget in range(floor, full.token_estimate, 7):
+        cut = render(ctx, max_tokens=budget)
+        assert cut.truncated is True, budget
+        assert cut.token_estimate == -(-len(json.dumps(cut.payload)) // 4) <= budget, budget
+    assert render(ctx, max_tokens=full.token_estimate).truncated is False
+
+
+async def test_fr_ctx_06_json_drops_sections_and_prunes_details() -> None:
+    ctx = await ctx_for()
+    cut = render_json(ctx, max_tokens=_skeleton_size(ctx))
+    doc = cut.payload
+    validate(doc, _schema())
+    assert cut.truncated is True and cut.token_estimate <= _skeleton_size(ctx)
+    assert doc["columns"] == [] and doc["concept_details"] == {}
+    assert doc["relationships"] == [] and doc["lineage"] == {"upstream": [], "downstream": []}
+    assert doc["owners"] == doc["domains"] == doc["data_products"] == []
+    assert doc["description"] is None
+    assert doc["asset"]["fqn"] == ORDERS and doc["table_concepts"]
+    # one column kept: details only for the table concept and that column's concept
+    one = AssetContext.model_validate(render_json(ctx).payload)
+    budget = render_json(
+        one.model_copy(
+            update={
+                "columns": one.columns[:1],
+                "concept_details": {
+                    k: v
+                    for k, v in one.concept_details.items()
+                    if k in {"retail.Order", COLUMN_CONCEPTS["order_id"]}
+                },
+            }
+        )
+    ).token_estimate
+    kept = render_json(ctx, max_tokens=budget).payload
+    assert [c["name"] for c in kept["columns"]] == ["order_id"]
+    assert set(kept["concept_details"]) == {"retail.Order", COLUMN_CONCEPTS["order_id"]}
+
+
+async def test_fr_ctx_06_unreachable_budget_is_minimal_and_truncated() -> None:
+    om = FakeOM({ORDERS: _table(ORDERS, ["retail.Order"], [])})  # no columns to drop
+    ctx = await ctx_for(om=om)
+    for render in (render_json, render_jsonld):
+        cut = render(ctx, max_tokens=1)
+        assert cut.truncated is True
+        assert cut.token_estimate > 1  # the skeleton cannot fit; flagged, not hidden
+    cut = render_json(ctx, max_tokens=1).payload
+    assert cut["description"] is None and cut["relationships"] == []
