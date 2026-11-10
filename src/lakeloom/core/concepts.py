@@ -189,18 +189,6 @@ def _index(slug: str, graph: Graph) -> _Graph:
     return out
 
 
-# One index per graph object: ModelService replaces the graph on reload (and drops it on
-# invalidation), so a stale index is never reachable (NFR-PERF-01).
-_indexes: WeakKeyDictionary[Graph, _Graph] = WeakKeyDictionary()
-
-
-def _indexed(slug: str, graph: Graph) -> _Graph:
-    g = _indexes.get(graph)
-    if g is None or g.graph is not graph or g.slug != slug:
-        g = _indexes[graph] = _index(slug, graph)
-    return g
-
-
 def _concept_objects(g: _Graph, node: URIRef, preds: Iterable[URIRef]) -> set[URIRef]:
     found: set[URIRef] = set()
     for pred in preds:
@@ -383,7 +371,8 @@ async def _all_slugs(models: ModelService) -> list[str]:
 
 
 async def _graph(models: ModelService, slug: str) -> _Graph:
-    return _indexed(slug, await models.graph(slug))
+    """The model's concept index, built once per loaded graph (NFR-PERF-01)."""
+    return await models.derived(slug, "concepts.index", lambda graph: _index(slug, graph))
 
 
 @dataclass
@@ -607,6 +596,16 @@ class _Cache:
         store.move_to_end(key)
         return True, hit[1]
 
+    def invalidate(self, slug: str | None) -> None:
+        """Drop realizations of ``slug``'s terms (all when ``None``) and every cached table:
+        tables are not per model, and their tags may have changed in OM."""
+        self.tables.clear()
+        if slug is None:
+            self.lists.clear()
+        else:
+            for key in [k for k in self.lists if k.split(".", 1)[0] == slug]:
+                del self.lists[key]
+
     def _put[V](self, store: OrderedDict[str, tuple[float, V]], key: str, value: V) -> None:
         if self.ttl <= 0:
             return
@@ -623,6 +622,7 @@ def _cache_for(models: ModelService) -> _Cache:
     cache = _caches.get(models)
     if cache is None:
         cache = _caches[models] = _Cache()
+        models.on_invalidate(cache.invalidate)
     cache.ttl = models.cache_ttl
     cache.now = models.now
     return cache

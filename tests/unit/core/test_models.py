@@ -262,3 +262,64 @@ async def test_garbage_cursor_is_validation_error(cursor: str) -> None:
         await svc.list_models(cursor, 10)
     assert e.value.code == "validation_error"
     assert om.list_calls == []
+
+
+async def test_invalidate_one_slug_or_all() -> None:
+    svc, om, _ = make()
+    await svc.graph("retail")
+    await svc.graph("hr")
+    seen: list[str | None] = []
+    svc.on_invalidate(seen.append)
+    svc.invalidate("retail")
+    await svc.graph("hr")
+    assert om.exports == 2  # hr still cached
+    await svc.graph("retail")
+    assert om.exports == 3
+    svc.clear_cache()
+    await svc.graph("hr")
+    assert om.exports == 4
+    assert seen == ["retail", None]
+
+
+async def test_derived_value_built_once_per_loaded_graph() -> None:
+    svc, _, clock = make(ttl=60)
+    builds: list[Graph] = []
+
+    def build(g: Graph) -> int:
+        builds.append(g)
+        return len(g)
+
+    first = await svc.derived("retail", "k", build)
+    assert await svc.derived("retail", "k", build) == first
+    assert len(builds) == 1
+    svc.invalidate("retail")
+    await svc.derived("retail", "k", build)
+    clock.now += 61  # TTL expired: reloaded graph, rebuilt value
+    await svc.derived("retail", "k", build)
+    assert len(builds) == 3 and len({id(g) for g in builds}) == 3
+
+
+async def test_parse_and_serialise_run_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+
+    import lakeloom.core.models as mod
+
+    threads: dict[str, int] = {}
+    real_parse, real_serialize = mod.parse_rdf, mod.serialize
+
+    def parse(*a: object, **k: object) -> Graph:
+        threads["parse"] = threading.get_ident()
+        return real_parse(*a, **k)  # pyright: ignore[reportArgumentType]
+
+    def serialize(*a: object, **k: object) -> bytes:
+        threads["serialize"] = threading.get_ident()
+        return real_serialize(*a, **k)  # pyright: ignore[reportArgumentType]
+
+    monkeypatch.setattr(mod, "parse_rdf", parse)
+    monkeypatch.setattr(mod, "serialize", serialize)
+    svc, _, _ = make()
+    await svc.export("retail", "turtle")
+    loop_thread = threading.get_ident()
+    assert threads["parse"] != loop_thread and threads["serialize"] != loop_thread

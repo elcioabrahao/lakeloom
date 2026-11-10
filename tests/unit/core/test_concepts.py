@@ -623,3 +623,21 @@ async def test_find_concepts_exact_fqn() -> None:
     page = await find_concepts(models, om, "retail.Order")  # pyright: ignore[reportArgumentType]
     m = page.items[0]
     assert (m.concept.fqn, m.score, m.matched_on) == ("retail.Order", 1.0, "fqn")
+
+
+async def test_invalidate_drops_index_tables_and_realizations() -> None:
+    models, om = make_counting()
+    await explain_concept(models, om, "retail.Customer")  # pyright: ignore[reportArgumentType]
+    await find_assets_for_concept(models, om, "retail.Customer", include_descendants=True)  # pyright: ignore[reportArgumentType]
+    calls = (len(om.table_calls), om.term_asset_calls)
+    await find_assets_for_concept(models, om, "retail.Customer", include_descendants=True)  # pyright: ignore[reportArgumentType]
+    assert (len(om.table_calls), om.term_asset_calls) == calls  # cached
+    graph = await models.graph("retail")
+    models.invalidate("retail")
+    await find_assets_for_concept(models, om, "retail.Customer", include_descendants=True)  # pyright: ignore[reportArgumentType]
+    assert len(om.table_calls) > calls[0] and om.term_asset_calls > calls[1]
+    assert await models.graph("retail") is not graph
+    calls = (len(om.table_calls), om.term_asset_calls)
+    models.invalidate()
+    await find_assets_for_concept(models, om, "retail.Customer", include_descendants=True)  # pyright: ignore[reportArgumentType]
+    assert len(om.table_calls) > calls[0] and om.term_asset_calls > calls[1]

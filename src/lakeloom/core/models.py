@@ -11,7 +11,8 @@ import base64
 import binascii
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, cast
 
 from pydantic import BaseModel
 from rdflib import Graph
@@ -45,6 +46,7 @@ class _Entry:
     graph: Graph
     info: ModelInfo
     loaded_at: float
+    derived: dict[str, Any] = field(default_factory=dict[str, Any])  # e.g. the concept index
 
 
 def _upstream(exc: OMError) -> LakeloomError:
@@ -76,6 +78,7 @@ class ModelService:
         self._clock = clock
         self._cache: dict[str, _Entry] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._hooks: list[Callable[[str | None], None]] = []
 
     # --- models -----------------------------------------------------------------------
 
@@ -147,8 +150,22 @@ class ModelService:
     def now(self) -> float:
         return self._clock()
 
+    def on_invalidate(self, hook: Callable[[str | None], None]) -> None:
+        """Call ``hook(slug)`` (``None`` = every model) on :meth:`invalidate`."""
+        self._hooks.append(hook)
+
+    def invalidate(self, slug: str | None = None) -> None:
+        """Forget one model (or all): its graph, values derived from it, and the caches
+        registered through :meth:`on_invalidate` (OM tables, realizations)."""
+        if slug is None:
+            self._cache.clear()
+        else:
+            self._cache.pop(slug, None)
+        for hook in self._hooks:
+            hook(slug)
+
     def clear_cache(self) -> None:
-        self._cache.clear()
+        self.invalidate()
 
     def _fresh(self, slug: str) -> _Entry | None:
         entry = self._cache.get(slug)
@@ -159,6 +176,16 @@ class ModelService:
 
     async def graph(self, slug: str) -> Graph:
         return (await self._load(slug)).graph
+
+    async def derived[T](self, slug: str, key: str, build: Callable[[Graph], T]) -> T:
+        """A value computed once from the model's current graph (e.g. the concept index).
+
+        It lives on the cache entry, so a reload or :meth:`invalidate` drops it with the graph.
+        """
+        entry = await self._load(slug)
+        if key not in entry.derived:
+            entry.derived[key] = build(entry.graph)
+        return cast(T, entry.derived[key])
 
     async def _load(self, slug: str) -> _Entry:
         cached = self._fresh(slug)
@@ -177,7 +204,7 @@ class ModelService:
             except OMError as exc:
                 raise _upstream(exc) from exc
             try:
-                graph = parse_rdf(text, "turtle")
+                graph = await asyncio.to_thread(parse_rdf, text, "turtle")  # CPU-bound
             except LakeloomError as exc:
                 raise LakeloomError(
                     "upstream_unavailable",
@@ -190,4 +217,5 @@ class ModelService:
 
     async def export(self, slug: str, fmt: ExportFormat) -> bytes:
         entry = await self._load(slug)
-        return serialize(entry.graph, fmt, prefixes=entry.info.prefixes)
+        # CPU-bound (seconds for a large model): keep the event loop free (NFR-PERF-01).
+        return await asyncio.to_thread(serialize, entry.graph, fmt, prefixes=entry.info.prefixes)

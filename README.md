@@ -210,6 +210,11 @@ or `jsonld`. Every response carries a `token_estimate` (about one token per four
 Descriptions and definitions come from OpenMetadata and the lake: they are shown as quoted
 blocks and flagged untrusted. An `export_model` result above 8 MiB is refused; use the CLI.
 
+Models, OpenMetadata tables and realizing-asset lists are cached for
+`LAKELOOM_MODEL_CACHE_TTL_SECONDS` (default 60 s; `0` disables the cache). A change made directly
+in OpenMetadata (a new term, a tag on a column) can therefore take up to that long to show; a
+lookup that found no table is remembered for at most 10 s.
+
 The same operations are available to operators:
 
 ```bash
