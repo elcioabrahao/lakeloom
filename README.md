@@ -193,6 +193,11 @@ read-only.
 | `find_concepts` | Find concepts by name, synonym, FQN or IRI (fuzzy), optionally within one model. |
 | `explain_concept` | Definition, synonyms, hierarchy, typed relations, attributes, mappings and realizing assets of one concept. |
 | `find_assets_for_concept` | Tables and columns that realize a concept, optionally including narrower concepts. |
+
+`explain_concept` and `find_assets_for_concept` take the concept as an FQN (`retail.Order`), an
+IRI, a term id or a plain name: a name, synonym or local name (any case) that matches exactly
+one concept across the models resolves to it; several matches give `validation_error` listing
+the candidate FQNs, none gives `not_found` (use `find_concepts`).
 | `get_asset_context` | Everything known about an asset: description, owners, concepts per column, related assets, lineage. |
 | `export_model` | The model as Turtle, RDF/XML (OWL), N-Triples, JSON-LD or SKOS, byte-identical for the same model state. |
 

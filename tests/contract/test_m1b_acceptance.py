@@ -97,6 +97,20 @@ async def test_explain_concept_order(lakeloom_url: str, agent_token: str) -> Non
     assert "# `Order`" in text_of(result)
 
 
+@pytest.mark.parametrize(
+    ("name", "fqn"), [("Order", "retail.Order"), ("customer", "retail.Customer")]
+)
+async def test_fr_ctx_03_concept_tools_accept_plain_names(
+    lakeloom_url: str, agent_token: str, name: str, fqn: str
+) -> None:
+    explained = await call(lakeloom_url, agent_token, "explain_concept", {"concept": name})
+    assert explained.structured_content["concept"]["fqn"] == fqn
+    assets = await call(lakeloom_url, agent_token, "find_assets_for_concept", {"concept": name})
+    by_fqn = await call(lakeloom_url, agent_token, "find_assets_for_concept", {"concept": fqn})
+    assert assets.structured_content["items"] == by_fqn.structured_content["items"]
+    assert assets.structured_content["items"]
+
+
 def p95(samples: list[float]) -> float:
     ordered = sorted(samples)
     return ordered[math.ceil(0.95 * len(ordered)) - 1]

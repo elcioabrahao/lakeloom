@@ -554,3 +554,72 @@ async def test_asset_type_is_code_span() -> None:
     detail_md, _ = concept_markdown(d)
     assert "\n# H" not in detail_md
     assert "(type `evil # H`)" in detail_md
+
+
+@pytest.mark.parametrize(
+    ("name", "fqn"),
+    [
+        ("Order", "retail.Order"),
+        ("customer", "retail.Customer"),  # case-insensitive name
+        ("CLIENT", "retail.Customer"),  # synonym
+        ("order status", "retail.Order.OrderStatus"),  # local name
+        ("RETAIL.order", "retail.Order"),  # FQN in another case
+    ],
+)
+async def test_fr_ctx_03_plain_name_resolves(name: str, fqn: str) -> None:
+    models, om = make()
+    d = await explain_concept(models, om, name)  # pyright: ignore[reportArgumentType]
+    assert d.concept.fqn == fqn
+    page = await find_assets_for_concept(models, om, name)  # pyright: ignore[reportArgumentType]
+    want = await find_assets_for_concept(models, om, fqn)  # pyright: ignore[reportArgumentType]
+    assert page == want
+
+
+SALES_TURTLE = """\
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix om: <https://open-metadata.org/ontology/> .
+<http://x/ontology/sales/Order> a skos:Concept ; skos:prefLabel "Order" ;
+    om:fullyQualifiedName "sales.Order" .
+"""
+
+
+class TwoModelsOM(FakeOM):
+    def __init__(self) -> None:
+        super().__init__()
+        self.glossaries.append(
+            OMGlossary.model_validate(
+                {"id": "id-sales", "name": "sales", "fullyQualifiedName": "sales"}
+            )
+        )
+
+    async def export_ontology(self, glossary_id: str, fmt: str, **_: object) -> str:
+        return SALES_TURTLE if glossary_id == "id-sales" else TURTLE
+
+
+async def test_ambiguous_name_is_validation_error_with_candidates() -> None:
+    om = TwoModelsOM()
+    models = ModelService(om, Settings(public_url="http://x"))  # pyright: ignore[reportArgumentType]
+    for call in (explain_concept, find_assets_for_concept):
+        with pytest.raises(LakeloomError) as e:
+            await call(models, om, "order")  # pyright: ignore[reportArgumentType]
+        assert e.value.code == "validation_error"
+        assert "`retail.Order`" in e.value.hint and "`sales.Order`" in e.value.hint
+    d = await explain_concept(models, om, "sales.Order")  # pyright: ignore[reportArgumentType]
+    assert d.concept.model == "sales"
+    d = await explain_concept(models, om, "client")  # pyright: ignore[reportArgumentType]
+    assert d.concept.fqn == "retail.Customer"  # unique across both models
+
+
+async def test_unknown_name_not_found_points_to_find_concepts() -> None:
+    models, om = make()
+    with pytest.raises(LakeloomError) as e:
+        await explain_concept(models, om, "custmer")  # pyright: ignore[reportArgumentType]
+    assert e.value.code == "not_found"
+    assert "find_concepts" in e.value.hint
+
+
+async def test_find_concepts_exact_fqn() -> None:
+    models, om = make()
+    page = await find_concepts(models, om, "retail.Order")  # pyright: ignore[reportArgumentType]
+    m = page.items[0]
+    assert (m.concept.fqn, m.score, m.matched_on) == ("retail.Order", 1.0, "fqn")

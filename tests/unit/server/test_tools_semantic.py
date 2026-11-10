@@ -375,12 +375,14 @@ def test_cli_models_concept_and_export(tmp_path: Path) -> None:
     runner = CliRunner()
     models = runner.invoke(cli_app, ["models"])
     explained = runner.invoke(cli_app, ["concept", "retail.Order"])
-    searched = runner.invoke(cli_app, ["concept", "purchase"])
+    by_synonym = runner.invoke(cli_app, ["concept", "purchase"])  # unique synonym: explained
+    searched = runner.invoke(cli_app, ["concept", "purchas"])  # no exact match: a search
     out = tmp_path / "retail.ttl"
     exported = runner.invoke(cli_app, ["export", "retail", "--format", "turtle", "--out", str(out)])
 
     assert models.output.startswith("retail\t")
     assert explained.output.startswith("# `Order`")
+    assert by_synonym.exit_code == 0 and by_synonym.output.startswith("# `Order`")
     assert searched.exit_code == 0 and searched.output.startswith("retail.Order\t")
     assert exported.exit_code == 0, exported.output
     assert len(Graph().parse(data=out.read_bytes().decode(), format="turtle")) > 0

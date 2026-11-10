@@ -70,6 +70,8 @@ _ASSET_PAGE = 100
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 _FIND_HINT = "use find_concepts to look up the concept's IRI or FQN"
 _FUZZY_MIN = 0.6
+_EXACT_MIN = 0.9  # name, synonym or local-name match: what a bare name resolves to
+_MAX_CANDIDATES = 10
 _ASSET_CHUNK = 25
 _CACHE_MAX = 1024
 _NEGATIVE_TTL = 10.0  # seconds a "not in OM" lookup is remembered
@@ -89,7 +91,7 @@ class ConceptRef(BaseModel):
 class ConceptMatch(BaseModel):
     concept: ConceptRef
     score: float
-    matched_on: Literal["name", "synonym", "local_name", "iri", "fuzzy"]
+    matched_on: Literal["fqn", "name", "synonym", "local_name", "iri", "fuzzy"]
 
 
 class RelationInfo(BaseModel):
@@ -398,7 +400,36 @@ def _not_found(concept: str) -> LakeloomError:
     return LakeloomError("not_found", f"Unknown concept {concept!r}", _FIND_HINT)
 
 
+async def _resolve_by_name(models: ModelService, concept: str) -> _Resolved:
+    """A plain name: exactly one name/synonym/local-name match across the models resolves."""
+    hits: list[tuple[_Graph, URIRef]] = []
+    for slug in await _all_slugs(models):
+        try:
+            g = await _graph(models, slug)
+        except LakeloomError as exc:
+            if exc.code == "not_found":
+                continue  # deleted between listing and loading
+            raise
+        for node, ref in g.concepts.items():
+            scored = _score(concept, _Candidate(ref, g.synonyms[node]))
+            if scored is not None and scored[0] >= _EXACT_MIN:
+                hits.append((g, node))
+    if len(hits) == 1:
+        return _Resolved(*hits[0])
+    if not hits:
+        raise _not_found(concept)
+    fqns = sorted(g.concepts[n].fqn for g, n in hits)
+    shown = ", ".join(f"`{f}`" for f in fqns[:_MAX_CANDIDATES])
+    more = f" and {len(fqns) - _MAX_CANDIDATES} more" if len(fqns) > _MAX_CANDIDATES else ""
+    raise LakeloomError(
+        "validation_error",
+        f"Ambiguous concept name {concept!r}: {len(fqns)} concepts match",
+        f"pass one FQN: {shown}{more}",
+    )
+
+
 async def _resolve(models: ModelService, om: OMClient, concept: str) -> _Resolved:
+    """Resolve an IRI, a term UUID, a term FQN or a plain name (FR-CTX-03)."""
     concept = concept.strip()
     if "://" in concept or concept.startswith("urn:"):
         node = URIRef(concept)
@@ -407,8 +438,6 @@ async def _resolve(models: ModelService, om: OMClient, concept: str) -> _Resolve
             if node in g.concepts:
                 return _Resolved(g, node)
         raise _not_found(concept)
-    fqn = concept
-    term_id: str | None = None
     if _UUID.match(concept):
         try:
             term = await om.get_term(concept, ())
@@ -416,18 +445,26 @@ async def _resolve(models: ModelService, om: OMClient, concept: str) -> _Resolve
             raise _upstream(exc) from exc
         if term is None:
             raise _not_found(concept)
-        fqn, term_id = term.fully_qualified_name, term.id
-    slug = fqn.split(".", 1)[0]
+        found = await _by_fqn(models, term.fully_qualified_name)
+        if found is None:
+            raise _not_found(concept)
+        return _Resolved(found[0], found[1], term.id)
+    if "." in concept:  # a term FQN is always <glossary>.<term>[...]
+        found = await _by_fqn(models, concept)
+        if found is not None:
+            return _Resolved(*found)
+    return await _resolve_by_name(models, concept)
+
+
+async def _by_fqn(models: ModelService, fqn: str) -> tuple[_Graph, URIRef] | None:
     try:
-        g = await _graph(models, slug)
+        g = await _graph(models, fqn.split(".", 1)[0])
     except LakeloomError as exc:
         if exc.code == "not_found":
-            raise _not_found(concept) from exc
+            return None
         raise
-    node_ = g.by_fqn.get(fqn)
-    if node_ is None:
-        raise _not_found(concept)
-    return _Resolved(g, node_, term_id)
+    node = g.by_fqn.get(fqn)
+    return None if node is None else (g, node)
 
 
 # --- find_concepts ------------------------------------------------------------------------
@@ -448,6 +485,8 @@ def _score(query: str, cand: _Candidate) -> tuple[float, str] | None:
     if ref.iri is not None and query == ref.iri:
         return 1.0, "iri"
     q = query.casefold()
+    if q == ref.fqn.casefold():
+        return 1.0, "fqn"
     if q == ref.label.casefold():
         return 1.0, "name"
     if any(q == s.casefold() for s in cand.synonyms):
