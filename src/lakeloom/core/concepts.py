@@ -163,6 +163,7 @@ class _Graph:
     graph: Graph
     concepts: dict[URIRef, ConceptRef] = field(default_factory=dict[URIRef, ConceptRef])
     by_fqn: dict[str, URIRef] = field(default_factory=dict[str, URIRef])
+    synonyms: dict[URIRef, set[str]] = field(default_factory=dict[URIRef, set[str]])
 
     def ref(self, node: URIRef) -> ConceptRef | None:
         return self.concepts.get(node)
@@ -181,7 +182,20 @@ def _index(slug: str, graph: Graph) -> _Graph:
         label = _pick(labels) or _local_name(iri)
         out.concepts[node] = ConceptRef(iri=iri, fqn=fqn, model=slug, label=label)
         out.by_fqn[fqn] = node
+        out.synonyms[node] = {str(o) for o in graph.objects(node, SKOS.altLabel)}
     return out
+
+
+# One index per graph object: ModelService replaces the graph on reload (and drops it on
+# invalidation), so a stale index is never reachable (NFR-PERF-01).
+_indexes: WeakKeyDictionary[Graph, _Graph] = WeakKeyDictionary()
+
+
+def _indexed(slug: str, graph: Graph) -> _Graph:
+    g = _indexes.get(graph)
+    if g is None or g.graph is not graph or g.slug != slug:
+        g = _indexes[graph] = _index(slug, graph)
+    return g
 
 
 def _concept_objects(g: _Graph, node: URIRef, preds: Iterable[URIRef]) -> set[URIRef]:
@@ -366,7 +380,7 @@ async def _all_slugs(models: ModelService) -> list[str]:
 
 
 async def _graph(models: ModelService, slug: str) -> _Graph:
-    return _index(slug, await models.graph(slug))
+    return _indexed(slug, await models.graph(slug))
 
 
 @dataclass
@@ -473,8 +487,7 @@ async def find_concepts(
     for slug in slugs:
         g = await _graph(models, slug)
         for node, ref in g.concepts.items():
-            syn = {str(o) for o in g.graph.objects(node, SKOS.altLabel)}
-            cands[ref.fqn] = _Candidate(ref, syn)
+            cands[ref.fqn] = _Candidate(ref, g.synonyms[node])
     try:
         hits = await om.search_terms(query, glossary_fqn=model, limit=limit)
     except OMError:

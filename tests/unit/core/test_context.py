@@ -445,3 +445,72 @@ async def test_nfr_sec_14_hostile_concept_definition_quoted() -> None:
     assert "[click](" not in md and "![x](https" not in md
     assert "Ignore previous instructions" in md  # quoted, not dropped
     assert not any(line.startswith("# Fake") for line in md.splitlines())
+
+
+def _big_turtle(terms: int, related: int) -> str:
+    lines = [
+        "@prefix skos: <http://www.w3.org/2004/02/skos/core#> .",
+        "@prefix owl: <http://www.w3.org/2002/07/owl#> .",
+        "@prefix om: <https://open-metadata.org/ontology/> .",
+        f"@prefix r: <{B}> .",
+        "r:relatesTo a owl:ObjectProperty .",
+        'r:Order a skos:Concept ; skos:prefLabel "Order" ; om:fullyQualifiedName "retail.Order" ;',
+        "    r:relatesTo " + ", ".join(f"r:T{i}" for i in range(related)) + " .",
+    ]
+    lines += [
+        f'r:T{i} a skos:Concept ; skos:prefLabel "T{i}" ; skos:altLabel "t{i} alias" ;'
+        f' skos:definition "Term {i}." ; om:fullyQualifiedName "retail.T{i}" .'
+        for i in range(terms)
+    ]
+    return "\n".join(lines) + "\n"
+
+
+class BigOM(FakeOM):
+    """A 10k-term model; Order relates to 50 terms, each realized by its own table."""
+
+    def __init__(self, terms: int = 10_000, related: int = 50) -> None:
+        tables = {ORDERS: _table(ORDERS, ["retail.Order"], [])}
+        for i in range(related):
+            fqn = f"{SVC}.retail.sales.t{i}"
+            tables[fqn] = _table(fqn, [f"retail.T{i}"], [])
+        super().__init__(tables)
+        self.turtle = _big_turtle(terms, related)
+        self.ids = {"retail.Order": "o"} | {f"retail.T{i}": f"t{i}" for i in range(related)}
+        self.assets = {"retail.Order": [_ref(ORDERS)]} | {
+            f"retail.T{i}": [_ref(f"{SVC}.retail.sales.t{i}")] for i in range(related)
+        }
+
+    async def export_ontology(self, glossary_id: str, fmt: str, **_: object) -> str:
+        return self.turtle
+
+    async def get_term(self, id_or_fqn: str, *_: object, **__: object) -> OMGlossaryTerm | None:
+        tid = self.ids.get(id_or_fqn)
+        if tid is None:
+            return None
+        return OMGlossaryTerm.model_validate(
+            {
+                "id": tid,
+                "name": id_or_fqn.rsplit(".", 1)[-1],
+                "fullyQualifiedName": id_or_fqn,
+                "glossary": {"id": "id-retail", "name": "retail", "type": "glossary"},
+            }
+        )
+
+    async def get_term_assets(self, term_id: str, *, offset: int = 0, limit: int = 50) -> Any:
+        fqn = next(f for f, i in self.ids.items() if i == term_id)
+        refs = self.assets.get(fqn, [])
+        return OMPage[OMEntityRef](data=refs[offset : offset + limit], after=None, total=len(refs))
+
+
+async def test_nfr_perf_01_warm_context_on_10k_term_model() -> None:
+    import time
+
+    om = BigOM()
+    models, _, sources = make(om)
+    cold = await get_asset_context(ORDERS, models=models, om=om, sources=sources)  # pyright: ignore[reportArgumentType]
+    assert len(cold.relationships) == 20  # 50 candidates, capped at 20 shown
+    start = time.perf_counter()
+    warm = await get_asset_context(ORDERS, models=models, om=om, sources=sources)  # pyright: ignore[reportArgumentType]
+    elapsed = time.perf_counter() - start
+    assert warm == cold
+    assert elapsed < 1.5, f"warm get_asset_context took {elapsed:.2f}s"
