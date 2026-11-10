@@ -83,12 +83,53 @@ def test_constants() -> None:
     }
 
 
-def test_parse_error_reports_line() -> None:
+@pytest.mark.parametrize(
+    ("fmt", "data", "prefix"),
+    [
+        ("turtle", "@prefix ex: <https://e.org/> .\n\nex:a ex:b .\nex:c ex:d .\n", "line 3"),
+        ("turtle", "ex:a ex:b ex:c .\n", "line 1"),
+        ("rdfxml", "<?xml version='1.0'?>\n<a>\n\n  <b>\n</a>", "line 5, column 2"),
+        ("ntriples", "<urn:a> <urn:b> <urn:c> .\n\n<urn:a> bad .\n", "line 3"),
+        ("jsonld", '{\n "a": ,\n}', "line 2, column 7"),
+    ],
+)
+def test_parse_error_reports_line(fmt: InputFormat, data: str, prefix: str) -> None:
     with pytest.raises(LakeloomError) as ei:
-        parse_rdf("@prefix ex: <https://e.org/> .\nex:a ex:b .\n", "turtle")
+        parse_rdf(data, fmt)
     assert ei.value.code == "validation_error"
-    assert "line 2" in ei.value.message
+    assert ei.value.message.startswith(f"Invalid {fmt} input at {prefix}:"), ei.value.message
     assert ei.value.hint
+
+
+def test_rdfxml_rejects_non_ncname_predicate() -> None:
+    g = Graph()
+    g.add((EX.a, URIRef("https://e.org/123"), Literal("x")))
+    with pytest.raises(LakeloomError) as ei:
+        serialize(g, "rdfxml")
+    assert ei.value.code == "validation_error" and ei.value.hint
+    serialize(g, "turtle")  # other formats still work
+
+
+def test_user_prefix_named_like_auto_prefix() -> None:
+    g = Graph()
+    g.add((EX.a, URIRef("https://one.org/p"), Literal("x")))
+    g.add((EX.a, URIRef("https://two.org/q"), Literal("y")))
+    out = serialize(g, "rdfxml", prefixes={"ns1": "https://user.org/"})
+    assert isomorphic(parse_rdf(out, "rdfxml"), g)
+    assert out == serialize(g, "rdfxml", prefixes={"ns1": "https://user.org/"})
+    assert isomorphic(
+        parse_rdf(serialize(g, "turtle", prefixes={"ns1": "https://u.org/"}), "turtle"), g
+    )
+
+
+def test_invalid_graph_is_validation_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(_g: Graph) -> Graph:
+        raise Exception("bad term")
+
+    monkeypatch.setattr("lakeloom.rdf.canonical.to_canonical_graph", boom)
+    with pytest.raises(LakeloomError) as ei:
+        serialize(Graph(), "turtle")
+    assert ei.value.code == "validation_error" and ei.value.hint
 
 
 def test_roundtrip_each_format() -> None:

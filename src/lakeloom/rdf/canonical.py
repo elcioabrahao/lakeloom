@@ -16,6 +16,9 @@ Algorithm
    * jsonld: a flat expanded writer (nodes sorted by ``@id``, values sorted, sorted keys)
      because rdflib's JSON-LD writer drops blank-node-only cycles;
    * skos: Turtle of the SKOS projection.
+   Unbound predicate/type namespaces are named ``ns1..nsN`` in sorted namespace order, skipping
+   any ``nsN`` already taken by a caller prefix. Invalid graphs raise ``validation_error``.
+   JSON-LD output is a top-level array of expanded nodes (full IRIs, no ``@context``).
 3. Output is UTF-8, LF only, with a single trailing newline.
 """
 
@@ -24,6 +27,7 @@ import re
 from collections.abc import Mapping
 from typing import Any, cast
 from typing import Literal as TLiteral
+from xml.sax import SAXParseException
 from xml.sax.saxutils import escape, quoteattr
 
 from rdflib import BNode, Graph, Literal, Namespace, URIRef
@@ -76,7 +80,8 @@ _DEFAULT_PREFIXES: dict[str, Namespace] = {
     "skos": Namespace(str(SKOS)),
     "xsd": Namespace(str(XSD)),
 }
-_POSITION = re.compile(r"(?i)\bline\b\D{0,3}(\d+)(?:\D{1,12}(?:col(?:umn)?)\D{0,3}(\d+))?")
+_XML_POS = re.compile(r":(\d+):(\d+):")
+_NCNAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.\-]*\Z")
 
 
 def parse_rdf(data: str | bytes, fmt: InputFormat) -> Graph:
@@ -87,7 +92,7 @@ def parse_rdf(data: str | bytes, fmt: InputFormat) -> Graph:
     except Exception as exc:
         raise LakeloomError(
             "validation_error",
-            f"Invalid {fmt} input{_position(exc)}: {_one_line(exc)}",
+            f"Invalid {fmt} input{_position(exc, data, fmt)}: {_one_line(exc)}",
             hint=f"Fix the {fmt} syntax at the reported position and retry.",
         ) from exc
     return graph
@@ -98,20 +103,48 @@ def _one_line(exc: Exception) -> str:
     return text[:300] or type(exc).__name__
 
 
-def _position(exc: Exception) -> str:
-    lineno = getattr(exc, "lines", None) or getattr(exc, "lineno", None)
-    col = getattr(exc, "colno", None) or getattr(exc, "col", None)
-    if lineno is None:
-        m = _POSITION.search(str(exc))
-        if m is None:
-            return ""
-        lineno, col = m.group(1), m.group(2)
-    return f" at line {lineno}" + (f", column {col}" if col else "")
+def _ntriples_bad_line(data: str | bytes) -> int | None:
+    text = data.decode("utf-8", "replace") if isinstance(data, bytes) else data
+    for number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        try:
+            Graph().parse(data=line, format="nt")
+        except Exception:
+            return number
+    return None
+
+
+def _position(exc: Exception, data: str | bytes, fmt: InputFormat) -> str:
+    line: int | None = None
+    col: int | None = None
+    if isinstance(exc, SAXParseException):
+        line, col = exc.getLineNumber(), exc.getColumnNumber()
+    elif isinstance(exc, json.JSONDecodeError):
+        line, col = exc.lineno, exc.colno
+    elif isinstance(getattr(exc, "lines", None), int):
+        line = exc.lines + 1  # type: ignore[attr-defined]  # rdflib BadSyntax is 0-based
+    else:
+        m = _XML_POS.search(str(exc))
+        if m:
+            line, col = int(m.group(1)), int(m.group(2))
+    if line is None and fmt == "ntriples":
+        line = _ntriples_bad_line(data)
+    if line is None:
+        return ""
+    return f" at line {line}" + (f", column {col}" if col is not None else "")
 
 
 def canonicalize(graph: Graph) -> Graph:
     """Return an isomorphic graph with canonical, stable blank-node labels ``b0..bn``."""
-    canon = to_canonical_graph(graph)
+    try:
+        canon = to_canonical_graph(graph)
+    except Exception as exc:
+        raise LakeloomError(
+            "validation_error",
+            f"Graph cannot be canonicalised: {_one_line(exc)}",
+            hint="Check the graph for invalid IRIs or terms.",
+        ) from exc
     mapping = {
         node: BNode(f"b{i}")
         for i, node in enumerate(
@@ -137,13 +170,16 @@ def _term_key(term: Node) -> tuple[int, str, str, str]:
 
 def _split(iri: URIRef) -> tuple[str, str]:
     try:
-        return split_uri(iri)
-    except ValueError as exc:
+        ns, local = split_uri(iri)
+    except ValueError:
+        ns, local = "", ""
+    if not ns or not _NCNAME.match(local):
         raise LakeloomError(
             "validation_error",
             f"Predicate IRI cannot be written as an XML name: {iri}",
-            hint="Use predicate IRIs ending in a valid local name.",
-        ) from exc
+            hint="Use predicate IRIs ending in a valid XML local name, or export another format.",
+        )
+    return ns, local
 
 
 def _sorted_copy(graph: Graph, prefixes: Mapping[str, str] | None) -> Graph:
@@ -166,8 +202,12 @@ def _sorted_copy(graph: Graph, prefixes: Mapping[str, str] | None) -> Graph:
                     continue
                 if ns not in bound:
                     extra.add(ns)
-    for i, ns in enumerate(sorted(extra), start=1):
-        out.bind(f"ns{i}", Namespace(ns), override=True, replace=True)
+    counter = 0
+    for ns in sorted(extra):
+        counter += 1
+        while f"ns{counter}" in allowed:
+            counter += 1
+        out.bind(f"ns{counter}", Namespace(ns), override=True, replace=True)
     for triple in triples:
         out.add(triple)
     return out
