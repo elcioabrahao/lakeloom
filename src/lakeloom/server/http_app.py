@@ -61,7 +61,7 @@ from lakeloom.sources.config import load_sources_config
 from lakeloom.sources.registry import build_sources
 from lakeloom.state.db import create_engine, upgrade
 from lakeloom.state.scans import ScanRepository
-from lakeloom.telemetry import configure_telemetry, is_active, tracer
+from lakeloom.telemetry import configure_telemetry, is_active, start_span
 
 _log = logging.getLogger("lakeloom.http")
 _IDP_TIMEOUT = 5.0
@@ -188,7 +188,7 @@ class RequestContextMiddleware:
 
         traced = scope["path"] not in _UNTRACED_PATHS
         span_cm = (
-            tracer().start_as_current_span(f"HTTP {scope['method']}", kind=SpanKind.SERVER)
+            start_span(f"HTTP {scope['method']}", kind=SpanKind.SERVER)
             if traced
             else nullcontext(None)
         )
@@ -203,7 +203,7 @@ class RequestContextMiddleware:
                     span.set_attribute("http.route", label or "unmatched")
                     span.set_attribute("http.status_code", status)
                     if status >= 500:
-                        span.set_status(Status(StatusCode.ERROR))
+                        span.set_status(Status(StatusCode.ERROR, f"HTTP {status}"))
                 HTTP_REQUESTS.labels(
                     method=scope["method"], route=label or "unmatched", status=str(status)
                 ).inc()

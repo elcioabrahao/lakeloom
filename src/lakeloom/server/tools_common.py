@@ -19,7 +19,7 @@ from starlette.requests import Request
 from lakeloom.errors import ErrorCode, LakeloomError
 from lakeloom.metrics import TOOL_CALLS
 from lakeloom.server.auth import Principal
-from lakeloom.telemetry import record_tool_call, tracer
+from lakeloom.telemetry import record_tool_call, start_span
 
 __all__ = [
     "PROPOSE_SCOPE",
@@ -89,7 +89,7 @@ async def guarded(
     """Run ``body`` for a caller holding ``scope`` inside a span; typed errors and metrics."""
     principal = current_principal(ctx)
     # Only the tool name, outcome and principal type: never arguments (NFR-SEC-11).
-    with tracer().start_as_current_span(
+    with start_span(
         f"mcp.tool/{tool}",
         attributes={
             "lakeloom.tool": tool,
@@ -99,7 +99,7 @@ async def guarded(
         result, outcome = await _run(tool, scope, principal, body)
         span.set_attribute("lakeloom.outcome", outcome)
         if outcome != "ok":
-            span.set_status(Status(StatusCode.ERROR))
+            span.set_status(Status(StatusCode.ERROR, outcome))
     TOOL_CALLS.labels(tool=tool, outcome=outcome).inc()
     record_tool_call(tool, outcome)
     return result

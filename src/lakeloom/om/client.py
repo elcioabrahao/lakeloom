@@ -27,7 +27,7 @@ from lakeloom.om.models import (
     OMVersion,
     RdfStatus,
 )
-from lakeloom.telemetry import record_om_request, tracer
+from lakeloom.telemetry import record_om_request, start_span
 
 API_PREFIX = "/api"
 
@@ -101,8 +101,9 @@ class OMClient:
 
     @staticmethod
     def _observe(span: Span, name: str, status: str, started: float, *, ok: bool = False) -> None:
+        # Error status only for 5xx and transport failures: a 404 lookup is a normal answer.
         if not ok:
-            span.set_status(Status(StatusCode.ERROR))
+            span.set_status(Status(StatusCode.ERROR, status))
         record_om_request(name, status, time.perf_counter() - started)
 
     async def _request(
@@ -123,7 +124,7 @@ class OMClient:
         url = f"{self._base_url}{API_PREFIX}{path}"
         started = time.perf_counter()
         # Span attributes: the operation name and status only, never the URL or headers.
-        with tracer().start_as_current_span(
+        with start_span(
             f"om.{name}", attributes={"lakeloom.om.operation": name, "http.method": method}
         ) as span:
             try:
@@ -139,7 +140,7 @@ class OMClient:
                 ) from None
             status = response.status_code
             span.set_attribute("http.status_code", status)
-            self._observe(span, name, str(status), started, ok=status < 400)
+            self._observe(span, name, str(status), started, ok=status < 500)
         if status >= 500:
             raise OMUnavailable(f"OpenMetadata returned HTTP {status}", status)
         if status >= 400:

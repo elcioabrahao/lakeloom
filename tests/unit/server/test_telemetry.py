@@ -6,7 +6,6 @@ from collections.abc import Iterator
 
 import pytest
 from kit import AuthKit, DepsFactory
-from opentelemetry import trace
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -142,7 +141,7 @@ async def test_no_token_in_span_attributes(
     assert token not in blob
     assert "Bearer" not in blob and "authorization" not in blob.lower()
     assert "om.test" not in blob  # no URLs
-    assert trace.get_current_span() is not None
+    assert any(sp.name == "mcp.tool/get_server_info" for sp in exporter.get_finished_spans())
 
 
 async def test_scan_span_and_duration_metrics(
@@ -172,6 +171,150 @@ async def test_scan_span_and_duration_metrics(
     names = {m.name for rm in data.resource_metrics for sm in rm.scope_metrics for m in sm.metrics}
     assert "lakeloom.scan.duration" in names
     count = REGISTRY.get_sample_value(
-        "lakeloom_scan_duration_seconds_count", {"source": "fixture_delta"}
+        "lakeloom_scan_duration_seconds_count", {"source": "fixture_delta", "outcome": "completed"}
     )
     assert count and count >= 1
+
+
+Fixture = tuple[InMemorySpanExporter, InMemoryMetricReader, TelemetryHandle]
+DB_URL_TEXT = "postgresql://user:hunter2@db.internal/lakeloom"
+
+
+def assert_no_exception_events(exporter: InMemorySpanExporter, *leaks: str) -> None:
+    finished = exporter.get_finished_spans()
+    assert finished
+    for span in finished:
+        assert not [e for e in span.events if e.name == "exception"], span.name
+        blob = json.dumps(
+            {
+                "name": span.name,
+                "attrs": dict(span.attributes or {}),
+                "status": span.status.description,
+                "events": [e.name for e in span.events],
+            },
+            default=str,
+        )
+        for leak in leaks:
+            assert leak not in blob, (span.name, leak)
+
+
+async def test_http_span_never_records_exception_text(spans: Fixture) -> None:
+    from starlette.types import Receive, Scope, Send
+
+    from lakeloom.server.http_app import RequestContextMiddleware
+
+    exporter, _, _ = spans
+
+    async def boom(scope: Scope, receive: Receive, send: Send) -> None:
+        raise RuntimeError(DB_URL_TEXT)
+
+    app = RequestContextMiddleware(boom)
+    scope: Scope = {"type": "http", "method": "GET", "path": "/x", "headers": []}
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.request"}
+
+    async def send(_m: dict[str, object]) -> None: ...
+
+    with pytest.raises(RuntimeError):
+        await app(scope, receive, send)  # pyright: ignore[reportArgumentType]
+
+    assert_no_exception_events(exporter, "hunter2")
+    (span,) = exporter.get_finished_spans()
+    assert span.status.status_code.name == "ERROR"
+    assert span.status.description == "RuntimeError"
+
+
+async def test_scan_span_unknown_source_hides_argument(
+    spans: Fixture, make_deps: DepsFactory, kit: AuthKit
+) -> None:
+    from kit import mcp_session
+    from test_tools_sources import RW
+
+    from lakeloom.metrics import REGISTRY
+
+    exporter, _, _ = spans
+    async with mcp_session(create_server_app(make_deps()), kit.token(scope=RW)) as session:
+        result = await session.call_tool("scan_lake_source", {"source": "ghost-source"})
+
+    assert result.is_error is True
+    assert_no_exception_events(exporter, "ghost-source")
+    scan = next(s for s in exporter.get_finished_spans() if s.name == "scan")
+    assert scan.status.status_code.name == "ERROR"
+    assert scan.status.description == "LakeloomError"
+    assert scan.attributes is not None
+    assert scan.attributes["lakeloom.source"] == "unknown"
+    assert scan.attributes["lakeloom.scan.outcome"] == "error"
+    # Failed scans are measured too, under a bounded label.
+    count = REGISTRY.get_sample_value(
+        "lakeloom_scan_duration_seconds_count", {"source": "unknown", "outcome": "error"}
+    )
+    assert count and count >= 1
+
+
+async def test_resource_span_never_records_exception_text(
+    spans: Fixture, make_deps: DepsFactory, kit: AuthKit
+) -> None:
+    from kit import mcp_session
+    from mcp.shared.exceptions import MCPError
+
+    exporter, _, _ = spans
+    async with mcp_session(create_server_app(make_deps()), kit.token()) as session:
+        with pytest.raises(MCPError):
+            await session.read_resource("lakeloom://models/ghost-model/ontology.zzz")
+        with pytest.raises(MCPError):
+            await session.read_resource("lakeloom://assets/ghost.fqn.table/context.md")
+
+    assert_no_exception_events(exporter, "ghost-model", "ghost.fqn")
+    resource = [s for s in exporter.get_finished_spans() if s.name == "mcp.resource"]
+    assert resource
+    assert all(s.status.status_code.name == "ERROR" for s in resource)
+
+
+async def test_tool_span_hides_unexpected_failure(
+    spans: Fixture, make_deps: DepsFactory, kit: AuthKit
+) -> None:
+    from kit import mcp_session, om_down
+
+    exporter, _, _ = spans
+    async with mcp_session(create_server_app(make_deps(om_down)), kit.token()) as session:
+        await session.call_tool("get_server_info", {})
+
+    assert_no_exception_events(exporter, "connection refused")
+    tool = next(s for s in exporter.get_finished_spans() if s.name == "mcp.tool/get_server_info")
+    assert tool.attributes is not None
+    assert "lakeloom.outcome" in tool.attributes
+
+
+async def test_om_span_status_only_for_5xx_and_transport_failures(spans: Fixture) -> None:
+    import httpx
+
+    from lakeloom.om.client import OMClient, OMError, OMUnavailable
+
+    exporter, _, _ = spans
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/version"):
+            return httpx.Response(404)
+        if request.url.path.endswith("/rdf/status"):
+            return httpx.Response(503)
+        raise httpx.ConnectError(DB_URL_TEXT, request=request)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    om = OMClient("http://om.test", None, http=http)
+    with pytest.raises(OMError):
+        await om.get_version()
+    with pytest.raises(OMUnavailable):
+        await om.get_rdf_status()
+    with pytest.raises(OMUnavailable):
+        await om._request("get_table_by_name", path_args={"fqn": "a.b"})  # pyright: ignore[reportPrivateUsage]
+    await http.aclose()
+
+    by_name = {s.name: s for s in exporter.get_finished_spans()}
+    notfound = by_name["om.get_version"]
+    assert notfound.attributes is not None
+    assert notfound.attributes["http.status_code"] == 404
+    assert notfound.status.status_code.name == "UNSET"
+    assert by_name["om.get_rdf_status"].status.status_code.name == "ERROR"
+    assert by_name["om.get_table_by_name"].status.status_code.name == "ERROR"
+    assert_no_exception_events(exporter, "hunter2")

@@ -30,7 +30,7 @@ from mcp.types import (
     Resource,
     ResourceTemplate,
 )
-from opentelemetry.trace import Span, Status, StatusCode
+from opentelemetry.trace import Span
 from pydantic import AnyUrl
 
 from lakeloom.errors import LakeloomError
@@ -44,7 +44,7 @@ from lakeloom.publish.artifacts import (
 )
 from lakeloom.publish.negotiation import MediaType
 from lakeloom.server.tools_common import READ_SCOPE, current_principal
-from lakeloom.telemetry import record_resource_read, tracer
+from lakeloom.telemetry import record_resource_read, start_span
 
 if TYPE_CHECKING:
     from lakeloom.server.http_app import AppDeps
@@ -178,12 +178,8 @@ class LakeloomMCP(MCPServer[Any]):
     ) -> Iterable[ReadResourceContents]:
         text = str(uri)
         # The span names the resource kind only, never the URI (it can carry an FQN).
-        with tracer().start_as_current_span("mcp.resource") as span:
-            try:
-                return await self._read(text, context, span)
-            except BaseException:
-                span.set_status(Status(StatusCode.ERROR))
-                raise
+        with start_span("mcp.resource") as span:
+            return await self._read(text, context, span)
 
     def _count(self, span: Span, kind: str, outcome: str) -> None:
         span.set_attribute("lakeloom.resource", kind)

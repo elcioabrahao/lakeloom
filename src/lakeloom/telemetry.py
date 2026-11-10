@@ -11,6 +11,8 @@ tool arguments or untrusted text (NFR-SEC-11, NFR-SEC-14).
 
 import logging
 import threading
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,6 +25,8 @@ from opentelemetry.sdk.metrics.export import MetricReader, PeriodicExportingMetr
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SimpleSpanProcessor, SpanExporter
+from opentelemetry.trace import Span, SpanKind, Status, StatusCode
+from opentelemetry.util.types import Attributes
 
 from lakeloom import __version__
 from lakeloom.config import Settings
@@ -34,6 +38,7 @@ __all__ = [
     "record_resource_read",
     "record_scan",
     "record_tool_call",
+    "start_span",
     "tracer",
 ]
 
@@ -136,6 +141,30 @@ def configure_telemetry(
         return handle
 
 
+@contextmanager
+def start_span(
+    name: str, *, attributes: Attributes = None, kind: SpanKind = SpanKind.INTERNAL
+) -> Generator[Span]:
+    """A current span that never records exception text or stack traces.
+
+    OTel's default would store ``exception.message`` and a traceback as a span event, which
+    can echo tool arguments, URIs or connection URLs (NFR-SEC-11). On an exception the span
+    gets status ERROR with the exception class name only.
+    """
+    with tracer().start_as_current_span(
+        name,
+        attributes=attributes,
+        kind=kind,
+        record_exception=False,
+        set_status_on_exception=False,
+    ) as span:
+        try:
+            yield span
+        except BaseException as exc:
+            span.set_status(Status(StatusCode.ERROR, type(exc).__name__))
+            raise
+
+
 def tracer() -> trace.Tracer:
     """The Lakeloom tracer: the configured provider's, else the global (no-op) one."""
     handle = _active
@@ -169,6 +198,6 @@ def record_om_request(operation: str, status: str, seconds: float) -> None:
         h.record(seconds, {"operation": operation, "status": status})
 
 
-def record_scan(source: str, seconds: float) -> None:
+def record_scan(source: str, outcome: str, seconds: float) -> None:
     if (h := _histogram("scan_duration")) is not None:
-        h.record(seconds, {"source": source})
+        h.record(seconds, {"source": source, "outcome": outcome})
