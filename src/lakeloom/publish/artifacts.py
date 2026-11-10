@@ -32,9 +32,11 @@ from lakeloom.sources.base import LakeSource
 __all__ = [
     "Artifact",
     "asset_context_artifact",
+    "check_version",
     "concept_artifact",
     "etag_for",
     "glossary_link",
+    "json_bytes",
     "matches_if_none_match",
     "model_artifact",
     "model_context_artifact",
@@ -94,7 +96,7 @@ def _from_ms(ms: int | None) -> datetime | None:
     return None if ms is None else datetime.fromtimestamp(ms / 1000, UTC)
 
 
-def _check_version(version: str | None) -> None:
+def check_version(version: str | None) -> None:
     if version not in (None, "latest"):
         raise LakeloomError(
             "not_found",
@@ -103,7 +105,7 @@ def _check_version(version: str | None) -> None:
         )
 
 
-def _json_bytes(data: Any) -> bytes:
+def json_bytes(data: Any) -> bytes:
     text = json.dumps(data, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return (text + "\n").encode()
 
@@ -134,7 +136,7 @@ async def _model_stamp(models: ModelService, info: ModelInfo) -> tuple[datetime,
 async def model_artifact(
     models: ModelService, slug: str, media: MediaType, *, version: str | None
 ) -> Artifact:
-    _check_version(version)
+    check_version(version)
     fmt = FORMAT_BY_MEDIA.get(media)
     if fmt is None:
         raise LakeloomError(
@@ -153,12 +155,12 @@ async def model_context_artifact(
     models: ModelService, slug: str, *, version: str | None
 ) -> Artifact:
     """The minimal JSON-LD ``@context`` of a model (the full ``context.jsonld`` is M3)."""
-    _check_version(version)
+    check_version(version)
     info = await models.get_model(slug)
     await models.graph(slug)  # fail like the other artefacts when the export is unreadable
     context = minimal_jsonld_context(info)  # the one the asset JSON-LD carries
     modified, links = await _model_stamp(models, info)
-    return _make(_json_bytes({"@context": context}), "application/ld+json", modified, links)
+    return _make(json_bytes({"@context": context}), "application/ld+json", modified, links)
 
 
 async def models_list_artifact(
@@ -190,7 +192,7 @@ async def models_list_artifact(
     data: dict[str, Any] = {"items": items}
     if paged:
         data["next_cursor"] = next_cursor
-    return _make(_json_bytes(data), "application/json", modified, links)
+    return _make(json_bytes(data), "application/json", modified, links)
 
 
 async def concept_artifact(
@@ -203,7 +205,7 @@ async def concept_artifact(
     if media == "text/markdown":
         body = concept_markdown(detail)[0].encode()
     else:
-        body = _json_bytes(detail.model_dump(mode="json"))
+        body = json_bytes(detail.model_dump(mode="json"))
     info = await models.get_model(detail.concept.model)
     modified, links = await _model_stamp(models, info)
     return _make(body, media, modified, links)
@@ -224,9 +226,9 @@ async def asset_context_artifact(
     if media == "text/markdown":
         body = render_markdown(ctx, max_tokens=max_tokens).payload.encode()
     elif media == "application/json":
-        body = _json_bytes(render_json(ctx, max_tokens=max_tokens).payload)
+        body = json_bytes(render_json(ctx, max_tokens=max_tokens).payload)
     else:
-        body = _json_bytes(render_jsonld(ctx, model, max_tokens=max_tokens).payload)
+        body = json_bytes(render_jsonld(ctx, model, max_tokens=max_tokens).payload)
     table = (await fetch_tables(models, om, [ctx.asset.table_fqn]))[ctx.asset.table_fqn]
     # Best-effort lower bound: the table's updatedAt and every realized model's freshness.
     slugs = {r.model for r in ctx.table_concepts} | {

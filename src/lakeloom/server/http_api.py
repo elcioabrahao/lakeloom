@@ -7,7 +7,6 @@ and answers ``304`` to a matching ``If-None-Match``. Failures are typed JSON
 (``{"error": {"code", "message", "hint"}}``), never HTML or a stack trace.
 """
 
-import json
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from email.utils import format_datetime
@@ -23,6 +22,7 @@ from lakeloom.publish.artifacts import (
     asset_context_artifact,
     concept_artifact,
     etag_for,
+    json_bytes,
     matches_if_none_match,
     model_artifact,
     model_context_artifact,
@@ -248,7 +248,7 @@ def create_router(deps: "AppDeps") -> APIRouter:
             # Resolves the model (404) and supplies its Last-Modified and Link.
             base = await model_artifact(deps.models, slug, "text/turtle", version=None)
             data = [{"version": "latest", "media_types": list(MODEL_TYPES)}]
-            body = (json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            body = json_bytes(data)
             return base.model_copy(
                 update={"body": body, "media_type": "application/json", "etag": etag_for(body)}
             )

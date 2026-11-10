@@ -38,6 +38,7 @@ from lakeloom.metrics import RESOURCE_READS
 from lakeloom.publish.artifacts import (
     Artifact,
     asset_context_artifact,
+    check_version,
     model_artifact,
     model_context_artifact,
     models_list_artifact,
@@ -86,15 +87,6 @@ TEMPLATES: Final[tuple[tuple[str, str, str, str], ...]] = (
 def _mcp_error(error: LakeloomError) -> MCPError:
     code = INVALID_PARAMS if error.code in ("not_found", "validation_error") else INTERNAL_ERROR
     return MCPError(code=code, message=error.message, data=error.to_dict())
-
-
-def _check_version(version: str | None) -> None:
-    if version not in (None, "latest"):
-        raise LakeloomError(
-            "not_found",
-            f"Unknown version {version!r}",
-            "releases are published from M3; use version=latest",
-        )
 
 
 Kind = Literal["models", "ontology", "context", "asset"]
@@ -207,7 +199,9 @@ class LakeloomMCP(MCPServer[Any]):
         except Exception as exc:
             self._count(span, kind or "unknown", "error")
             # Only the type: the text may carry upstream detail (NFR-SEC-11).
-            _log.error("resource %s failed unexpectedly (%s)", text, type(exc).__name__)
+            _log.error(
+                "resource %s failed unexpectedly (%s)", kind or "unknown", type(exc).__name__
+            )
             raise _mcp_error(
                 LakeloomError(
                     "upstream_unavailable",
@@ -260,10 +254,10 @@ def _not_found(uri: str) -> LakeloomError:
 
 
 async def _models(deps: "AppDeps", version: str | None) -> Artifact:
-    _check_version(version)
+    check_version(version)
     return await models_list_artifact(deps.models)
 
 
 async def _asset(deps: "AppDeps", fqn: str, version: str | None) -> Artifact:
-    _check_version(version)
+    check_version(version)
     return await asset_context_artifact(deps.models, deps.om, deps.sources, fqn, "text/markdown")
