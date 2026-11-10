@@ -43,3 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `find_assets_for_concept`, `get_asset_context` and `export_model`.
 - CLI commands `lakeloom models`, `lakeloom concept`, `lakeloom context` and `lakeloom export`.
 - Setting `LAKELOOM_MODEL_CACHE_TTL_SECONDS` (default 60).
+- M1c publication read surfaces: read-only HTTP API under `/v1` (models, versions, concepts and
+  asset context) with a committed OpenAPI spec, and MCP resources serving the same bytes.
+- Content negotiation (`Accept` with q-values, `406` listing supported types) and strong `ETag`,
+  `Last-Modified`, `Link` and `If-None-Match` handling on every artefact.
+- stdio transport with a configured local principal (`LAKELOOM_STDIO_PRINCIPAL`,
+  `LAKELOOM_STDIO_SCOPES`), refused in containers unless explicitly enabled.
+- OpenTelemetry traces and metrics over OTLP, off unless `LAKELOOM_OTEL_EXPORTER_OTLP_ENDPOINT`
+  is set.
+- Concept name resolution ranks exact name, then synonym, then local name.
+- M1 acceptance contract test across MCP tools, MCP resources and HTTP.

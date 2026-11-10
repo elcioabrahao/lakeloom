@@ -1,6 +1,11 @@
 # Lakeloom
 
-> **Status: pre-alpha (milestone M0).** Not ready for production use.
+> **Status: pre-alpha, milestone M1 complete.** Not ready for production use.
+>
+> **M1 status:** M1 is complete: lake sources and scans (M1a), the semantic read path (M1b) and
+> the publication surfaces (M1c: HTTP API, MCP resources, stdio, OpenTelemetry). Proposals,
+> change sets and Git publishing arrive in M2; releases, SHACL shapes and the full JSON-LD
+> context in M3.
 
 Lakeloom is an open-source, agent-first service that lets AI agents and domain specialists build
 and maintain **business ontologies for the data products in a Delta Lake** (and other
@@ -259,6 +264,17 @@ lakeloom concept Customer                       # or an FQN or IRI
 lakeloom context lakeloom_fixture.retail.sales.orders --format md --max-tokens 2000
 lakeloom export retail --format turtle --out retail.ttl
 ```
+
+### Surfaces overview
+
+| Capability | MCP tool | MCP resource | HTTP route |
+| --- | --- | --- | --- |
+| List models | `list_models` | `lakeloom://models` | `GET /v1/models` |
+| Model summary | `get_model` | | `GET /v1/models/{slug}/versions` |
+| Ontology export | `export_model` | `lakeloom://models/{slug}/ontology.{ttl,jsonld,owl,nt}` | `GET /v1/models/{slug}` (`Accept`) |
+| JSON-LD context | | `lakeloom://models/{slug}/context.jsonld` | `GET /v1/models/{slug}/context.jsonld` |
+| Concept lookup | `explain_concept`, `find_concepts` | | `GET /v1/concepts/{iri-or-id}` |
+| Asset context | `get_asset_context` | `lakeloom://assets/{fqn}/context.md` | `GET /v1/assets/{fqn}/context` |
 
 ### HTTP API
 
