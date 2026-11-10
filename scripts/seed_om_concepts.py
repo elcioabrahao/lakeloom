@@ -220,6 +220,7 @@ def seed_realizations(http: httpx.Client) -> int:
                 if merged is not None:
                     ops.append({"op": "add", "path": f"/columns/{index}/tags", "value": merged})
         if ops:
+            # Column indexes come from the GET just above; no JSON Patch `test` op guards them.
             _check(
                 http.patch(
                     f"/v1/tables/{entity['id']}",

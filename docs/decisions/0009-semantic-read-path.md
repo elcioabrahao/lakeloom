@@ -9,7 +9,7 @@
 M1b reads ontology models (OM glossaries, ADR 0007) and their realizations (glossary-term
 tags on assets). It needs fixture concepts in the dev OpenMetadata, deterministic RDF
 exports, and decisions about identifiers. All OM behaviour below was verified live against
-OM 2.1.0-rc1 (compose stack, RDF enabled) on 2026-11-10.
+OM 2.1.0-rc1 (compose stack, `RDF_ENABLED=false`, no Fuseki container) on 2026-11-10.
 
 ## Decision
 
@@ -73,7 +73,7 @@ OM 2.1.0-rc1 (compose stack, RDF enabled) on 2026-11-10.
   exports carry stable, dereferenceable-style IRIs. The glossary scheme IRI stays
   `https://open-metadata.org/entity/glossary/<id>` (not settable). Custom relationship types
   take `rdfPredicate` as their IRI.
-- Excerpt (`GET /v1/glossaries/{id}/exportOntology?format=turtle`, RDF enabled):
+- Excerpt (`GET /v1/glossaries/{id}/exportOntology?format=turtle`, RDF off):
 
   ```turtle
   <http://localhost:8000/ontology/retail/OrderStatus>
@@ -85,7 +85,7 @@ OM 2.1.0-rc1 (compose stack, RDF enabled) on 2026-11-10.
 
 ### Exports (Task 1 implementation, `src/lakeloom/rdf/`)
 
-- Export is OM's `exportOntology` (raw RDF; needs RDF enabled, which the dev compose does)
+- Export is OM's `exportOntology` (raw RDF). In rc1 it works with RDF off: the dev stack runs `RDF_ENABLED=false` with no Fuseki (the `rdf` compose profile is opt-in) and the export still returns full Turtle, so the graph is built by OM itself, not read from a triple store
   post-processed for determinism (FR-GIT-03): canonical blank-node labels `b0..bn`, sorted
   triples, LF, UTF-8, one trailing newline.
 - Predicate/type namespaces without a bound prefix are named `ns1..nsN` in sorted namespace
