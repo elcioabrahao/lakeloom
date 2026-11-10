@@ -17,10 +17,19 @@ from collections.abc import Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING, Any, Final, Literal
 from urllib.parse import parse_qs, unquote
 
+from mcp.server.context import ServerRequestContext
 from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.shared.exceptions import MCPError
-from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, Resource, ResourceTemplate
+from mcp.types import (
+    INTERNAL_ERROR,
+    INVALID_PARAMS,
+    ListResourcesResult,
+    ListResourceTemplatesResult,
+    PaginatedRequestParams,
+    Resource,
+    ResourceTemplate,
+)
 from pydantic import AnyUrl
 
 from lakeloom.errors import LakeloomError
@@ -96,6 +105,33 @@ class LakeloomMCP(MCPServer[Any]):
         super().__init__(**kwargs)
         self._deps = deps
 
+    def _require_read(self, context: Context[Any, Any] | None) -> None:
+        principal = None if context is None else current_principal(context)
+        if principal is None or READ_SCOPE not in principal.scopes:
+            raise _mcp_error(
+                LakeloomError(
+                    "forbidden",
+                    f"MCP resources require the {READ_SCOPE} scope",
+                    f"token lacks {READ_SCOPE}",
+                )
+            )
+
+    def _context(self, ctx: ServerRequestContext[Any]) -> Context[Any, Any]:
+        return Context(request_context=ctx, mcp_server=self)
+
+    async def _handle_list_resources(
+        self, ctx: ServerRequestContext[Any], params: PaginatedRequestParams | None
+    ) -> ListResourcesResult:
+        # The SDK does not forward the request to list(); the scope is checked here (NFR-SEC-06).
+        self._require_read(self._context(ctx))
+        return await super()._handle_list_resources(ctx, params)
+
+    async def _handle_list_resource_templates(
+        self, ctx: ServerRequestContext[Any], params: PaginatedRequestParams | None
+    ) -> ListResourceTemplatesResult:
+        self._require_read(self._context(ctx))
+        return await super()._handle_list_resource_templates(ctx, params)
+
     async def list_resources(self) -> list[Resource]:
         """``lakeloom://models`` and the concrete URIs of up to 100 models."""
         out = [
@@ -141,14 +177,12 @@ class LakeloomMCP(MCPServer[Any]):
         text = str(uri)
         kind: Kind | None = None
         try:
+            self._require_read(context)  # before routing: no not_found/validation oracle
+        except MCPError:
+            RESOURCE_READS.labels(resource="any", outcome="forbidden").inc()
+            raise
+        try:
             kind, build = self._route(text)
-            principal = None if context is None else current_principal(context)
-            if principal is None or READ_SCOPE not in principal.scopes:
-                raise LakeloomError(
-                    "forbidden",
-                    f"reading resources requires the {READ_SCOPE} scope",
-                    f"token lacks {READ_SCOPE}",
-                )
             artifact = await build()
         except LakeloomError as exc:
             RESOURCE_READS.labels(resource=kind or "unknown", outcome="error").inc()

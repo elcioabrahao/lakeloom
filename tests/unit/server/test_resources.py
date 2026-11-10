@@ -152,3 +152,34 @@ async def test_resource_reads_are_counted(make_deps: DepsFactory, kit: AuthKit) 
     await error_of(make_deps, kit, "lakeloom://models/nope/ontology.ttl")
     assert count("ok") == ok + 1
     assert count("error") == bad + 1
+
+
+async def test_forbidden_before_routing_and_counted(make_deps: DepsFactory, kit: AuthKit) -> None:
+    def forbidden() -> float:
+        return (
+            REGISTRY.get_sample_value(
+                "lakeloom_resource_reads_total", {"resource": "any", "outcome": "forbidden"}
+            )
+            or 0.0
+        )
+
+    before = forbidden()
+    for uri in ("lakeloom://models/retail/ontology.xyz", "lakeloom://bogus", "lakeloom://models"):
+        err = await error_of(make_deps, kit, uri, scope="lakeloom:propose")
+        assert err["code"] == "forbidden"
+    assert forbidden() == before + 3
+
+
+async def test_list_and_templates_require_read_scope(make_deps: DepsFactory, kit: AuthKit) -> None:
+    app = create_server_app(fake_deps(make_deps))
+    async with mcp_session(app, kit.token(scope="lakeloom:propose")) as session:
+        errors: list[MCPError] = []
+        for call in (session.list_resources, session.list_resource_templates):
+            try:
+                await call()
+            except MCPError as exc:
+                errors.append(exc)
+    assert len(errors) == 2
+    for exc in errors:
+        assert isinstance(exc.data, dict)
+        assert exc.data["error"]["code"] == "forbidden"
