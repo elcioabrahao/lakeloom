@@ -5,8 +5,6 @@ lexicographic order equals creation order and the pagination cursor (the last id
 is stable.
 """
 
-import secrets
-import time
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -16,19 +14,15 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from lakeloom.errors import LakeloomError
 from lakeloom.sources.models import Page, TableDescription, TableProfile, TableRef, TableVersion
+from lakeloom.state.ids import new_ulid_id
 from lakeloom.state.models import ScanRecordRow
 
 __all__ = ["ScanRecord", "ScanRepository", "ScannedTable", "new_scan_id"]
 
-_CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-
 
 def new_scan_id(now_ms: int | None = None) -> str:
     """``scan_`` + ULID: 48-bit millisecond timestamp then 80 random bits, 26 chars."""
-    ms = int(time.time() * 1000) if now_ms is None else now_ms
-    value = (ms << 80) | secrets.randbits(80)
-    chars = [_CROCKFORD[(value >> shift) & 0x1F] for shift in range(125, -1, -5)]
-    return "scan_" + "".join(chars)
+    return new_ulid_id("scan_", now_ms)
 
 
 class ScannedTable(BaseModel):

@@ -9,16 +9,19 @@ and counts the call in ``lakeloom_tool_calls_total`` with outcome ok/error/forbi
 import logging
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, cast
 
 from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, TextContent
 from opentelemetry.trace import Status, StatusCode
 from starlette.requests import Request
 
+from lakeloom.core.audit import AuditContext, AuditRecord, audit_context, record
 from lakeloom.errors import ErrorCode, LakeloomError
 from lakeloom.metrics import TOOL_CALLS
 from lakeloom.server.auth import Principal
+from lakeloom.state.audit import AuditRepository
 from lakeloom.telemetry import record_tool_call, start_span
 
 __all__ = [
@@ -81,9 +84,20 @@ async def guarded(
     ctx: Context,
     scope: str,
     body: Callable[[Principal], Awaitable[CallToolResult]],
+    *,
+    audited: bool = False,
+    audit: AuditRepository | None = None,
 ) -> CallToolResult:
-    """Run ``body`` for a caller holding ``scope`` inside a span; typed errors and metrics."""
+    """Run ``body`` for a caller holding ``scope`` inside a span; typed errors and metrics.
+
+    ``audited=True`` (writes and review decisions, NFR-SEC-12) also writes an audit record
+    with the outcome, to the JSON log and, when ``audit`` is given, the state store. The
+    body can set the model / proposal / change set through ``current_audit()``; arguments
+    are never recorded. An audit failure never fails the call.
+    """
     principal = current_principal(ctx)
+    audit_ctx = AuditContext()
+    token = audit_context.set(audit_ctx)
     # Only the tool name, outcome and principal type: never arguments (NFR-SEC-11).
     with start_span(
         f"mcp.tool/{tool}",
@@ -92,10 +106,15 @@ async def guarded(
             "lakeloom.principal_type": "unknown" if principal is None else principal.type.value,
         },
     ) as span:
-        result, outcome = await _run(tool, scope, principal, body)
+        try:
+            result, outcome = await _run(tool, scope, principal, body)
+        finally:
+            audit_context.reset(token)
         span.set_attribute("lakeloom.outcome", outcome)
         if outcome != "ok":
             span.set_status(Status(StatusCode.ERROR, outcome))
+    if audited:
+        await _audit(tool, ctx, principal, audit_ctx, result, outcome, audit)
     TOOL_CALLS.labels(tool=tool, outcome=outcome).inc()
     record_tool_call(tool, outcome)
     return result
@@ -127,3 +146,32 @@ async def _run(
             ),
             "error",
         )
+
+
+async def _audit(
+    tool: str,
+    ctx: Context,
+    principal: Principal | None,
+    audit_ctx: AuditContext,
+    result: CallToolResult,
+    outcome: str,
+    audit: AuditRepository | None,
+) -> None:
+    structured: dict[str, Any] = result.structured_content or {}
+    error = cast(dict[str, object], structured.get("error") or {})
+    code = error.get("code")
+    await record(
+        audit,
+        AuditRecord(
+            at=datetime.now(UTC),
+            principal_subject="anonymous" if principal is None else principal.subject,
+            principal_type="unknown" if principal is None else principal.type.value,
+            client=client_name(ctx),
+            tool=tool,
+            model=audit_ctx.model,
+            proposal_id=audit_ctx.proposal_id,
+            change_set_id=audit_ctx.change_set_id,
+            result="ok" if outcome == "ok" else "forbidden" if code == "forbidden" else "error",
+            error_code=code if isinstance(code, str) else None,
+        ),
+    )

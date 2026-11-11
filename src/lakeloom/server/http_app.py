@@ -30,6 +30,11 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from lakeloom.config import ConfigError, Settings
+from lakeloom.core.confirm import (
+    ConfirmTokens,
+    confirm_tokens_from_settings,
+    require_confirm_secret,
+)
 from lakeloom.core.models import ModelService
 from lakeloom.core.scans import ScanService
 from lakeloom.core.sources import close_sources, start_sources
@@ -59,6 +64,7 @@ from lakeloom.server.http_api import (
 from lakeloom.sources.base import LakeSource
 from lakeloom.sources.config import load_sources_config
 from lakeloom.sources.registry import build_sources
+from lakeloom.state.audit import AuditRepository
 from lakeloom.state.db import create_engine, upgrade
 from lakeloom.state.scans import ScanRepository
 from lakeloom.telemetry import configure_telemetry, is_active, start_span
@@ -89,8 +95,12 @@ class AppDeps:
     sources: dict[str, LakeSource] = field(default_factory=dict[str, LakeSource])
     scans: ScanService = field(init=False)
     models: ModelService = field(init=False)
+    confirm: ConfirmTokens = field(init=False)
+    audit: AuditRepository = field(init=False)
 
     def __post_init__(self) -> None:
+        self.confirm = confirm_tokens_from_settings(self.settings)
+        self.audit = AuditRepository(self.engine)
         self.models = ModelService(self.om, self.settings)
         self.scans = ScanService(self.sources, ScanRepository(self.engine), self.om, self.settings)
 
@@ -110,6 +120,7 @@ def build_deps(settings: Settings, *, http_auth: bool = True) -> AppDeps:
     missing = [name for name, value in required.items() if not value]
     if missing or settings.om_url is None or (http_auth and settings.oidc_issuer is None):
         raise ConfigError(f"missing required configuration: set {', '.join(missing)}")
+    require_confirm_secret(settings)  # fail fast in production without the secret
     sources = load_lake_sources(settings)
     engine = _create_engine_or_config_error(settings.db_url)
     idp_http = httpx.AsyncClient(timeout=_IDP_TIMEOUT)

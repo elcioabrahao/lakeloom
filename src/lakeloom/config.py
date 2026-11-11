@@ -1,10 +1,11 @@
 """Runtime configuration (REQUIREMENTS.md §10, NFR-DEP-03, NFR-SEC-11).
 
 All settings come from ``LAKELOOM_*`` environment variables; no ``.env`` file is read.
-Secrets (``om_bot_token``, ``git_token``) and ``db_url`` (which may embed a password) may
-instead be supplied as ``LAKELOOM_<NAME>_FILE`` pointing at a file (Docker/Kubernetes
-secrets). Trailing whitespace is stripped from the file content, and setting both forms is
-an error. Secrets are ``SecretStr`` so they never appear in ``repr`` or ``model_dump``;
+Secrets (``om_bot_token``, ``git_token``, ``confirm_secret``) and ``db_url`` (which may
+embed a password) may instead be supplied as ``LAKELOOM_<NAME>_FILE`` pointing at a file
+(Docker/Kubernetes secrets). Trailing whitespace is stripped from the file content, and
+setting both forms is an error. Secrets are ``SecretStr`` so they never appear in ``repr``
+or ``model_dump``;
 ``db_url`` and ``git_remote`` stay plain ``str`` (callers use them as URLs) but are
 excluded from ``repr``.
 """
@@ -21,7 +22,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from lakeloom.scopes import SCOPES
 
 ENV_PREFIX = "LAKELOOM_"
-SECRET_FILE_FIELDS = ("om_bot_token", "git_token", "db_url")
+SECRET_FILE_FIELDS = ("om_bot_token", "git_token", "db_url", "confirm_secret")
 
 
 class ConfigError(Exception):
@@ -88,6 +89,9 @@ class Settings(BaseSettings):
     # JSON list or comma-separated string.
     sensitive_tags: Annotated[list[str], NoDecode] = ["PII.*"]
     max_proposal_ops: int = 50
+    # M2a: HMAC key of the stateless confirm tokens (FR-AGT-03). Required in production.
+    confirm_secret: SecretStr | None = None
+    confirm_ttl_seconds: int = Field(600, ge=30, le=3600)
     # M1a additions (docs/decisions/0008-lake-sources-design.md)
     profile_topk: int = Field(default=10, ge=1, le=1000)
     profile_low_cardinality: int = Field(default=50, ge=1, le=100_000)
