@@ -4,13 +4,14 @@ import asyncio
 import base64
 
 import pytest
-from rdflib import Graph
+from rdflib import RDF, RDFS, Graph, URIRef
+from rdflib.namespace import OWL, SKOS
 
 from lakeloom.config import Settings
 from lakeloom.core.models import ModelService
 from lakeloom.errors import LakeloomError
 from lakeloom.om.client import OMError, OMUnavailable
-from lakeloom.om.models import OMGlossary, OMPage
+from lakeloom.om.models import OMGlossary, OMNativeExport, OMPage
 from lakeloom.rdf.canonical import ExportFormat, parse_rdf
 
 TURTLE = """\
@@ -46,6 +47,8 @@ class FakeOM:
         self.down = False
         self.delay = 0.0
         self.list_calls: list[str | None] = []
+        self.native: OMNativeExport | None = None
+        self.native_calls: list[str] = []
 
     async def list_glossaries(self, *, after: str | None = None, limit: int = 50):
         self.list_calls.append(after)
@@ -60,6 +63,12 @@ class FakeOM:
         if self.down:
             raise OMUnavailable("down")
         return next((g for g in self.glossaries if g.name == name), None)
+
+    async def export_native_ontology(self, name: str):
+        self.native_calls.append(name)
+        if self.down:
+            raise OMUnavailable("down")
+        return self.native
 
     async def export_ontology(self, glossary_id: str, fmt: str, *, include_relations: bool = True):
         self.exports += 1
@@ -323,3 +332,73 @@ async def test_parse_and_serialise_run_off_the_event_loop(
     await svc.export("retail", "turtle")
     loop_thread = threading.get_ident()
     assert threads["parse"] != loop_thread and threads["serialize"] != loop_thread
+
+
+NATIVE = """\
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<http://x/ontology/retail/Order> a owl:Class ; rdfs:label "Order" .
+<http://x/ontology/retail/Order.total> a owl:DatatypeProperty ;
+    rdfs:label "total" ; rdfs:domain <http://x/ontology/retail/Order> ; rdfs:range xsd:decimal .
+"""
+
+
+async def test_graph_merges_paired_native_ontology() -> None:
+    svc, om, _ = make()
+    om.native = OMNativeExport(working_revision=3, turtle=NATIVE)
+    g = await svc.graph("retail")
+    prop = URIRef("http://x/ontology/retail/Order.total")
+    assert (prop, RDF.type, OWL.DatatypeProperty) in g
+    assert (prop, RDFS.domain, URIRef("http://x/ontology/retail/Order")) in g
+    # glossary side intact
+    assert (URIRef("http://x/ontology/retail/Customer"), RDF.type, SKOS.Concept) in g
+    assert om.native_calls == ["retail"]
+
+
+async def test_unpaired_model_is_glossary_only_without_error() -> None:
+    svc, om, _ = make()
+    om.native = None
+    g = await svc.graph("retail")
+    assert (URIRef("http://x/ontology/retail/Customer"), RDF.type, SKOS.Concept) in g
+    assert not list(g.subjects(RDF.type, OWL.DatatypeProperty))
+
+
+async def test_native_export_failure_is_upstream_unavailable() -> None:
+    svc, om, _ = make()
+    om.native = OMNativeExport(working_revision=1, turtle="not turtle {{{")
+    with pytest.raises(LakeloomError) as info:
+        await svc.graph("retail")
+    assert info.value.code == "upstream_unavailable"
+
+
+async def test_export_includes_native_and_stays_deterministic() -> None:
+    svc, om, _ = make()
+    om.native = OMNativeExport(working_revision=3, turtle=NATIVE)
+    first = await svc.export("retail", "turtle")
+    svc.clear_cache()
+    assert await svc.export("retail", "turtle") == first
+    assert b"Order.total" in first
+
+
+async def test_version_changes_with_native_revision() -> None:
+    svc, om, _ = make()
+    om.native = OMNativeExport(working_revision=3, turtle=NATIVE)
+    v3 = await svc.version("retail")
+    assert v3 == await svc.version("retail")
+    svc.invalidate("retail")
+    om.native = OMNativeExport(working_revision=4, turtle=NATIVE)
+    assert await svc.version("retail") != v3
+    svc.invalidate("retail")
+    om.native = None
+    assert await svc.version("retail") not in (v3,)
+
+
+async def test_invalidate_reloads_native_side() -> None:
+    svc, om, _ = make()
+    om.native = None
+    await svc.graph("retail")
+    om.native = OMNativeExport(working_revision=2, turtle=NATIVE)
+    assert not list((await svc.graph("retail")).subjects(RDF.type, OWL.DatatypeProperty))  # cached
+    svc.invalidate("retail")
+    assert list((await svc.graph("retail")).subjects(RDF.type, OWL.DatatypeProperty))

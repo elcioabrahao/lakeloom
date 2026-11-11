@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 from pydantic import SecretStr
-from rdflib import Graph, URIRef
+from rdflib import RDF, Graph, URIRef
+from rdflib.namespace import OWL
 from stack import REPO
 
 from lakeloom.om.client import OMClient
@@ -178,5 +179,24 @@ async def test_model_service_export_retail_all_formats_deterministic(
             assert await service.export("retail", fmt) == first
         info = await service.get_model("retail")
         assert info.term_count == len(TERM_NAMES)
+    finally:
+        await client.aclose()
+
+
+async def test_seed_pairs_retail_with_native_ontology_idempotently(
+    client: OMClient, om_url: str, om_bot_token: str, tmp_path: Path
+) -> None:
+    _run_seed(om_url, om_bot_token, tmp_path)
+    try:
+        first = await client.export_native_ontology("retail")
+        assert first is not None
+        _run_seed(om_url, om_bot_token, tmp_path)
+        second = await client.export_native_ontology("retail")
+        assert second is not None
+        assert second.working_revision == first.working_revision  # re-run changed nothing
+        g = Graph().parse(data=first.turtle, format="turtle")
+        classes = {str(s) for s in g.subjects(RDF.type, OWL.Class)}
+        assert classes == {f"{BASE_IRI}{n}" for n in TERM_NAMES}
+        assert not list(g.subjects(RDF.type, OWL.DatatypeProperty))  # no attributes yet
     finally:
         await client.aclose()

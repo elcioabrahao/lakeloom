@@ -1,7 +1,8 @@
 """Ontology models (OM glossaries): listing, cached RDF graphs, deterministic export.
 
 A model is an OpenMetadata glossary; its slug is the glossary name. The graph comes from
-OM's own export (turtle, parsed with rdflib) and is cached per slug for
+OM's own export (turtle, parsed with rdflib), merged with the model's paired native ontology
+(same name; hybrid model, ADR 0011) when one exists, and is cached per slug for
 ``model_cache_ttl_seconds``. After the TTL a failed reload raises: stale graphs are never
 served beyond it (FR-IO-01, FR-GIT-03, ADR 0009).
 """
@@ -9,6 +10,7 @@ served beyond it (FR-IO-01, FR-GIT-03, ADR 0009).
 import asyncio
 import base64
 import binascii
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -28,6 +30,7 @@ from lakeloom.untrusted import UntrustedText
 
 __all__ = ["ModelInfo", "ModelService"]
 
+_log = logging.getLogger(__name__)
 _LIST_MODELS_HINT = "call list_models to see the available model slugs"
 
 
@@ -49,6 +52,7 @@ class _Entry:
     info: ModelInfo
     loaded_at: float
     loaded_wall: datetime
+    version: str = ""  # changes when the glossary or the paired native ontology changes
     derived: dict[str, Any] = field(default_factory=dict[str, Any])  # e.g. the concept index
 
 
@@ -194,6 +198,11 @@ class ModelService:
     async def graph(self, slug: str) -> Graph:
         return (await self._load(slug)).graph
 
+    async def version(self, slug: str) -> str:
+        """Opaque validator of the model's current content: glossary ``updatedAt`` plus the
+        native ontology's ``workingRevision`` (``-`` when unpaired). Use it in ETags."""
+        return (await self._load(slug)).version
+
     async def derived[T](self, slug: str, key: str, build: Callable[[Graph], T]) -> T:
         """A value computed once from the model's current graph (e.g. the concept index).
 
@@ -218,17 +227,24 @@ class ModelService:
             self._cache.pop(slug, None)  # expired: never serve it if the reload fails
             try:
                 text = await self._om.export_ontology(info.glossary_id, "turtle")
+                native = await self._om.export_native_ontology(slug)
             except OMError as exc:
                 raise _upstream(exc) from exc
             try:
                 graph = await asyncio.to_thread(parse_rdf, text, "turtle")  # CPU-bound
+                if native is not None:
+                    graph += await asyncio.to_thread(parse_rdf, native.turtle, "turtle")
             except LakeloomError as exc:
                 raise LakeloomError(
                     "upstream_unavailable",
                     f"OpenMetadata returned an unreadable export for {slug!r}",
                     hint="check the OpenMetadata RDF export; retry shortly",
                 ) from exc
-            entry = _Entry(graph, info, self._clock(), datetime.now(UTC))
+            if native is None:
+                _log.debug("model %s has no paired native ontology; glossary export only", slug)
+            revision = "-" if native is None else str(native.working_revision)
+            version = f"g{info.updated_at}-n{revision}"
+            entry = _Entry(graph, info, self._clock(), datetime.now(UTC), version)
             self._cache[slug] = entry
             return entry
 

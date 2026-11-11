@@ -340,3 +340,37 @@ class OMAxiomValidation(BaseModel):
     def errors(self) -> list[str]:
         """Messages of the ERROR-severity violations."""
         return [v.message for v in self.violations if v.severity == "ERROR"]
+
+
+# --- Native ontologies (M2a Task 5b, Amendment A; ADR 0011) --------------------------------
+
+
+class OMOntology(BaseModel):
+    """A native OM ontology (``POST /v1/ontologies``), the pair of a glossary."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    id: str
+    name: str
+    fully_qualified_name: str | None = Field(default=None, alias="fullyQualifiedName")
+    description: str | None = None
+    iri: str | None = None
+    namespace: str | None = None
+    version: float | None = None
+
+
+class OMOntologyState(BaseModel):
+    """``GET /v1/ontologies/{id}/state``: ``workingRevision`` grows per applied definition."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    working_revision: int = Field(alias="workingRevision")
+    last_release_revision: int = Field(default=0, alias="lastReleaseRevision")
+    activation_revision: int = Field(default=0, alias="activationRevision")
+
+
+class OMNativeExport(BaseModel):
+    """RDF (turtle) of a native ontology's working state, at one ``working_revision``."""
+
+    working_revision: int
+    turtle: str

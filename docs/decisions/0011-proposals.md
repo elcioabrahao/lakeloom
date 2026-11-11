@@ -1,6 +1,6 @@
 # 0011. Proposals: OM change sets, glossary creation, axiom validation
 
-- Status: proposed (initial: OM payload shapes, M2a Task 1; later M2a tasks extend it)
+- Status: accepted (OM payload shapes, M2a Task 1; hybrid model, Amendment A and Task 5b; later M2a tasks extend it)
 - Date: 2026-11-11
 - Requirements: FR-OM-01, FR-OM-02, FR-OM-05a, FR-PRO-01, FR-PRO-03, FR-CTX-05
 
@@ -234,14 +234,13 @@ messages.
   `add_operations`, `get_change_set`, `submit_change_set`, `discard_change_set`,
   `validate_axiom`, the lease handling they need, and `OMConflict`. There is deliberately no
   `apply` method in M2a.
-- **Open decision (controller/owner):** attributes (`UPSERT_PROPERTY`) and axioms need a
-  native OM ontology whose classes are `OntologyConcept`s, not glossary terms. Options:
-  (a) each model = glossary + same-named native ontology; a proposal becomes two change sets
-  (glossary: terms/relationships/mappings; ontology: mirrored OWL classes, properties,
-  axioms) — supersedes part of ADR 0007; (b) keep attributes as Lakeloom-side operations
-  (like realizations) until OM can attach properties to glossary terms; (c) move models to
-  native ontologies entirely (M1 read path is glossary-based). Until decided, the mapper's
-  attribute/axiom output has no single OM target.
+- **Decided (owner, Amendment A): hybrid model.** Each Lakeloom model is the OM glossary
+  (concepts as terms, relations, mappings; unchanged from M1) **plus a paired native OM
+  ontology with the same name**, whose classes (`OntologyConcept`, `OWL_CLASS`) reuse the
+  glossary terms' IRIs and which carries attributes (`UPSERT_PROPERTY`, kind DATA) and axioms.
+  A proposal becomes up to two change sets (glossary first, then native). This **explicitly
+  supersedes ADR 0007's "Lakeloom does not use the undocumented `/api/v1/ontologies`
+  endpoints"**: the rc1 spec has them and attributes cannot be expressed without them.
 - M2b's apply path must handle leases, 400/412 conflicts, id remapping of created entities
   (`applicationResult.results[].entity.id`), and must not rely on OM reviewer gating.
 
@@ -288,3 +287,44 @@ kept, but **`iri` became null**. So an update must carry the full term (the iri 
 glossary term to its native class), and a `term` without `description` is rejected at create
 (400 `query param description must not be null`). Lakeloom builds every UPDATE_TERM from a
 snapshot of the current term and fails closed (`validation_error`) when it is missing.
+
+## Appendix: the paired native ontology (M2a Task 5b)
+
+Verified live against 2.1.0-rc1 on 2026-11-11 (throwaway ontologies, bot JWT).
+
+- `POST /v1/ontologies` needs `name`, `iri` and `namespace`; **`namespace` must be an absolute
+  IRI** (400 `Ontology namespace must be an absolute IRI`), so `OMClient.create_ontology` sends
+  the model base IRI as both. Duplicate name -> 409 `Entity already exists`.
+- Lookup by name: `GET /v1/ontologies/name/{fqn}` (404 when absent). State:
+  `GET /v1/ontologies/{id}/state` -> `workingRevision` (1 on creation, +1 per applied
+  definition: a class and a property took it from 1 to 3).
+- Members of the working state: `GET /v1/ontologyConcepts|ontologyProperties|ontologyAxioms
+  ?ontology=<name>&limit=&after=&fields=*` (paged: `paging.after`). A property's `name` is the
+  native `{Concept}.{attr}`; its FQN is `<ontology>."{Concept}.{attr}"`.
+- **There is no RDF export of the working state.** `GET /v1/ontologyReleases/{id}/export?format=`
+  exports a *sealed release* (`owl:Class`, `owl:DatatypeProperty` with `rdfs:domain`/`range`,
+  plus `owl:Axiom` annotation blobs), and sealing (`POST /v1/ontologies/{id}/releases`, needs
+  `expectedWorkingRevision` and `expectedLatestReleaseRevision`) is a write that cannot be
+  undone: **an ontology with a release cannot be hard-deleted** (400 `has retained releases;
+  archive it instead`; a soft delete works). `GET /v1/rdf/ontology` is OM's own schema
+  ontology, `.../context` is Markdown, `.../working/diff` lists changed members as JSON.
+  The read path therefore rebuilds RDF from the working members (`lakeloom.om.native_rdf`):
+  `owl:Class` per `OWL_CLASS`/`BOTH` concept, the property kind as `owl:DatatypeProperty` /
+  `ObjectProperty` / `AnnotationProperty` with `rdfs:domain`, `rdfs:range`, `rdfs:label`
+  (display name if set) and `rdfs:comment`, `owl:oneOf` for `enumValues`, `qudt:unit`,
+  `owl:FunctionalProperty` for identifiers, and `SUBCLASS_OF` axioms as `rdfs:subClassOf`
+  (named class or cardinality restriction). Lakeloom never seals releases.
+- **Read path.** `ModelService.graph(slug)` parses the glossary export and, if an ontology
+  named `slug` exists, the native export, into one rdflib graph, then the existing canonical
+  serialiser. A missing pair is a debug log, not an error. The cache entry carries a
+  `version` (`g<glossary updatedAt>-n<workingRevision or ->`), exposed as
+  `ModelService.version(slug)`, so a validator changes when either side changes; the
+  `workingRevision` is read before and after the members and the read repeated (3 attempts)
+  if it moved. Native classes are `owl:Class`, glossary concepts `skos:Concept`: the concept
+  index sees each concept once, and `explain_concept` finds attributes as
+  `owl:DatatypeProperty` + `rdfs:domain` of the concept IRI.
+- **Conflict kinds.** `OMConflict.kind` is `exists` (409 already exists), `lease` (other
+  409), `stale_base` (400 expected version) or `stale_revision` (412). The lease release
+  runs shielded from cancellation.
+- Applying is test/dev only (seed, contract test): the bot token can apply its own drafts, so
+  M2b must enforce human-only apply in Lakeloom (FR-REV-01/02).

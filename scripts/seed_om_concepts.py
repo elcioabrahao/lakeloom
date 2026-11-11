@@ -13,12 +13,18 @@ create-or-update (PUT) or check-then-add, so a second run changes nothing and ke
 same ids. Existing classification tags (``PII.Sensitive``) are preserved. The bot token is
 read from the token file and only ever sent in the Authorization header.
 
+It also pairs the glossary with a native OM ontology of the same name (hybrid model,
+ADR 0011): classes reusing the 10 term IRIs, no attributes yet, created through a native
+change set that this dev script applies itself (Lakeloom proper never applies). A second
+run finds the ontology and every class and does nothing. Glossary terms are never edited.
+
 This seeds OM directly (ADR 0009): FR-OM-02 governs Lakeloom's own writes, from M2.
 """
 
 import argparse
 import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -233,6 +239,90 @@ def seed_realizations(http: httpx.Client) -> int:
     return patched
 
 
+def seed_native_ontology(http: httpx.Client) -> int:
+    """Pair ``retail`` with a native ontology holding one class per term; return classes added.
+
+    The ontology is created if missing; missing classes are added by one native change set
+    (UPSERT_CONCEPT, same IRI as the term), applied here because this is dev tooling.
+    """
+    response = http.get(f"/v1/ontologies/name/{GLOSSARY}")
+    if response.status_code == 404:
+        response = _check(
+            http.post(
+                "/v1/ontologies",
+                json={
+                    "name": GLOSSARY,
+                    "iri": BASE_IRI,
+                    "namespace": BASE_IRI,
+                    "description": "Native ontology paired with the retail glossary.",
+                },
+            ),
+            "POST ontology",
+        )
+    ontology = _check(response, "GET ontology").json()
+    members = _check(
+        http.get("/v1/ontologyConcepts", params={"ontology": GLOSSARY, "limit": "1000"}),
+        "GET ontology concepts",
+    ).json()["data"]
+    present = {c["iri"] for c in members}
+    missing = [t for t in TERMS if f"{BASE_IRI}{t['name']}" not in present]
+    if not missing:
+        return 0
+    state = _check(http.get(f"/v1/ontologies/{ontology['id']}/state"), "GET state").json()
+    operations = [
+        {
+            "id": str(uuid.uuid4()),
+            "state": "ACTIVE",
+            "operationType": "UPSERT_CONCEPT",
+            "concept": {
+                "id": str(uuid.uuid4()),
+                "name": t["name"],
+                "fullyQualifiedName": f"{GLOSSARY}.{t['name']}",
+                "iri": f"{BASE_IRI}{t['name']}",
+                "conceptType": "OWL_CLASS",
+                "description": t["description"],
+                "ontology": {"id": ontology["id"], "type": "ontology"},
+            },
+        }
+        for t in missing
+    ]
+    change_set = _check(
+        http.post(
+            "/v1/ontologyChangeSets",
+            json={
+                "name": f"seed-{GLOSSARY}-classes-{uuid.uuid4().hex[:8]}",
+                "displayName": "Seed retail classes",
+                "description": "Dev seed: native classes for the retail glossary terms.",
+                "ontology": GLOSSARY,
+                "baseWorkingRevision": state["workingRevision"],
+                "operations": operations,
+            },
+        ),
+        "POST change set",
+    ).json()
+    cs_url = f"/v1/ontologyChangeSets/{change_set['id']}"
+    try:
+        session = f"seed-{uuid.uuid4()}"
+        lease = _check(
+            http.post(
+                "/v1/ontologyEditLocks/acquire",
+                json={
+                    "resourceType": "ontologyChangeSet",
+                    "resourceId": change_set["id"],
+                    "sessionId": session,
+                    "leaseSeconds": 60,
+                },
+            ),
+            "acquire lease",
+        ).json()
+        token = {"lease": {"sessionId": session, "version": lease["version"]}}
+        _check(http.post(f"{cs_url}/submit", json=token), "submit change set")
+        _check(http.post(f"{cs_url}/apply", json=token), "apply change set")
+    finally:
+        http.delete(cs_url, params={"hardDelete": "true"})
+    return len(missing)
+
+
 def seed(om_url: str, token: str) -> dict[str, str]:
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     with httpx.Client(base_url=f"{om_url.rstrip('/')}/api", headers=headers, timeout=30) as http:
@@ -240,6 +330,7 @@ def seed(om_url: str, token: str) -> dict[str, str]:
         ids = seed_terms(http)
         seed_relations(http, ids)
         seed_realizations(http)
+        seed_native_ontology(http)
     return ids
 
 

@@ -9,6 +9,7 @@ Paths are keys of the committed spec (``servers[0].url`` is ``/api``), verified 
 header; it is never part of an exception message, log line or repr.
 """
 
+import asyncio
 import re
 import time
 import uuid
@@ -31,11 +32,15 @@ from lakeloom.om.models import (
     OMGlossary,
     OMGlossaryTerm,
     OMLineage,
+    OMNativeExport,
+    OMOntology,
+    OMOntologyState,
     OMPage,
     OMTable,
     OMVersion,
     RdfStatus,
 )
+from lakeloom.om.native_rdf import build_graph
 from lakeloom.telemetry import record_om_request, start_span
 
 API_PREFIX = "/api"
@@ -68,6 +73,11 @@ _UUID_IN_TEXT = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 _DETAIL_MAX = 500
 
 
+ConflictKind = Literal["stale_base", "lease", "exists", "stale_revision"]
+_MEMBER_PAGE = 100
+_EXPORT_ATTEMPTS = 3
+
+
 class OMError(Exception):
     """OpenMetadata answered with an error (or could not be used).
 
@@ -90,7 +100,9 @@ class OMConflict(OMError):
     HTTP 409 (name taken, edit lease held or lost), 412 (native ontology draft older than the
     working revision) and HTTP 400 "expected version X but found Y" (an operation's
     ``baseVersion`` is stale). ``entity_ids`` holds the ids OM named in its message: the
-    operation id for a stale base, the resource id for a lease conflict.
+    operation id for a stale base, the resource id for a lease conflict. ``kind`` says which:
+    ``exists`` (409 name taken), ``lease`` (any other 409), ``stale_base`` (400 expected
+    version) or ``stale_revision`` (412).
     """
 
     def __init__(
@@ -99,9 +111,11 @@ class OMConflict(OMError):
         status: int | None = None,
         detail: str | None = None,
         entity_ids: tuple[str, ...] = (),
+        kind: ConflictKind = "lease",
     ) -> None:
         super().__init__(message, status, detail)
         self.entity_ids = entity_ids
+        self.kind: ConflictKind = kind
 
 
 class OMClient:
@@ -129,6 +143,13 @@ class OMClient:
         "acquire_edit_lease": ("POST", "/v1/ontologyEditLocks/acquire"),
         "release_edit_lease": ("DELETE", "/v1/ontologyEditLocks/{resourceType}/{resourceId}"),
         "validate_axiom": ("POST", "/v1/ontologyAxioms/validate"),
+        # Native ontologies (hybrid model, Amendment A; ADR 0011)
+        "create_ontology": ("POST", "/v1/ontologies"),
+        "get_ontology_by_name": ("GET", "/v1/ontologies/name/{fqn}"),
+        "get_ontology_state": ("GET", "/v1/ontologies/{id}/state"),
+        "list_ontology_concepts": ("GET", "/v1/ontologyConcepts"),
+        "list_ontology_properties": ("GET", "/v1/ontologyProperties"),
+        "list_ontology_axioms": ("GET", "/v1/ontologyAxioms"),
     }
 
     def __init__(
@@ -433,12 +454,22 @@ class OMClient:
         try:
             yield lease
         finally:
-            with suppress(OMError):
-                await self._request(
-                    "release_edit_lease",
-                    path_args={"resourceType": CHANGE_SET_RESOURCE, "resourceId": change_set_id},
-                    params={"sessionId": lease.session_id},
-                )
+            # Shielded: a cancelled caller must not leave the lease held until it expires.
+            release = asyncio.ensure_future(self._release(change_set_id, lease.session_id))
+            try:
+                await asyncio.shield(release)
+            except asyncio.CancelledError:
+                with suppress(Exception):
+                    await release
+                raise
+
+    async def _release(self, change_set_id: str, session_id: str) -> None:
+        with suppress(OMError):
+            await self._request(
+                "release_edit_lease",
+                path_args={"resourceType": CHANGE_SET_RESOURCE, "resourceId": change_set_id},
+                params={"sessionId": session_id},
+            )
 
     async def add_operations(
         self, change_set_id: str, operations: Sequence[Mapping[str, Any]]
@@ -483,6 +514,68 @@ class OMClient:
         response = await self._request("validate_axiom", json=dict(axiom))
         return OMAxiomValidation.model_validate(_json(response))
 
+    # --- Native ontologies (hybrid model; ADR 0011) ---------------------------------------
+
+    async def create_ontology(self, *, name: str, iri: str, description: str) -> OMOntology:
+        """Create the native ontology paired with a glossary (``name`` = the model slug).
+
+        rc1 requires ``namespace`` to be an absolute IRI; the model base IRI is used for
+        both. Raises ``OMConflict`` (``exists``) when the name is taken.
+        """
+        payload = {"name": name, "iri": iri, "namespace": iri, "description": description}
+        response = await self._request("create_ontology", json=payload)
+        return OMOntology.model_validate(_json(response))
+
+    async def get_ontology_by_name(self, name: str) -> OMOntology | None:
+        response = await self._get_or_none("get_ontology_by_name", path_args={"fqn": name})
+        return None if response is None else OMOntology.model_validate(_json(response))
+
+    async def get_ontology_state(self, ontology_id: str) -> OMOntologyState:
+        response = await self._request("get_ontology_state", path_args={"id": ontology_id})
+        return OMOntologyState.model_validate(_json(response))
+
+    async def _members(self, name: str, ontology: str) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        after: str | None = None
+        while True:
+            params = {"ontology": ontology, "limit": str(_MEMBER_PAGE), "fields": "*"}
+            if after:
+                params["after"] = after
+            body = _json(await self._request(name, params=params))
+            if not isinstance(body, dict):
+                raise OMError("OpenMetadata returned an unexpected ontology member page")
+            page = cast("dict[str, Any]", body)
+            out += [m for m in page.get("data", []) if isinstance(m, dict)]
+            paging = page.get("paging")
+            after = (
+                cast("dict[str, Any]", paging).get("after") if isinstance(paging, dict) else None
+            )
+            if not after:
+                return out
+
+    async def export_native_ontology(self, name: str) -> OMNativeExport | None:
+        """RDF (turtle) of the native ontology called ``name``, or ``None`` when no pair exists.
+
+        rc1 only exports sealed releases (sealing is a write), so the working members are
+        read and turned into RDF (``om.native_rdf``). The ``workingRevision`` is read before
+        and after; when it moved, the read is repeated (up to three times).
+        """
+        ontology = await self.get_ontology_by_name(name)
+        if ontology is None:
+            return None
+        attempt = 0
+        while True:
+            attempt += 1
+            before = (await self.get_ontology_state(ontology.id)).working_revision
+            concepts = await self._members("list_ontology_concepts", name)
+            properties = await self._members("list_ontology_properties", name)
+            axioms = await self._members("list_ontology_axioms", name)
+            after = (await self.get_ontology_state(ontology.id)).working_revision
+            if before == after or attempt >= _EXPORT_ATTEMPTS:
+                graph = build_graph(concepts, properties, axioms)
+                turtle = graph.serialize(format="turtle")
+                return OMNativeExport(working_revision=after, turtle=turtle)
+
     async def get_capabilities(self) -> OMCapabilities:
         """Probe version and RDF status; never raises (FR-OM-06)."""
         try:
@@ -525,7 +618,16 @@ def _client_error(response: httpx.Response) -> OMError:
     stale = status == 400 and detail is not None and _STALE_BASE.search(detail) is not None
     if status in (409, 412) or stale:
         ids = tuple(dict.fromkeys(m.lower() for m in _UUID_IN_TEXT.findall(detail or "")))
-        return OMConflict(f"{message} (conflict)", status, detail, ids)
+        kind: ConflictKind
+        if stale:
+            kind = "stale_base"
+        elif status == 412:
+            kind = "stale_revision"
+        elif "already exists" in (detail or "").lower():
+            kind = "exists"
+        else:
+            kind = "lease"
+        return OMConflict(f"{message} (conflict)", status, detail, ids, kind)
     return OMError(message, status, detail)
 
 

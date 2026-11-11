@@ -95,6 +95,9 @@ class FakeOM:
             raise OMUnavailable("down")
         return self._glossary() if name == "retail" else None
 
+    async def export_native_ontology(self, name: str):
+        return None  # no paired native ontology
+
     async def export_ontology(self, glossary_id: str, fmt: str, **_: object) -> str:
         return TURTLE
 

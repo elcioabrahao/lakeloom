@@ -139,6 +139,9 @@ class FakeOM:
             {"id": f"id-{name}", "name": name, "fullyQualifiedName": name}
         )
 
+    async def export_native_ontology(self, name: str):
+        return None  # no paired native ontology
+
     async def export_ontology(self, glossary_id: str, fmt: str, **_: object) -> str:
         return self.turtles[glossary_id.removeprefix("id-")]
 

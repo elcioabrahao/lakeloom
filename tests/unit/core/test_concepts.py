@@ -16,7 +16,14 @@ from lakeloom.core.models import ModelService
 from lakeloom.core.tokens import TRUNCATION_NOTE
 from lakeloom.errors import LakeloomError
 from lakeloom.om.client import OMUnavailable
-from lakeloom.om.models import OMEntityRef, OMGlossary, OMGlossaryTerm, OMPage, OMTable
+from lakeloom.om.models import (
+    OMEntityRef,
+    OMGlossary,
+    OMGlossaryTerm,
+    OMNativeExport,
+    OMPage,
+    OMTable,
+)
 
 B = "http://x/ontology/retail/"
 TURTLE = f"""\
@@ -136,6 +143,9 @@ class FakeOM:
         if self.down:
             raise OMUnavailable("down")
         return next((g for g in self.glossaries if g.name == name), None)
+
+    async def export_native_ontology(self, name: str) -> OMNativeExport | None:
+        return None  # no paired native ontology
 
     async def export_ontology(self, glossary_id: str, fmt: str, **_: object) -> str:
         if self.down:
@@ -673,3 +683,27 @@ async def test_concept_name_two_exact_names_still_ambiguous() -> None:
         await explain_concept(models, om, "Order")  # pyright: ignore[reportArgumentType]
     assert e.value.code == "validation_error"
     assert "retail.Customer" in (e.value.hint or "")
+
+
+class PairedOM(FakeOM):
+    """The glossary export has no attribute for Customer; the paired native ontology adds one."""
+
+    async def export_native_ontology(self, name: str) -> OMNativeExport | None:
+        turtle = f"""\
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<{B}Customer> a owl:Class ; rdfs:label "Customer" .
+<{B}Customer.loyalty_tier> a owl:DatatypeProperty ; rdfs:label "loyalty tier" ;
+    rdfs:comment "Tier in the loyalty programme" ;
+    rdfs:domain <{B}Customer> ; rdfs:range xsd:string .
+"""
+        return OMNativeExport(working_revision=2, turtle=turtle)
+
+
+async def test_explain_concept_lists_native_attribute_of_paired_ontology() -> None:
+    om = PairedOM()
+    models = ModelService(om, Settings(public_url="http://x"))  # pyright: ignore[reportArgumentType]
+    d = await explain_concept(models, om, "retail.Customer")  # pyright: ignore[reportArgumentType]
+    assert [a.name for a in d.attributes] == ["loyalty tier"]
+    assert d.attributes[0].datatype is not None and d.attributes[0].datatype.endswith("#string")
