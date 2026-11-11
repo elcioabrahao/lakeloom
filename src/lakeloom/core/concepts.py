@@ -15,7 +15,7 @@ import difflib
 import re
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 from weakref import WeakKeyDictionary
@@ -55,6 +55,7 @@ __all__ = [
     "find_assets_for_concept",
     "find_concepts",
     "realizing_tables",
+    "score_candidates",
     "summarize_concept",
 ]
 
@@ -556,6 +557,36 @@ async def find_concepts(
     return Page[ConceptMatch](
         items=window, next_cursor=_encode_offset(offset + limit) if more else None
     )
+
+
+async def score_candidates(
+    models: ModelService, query: str, *, model: str | Sequence[str] | None = None
+) -> list[ConceptMatch]:
+    """Score the concepts of ``model`` (one slug, several, or all models) against ``query``.
+
+    The same tiered scorer as :func:`find_concepts` (IRI/FQN/name 1.0, synonym 0.95, local
+    name 0.9, fuzzy up to 0.8), without the OM search supplement. Best first, ties by label
+    and FQN, so the result is deterministic.
+    """
+    if model is None:
+        slugs = await _all_slugs(models)
+    else:
+        slugs = [model] if isinstance(model, str) else list(model)
+    matches: list[ConceptMatch] = []
+    for slug in slugs:
+        g = await _graph(models, slug)
+        for node, ref in g.concepts.items():
+            scored = _score(query, _Candidate(ref, g.synonyms[node]))
+            if scored is not None:
+                matches.append(
+                    ConceptMatch(
+                        concept=ref,
+                        score=scored[0],
+                        matched_on=scored[1],  # pyright: ignore[reportArgumentType]
+                    )
+                )
+    matches.sort(key=lambda m: (-m.score, m.concept.label, m.concept.fqn))
+    return matches
 
 
 # --- realizations -------------------------------------------------------------------------
