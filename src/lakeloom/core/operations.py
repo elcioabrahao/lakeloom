@@ -297,6 +297,10 @@ class OMContext:
     existing terms (needed to update them). ``native_ids``/``native_versions`` hold the
     existing native definitions, keyed ``concept:<iri>``, ``attr:<iri>`` or ``axiom:<iri>``
     (needed only for removals). ``relationship_ids`` is keyed by the relation's op key.
+
+    ``native_classes`` holds the IRIs of the classes the paired native ontology declares;
+    ``None`` means unknown (nothing is declared for existing concepts then). An existing
+    concept's IRI is its term's IRI (``terms[...].iri``; base IRI + name otherwise).
     """
 
     glossary_name: str
@@ -311,6 +315,7 @@ class OMContext:
     relationship_ids: Mapping[str, str] = field(default_factory=dict[str, str])
     native_ids: Mapping[str, str] = field(default_factory=dict[str, str])
     native_versions: Mapping[str, float] = field(default_factory=dict[str, float])
+    native_classes: Collection[str] | None = None
     # Hybrid model: relations also become native object properties when the model is paired.
     paired: bool = True
     # Glossary relationship type used when OM does not define the relation's own type.
@@ -413,6 +418,11 @@ def _lookup[V](table: Mapping[str, V], ctx: OMContext, ref: str, what: str) -> V
 
 
 def _concept_iri(ctx: OMContext, ref: str) -> str:
+    """The class IRI of a concept: an existing term's own IRI (a model paired after the fact
+    keeps its terms' IRIs, ADR 0011), else ``{base}{name}``."""
+    snapshot = _find(ctx.terms, ctx, ref)
+    if snapshot is not None and snapshot.iri:
+        return snapshot.iri
     return f"{ctx.base_iri}{quote(_local(ctx, ref), safe='')}"
 
 
@@ -445,6 +455,7 @@ def to_om_all(
     ctx: OMContext,
     *,
     in_change_set: Collection[str] = (),
+    declared_classes: Collection[str] = (),
 ) -> OMOps:
     """Map a batch of proposal operations to OM operations; the entry point for callers.
 
@@ -455,8 +466,16 @@ def to_om_all(
     term created in the same batch carry no ``baseVersion`` (rc1 rejects one, ADR 0011);
     ``in_change_set`` names concepts created earlier in the change set the batch is appended
     to, which are treated the same way. Declarations come first on each side (``CREATE_TERM``,
-    ``UPSERT_CONCEPT``; otherwise in batch order): rc1 rejects an operation that references a
-    term created by a later one, e.g. ``Invoice hasOrder Order`` when invoices sort first.
+    ``UPSERT_CONCEPT``; otherwise in batch order, a parent term before its children): rc1
+    rejects an operation that references a term created by a later one, e.g. ``Invoice
+    hasOrder Order`` when invoices sort first.
+
+    A native operation on an *existing* concept whose class the native ontology lacks (a model
+    paired with ``pair_existing``) is preceded by an ``UPSERT_CONCEPT`` declaring that class
+    with the term's IRI, once per batch; ``declared_classes`` names concepts already declared
+    in the change set the batch is appended to. Two relations between the same pair of terms
+    that map to the same glossary relationship type (``relatedTo`` fallback) give one
+    glossary link; their native object properties stay distinct.
     """
     created = {op.name: op for op in ops if isinstance(op, AddConcept)}
     unversioned = set(created) | set(in_change_set)
@@ -477,6 +496,8 @@ def to_om_all(
     glossary: list[dict[str, Any]] = []
     native: list[dict[str, Any]] = []
     done: set[str] = set()
+    links: set[tuple[str, str, str]] = set()
+    declare = _ClassDeclarations(ctx, set(created) | set(declared_classes))
     for op in ops:
         if isinstance(op, UpdateConcept | AddSynonym):
             name = _local(ctx, op.fqn if isinstance(op, UpdateConcept) else op.concept_fqn)
@@ -499,18 +520,101 @@ def to_om_all(
                 glossary=[{k: v for k, v in o.items() if k != "baseVersion"} for o in out.glossary],
                 native=out.native,
             )
-        glossary.extend(out.glossary)
+        glossary.extend(o for o in out.glossary if _new_link(o, links))
+        if out.native:
+            native.extend(declare(_native_refs(op)))
         native.extend(out.native)
     return OMOps(
-        glossary=_declarations_first(glossary, "CREATE_TERM"),
+        glossary=_parents_first(_declarations_first(glossary, "CREATE_TERM")),
         native=_declarations_first(native, "UPSERT_CONCEPT"),
     )
+
+
+def _new_link(item: dict[str, Any], seen: set[tuple[str, str, str]]) -> bool:
+    """False for a second glossary link of one type between the same two terms."""
+    if item.get("operationType") != "ADD_RELATIONSHIP":
+        return True
+    rel = cast("dict[str, Any]", item["relationship"])
+    key = (str(rel["fromTerm"]["id"]), str(rel["toTerm"]["id"]), str(rel["relationshipType"]["id"]))
+    if key in seen:
+        return False
+    seen.add(key)
+    return True
+
+
+def _native_refs(op: ProposalOperation) -> list[str]:
+    """Concepts whose class a native operation points at (domain, range, subject)."""
+    match op:
+        case AddAttribute() | AddAxiom():
+            return [op.concept]
+        case AddRelation():
+            return [op.source, op.target]
+        case _:
+            return []
+
+
+class _ClassDeclarations:
+    """``UPSERT_CONCEPT`` for existing concepts the native ontology lacks, once each."""
+
+    def __init__(self, ctx: OMContext, skip: set[str]) -> None:
+        self.ctx = ctx
+        self.skip = skip  # created in this batch, or declared earlier in the change set
+
+    def __call__(self, refs: Sequence[str]) -> list[dict[str, Any]]:
+        ctx = self.ctx
+        if ctx.native_classes is None:
+            return []
+        out: list[dict[str, Any]] = []
+        for ref in refs:
+            name = _local(ctx, ref)
+            iri = _concept_iri(ctx, ref)
+            if name in self.skip or iri in ctx.native_classes:
+                continue
+            self.skip.add(name)
+            concept: dict[str, Any] = {
+                "id": _uid("concept", f"concept:{name}"),
+                "name": name,
+                "fullyQualifiedName": f"{_ontology_name(ctx)}.{name}",
+                "iri": iri,
+                "conceptType": "OWL_CLASS",
+                "ontology": _ontology_ref(ctx),
+            }
+            snapshot = _find(ctx.terms, ctx, ref)
+            if snapshot is not None and snapshot.description:
+                concept["description"] = snapshot.description
+            out.append({"operationType": "UPSERT_CONCEPT", "concept": concept})
+        return out
 
 
 def _declarations_first(ops: list[dict[str, Any]], declaration: str) -> list[dict[str, Any]]:
     """Stable partition: the ``declaration`` operations, then the rest (each in order)."""
     first = [o for o in ops if o.get("operationType") == declaration]
     return first + [o for o in ops if o.get("operationType") != declaration]
+
+
+def _parents_first(ops: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Stable topological order of ``CREATE_TERM``: a term created after its parent when the
+    parent is created in the same batch; everything else keeps its place."""
+    creates = [o for o in ops if o.get("operationType") == "CREATE_TERM"]
+    ids = {str(o["term"]["id"]) for o in creates}
+    ordered: list[dict[str, Any]] = []
+    placed: set[str] = set()
+    pending = list(creates)
+    while pending:
+        ready = [
+            o
+            for o in pending
+            if (parent := o["term"].get("parent")) is None
+            or str(parent["id"]) not in ids
+            or str(parent["id"]) in placed
+        ]
+        if not ready:  # a cycle cannot come from valid ops; keep the rest as they are
+            ready = pending
+        for o in ready:
+            ordered.append(o)
+            placed.add(str(o["term"]["id"]))
+        pending = [o for o in pending if all(o is not r for r in ready)]
+    return ordered + [o for o in ops if o.get("operationType") != "CREATE_TERM"]
 
 
 def _anchor(op: ProposalOperation) -> str | None:

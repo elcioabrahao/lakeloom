@@ -1382,3 +1382,38 @@ async def test_discard_token_is_bound_to_the_principal(make) -> None:
         )
     assert info.value.code == "validation_error"
     assert (await kit.repo.get(p.id)).status == "draft"
+
+
+# --- final fix wave: pair_existing models have no native classes yet ------------------------
+
+
+async def test_attribute_on_existing_concept_declares_its_native_class(make) -> None:
+    """A pair_existing ontology starts empty: an attribute on the existing term ``Widget``
+    is preceded by UPSERT_CONCEPT with the term's own IRI (else OM: UNDECLARED_CLASS)."""
+    kit = make()
+    kit.om.terms["shop"] = [term("shop", "Widget", 0.3, iri="http://seed/shop/Widget")]
+    p = await _shop_proposal(kit)
+    attr = AddAttribute(op="add_attribute", concept="Widget", name="size", datatype="xsd:int")
+    more = AddAttribute(op="add_attribute", concept="Widget", name="weight", datatype="xsd:int")
+    await kit.service.propose_change(p.id, [attr], principal=AGENT, client=None)
+    await kit.service.propose_change(p.id, [more], principal=AGENT, client=None)
+    native_cs = p.parts[0].change_set_ids["native"]
+    appended = [
+        ops
+        for n, (cs, ops) in [(n, a) for n, a in kit.om.calls if n == "add_operations"]
+        if cs == native_cs
+    ]
+    first, second = appended
+    assert [o["operationType"] for o in first] == ["UPSERT_CONCEPT", "UPSERT_PROPERTY"]
+    assert first[0]["concept"]["iri"] == "http://seed/shop/Widget"
+    assert first[1]["property"]["domain"] == ["http://seed/shop/Widget"]
+    assert [o["operationType"] for o in second] == ["UPSERT_PROPERTY"]  # declared already
+
+
+async def test_attribute_on_unknown_concept_fails_closed(make) -> None:
+    kit = make()
+    p = await _shop_proposal(kit)
+    attr = AddAttribute(op="add_attribute", concept="Ghost", name="size", datatype="xsd:int")
+    with pytest.raises(LakeloomError) as info:
+        await kit.service.propose_change(p.id, [attr], principal=AGENT, client=None)
+    assert "Ghost" in info.value.message

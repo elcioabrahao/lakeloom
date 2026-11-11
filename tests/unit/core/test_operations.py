@@ -725,3 +725,88 @@ def test_realization_column_and_axiom_size_are_capped() -> None:
     with pytest.raises(ValidationError):
         AddAxiom(op="add_axiom", concept="X", axiom=big)
     AddAxiom(op="add_axiom", concept="X", axiom={"name": "Ok", "description": "d" * 15_000})
+
+
+# --- final fix wave: native classes of existing concepts, relatedTo, parent order ----------
+
+RETAIL_IRI = "http://seeded.example/retail/"
+
+
+def _existing_ctx(native_classes: set[str]) -> OMContext:
+    """``Customer`` exists as a glossary term with its own IRI (pair_existing model)."""
+    return replace(
+        CTX,
+        terms={
+            **CTX.terms,
+            "retail.Customer": TermSnapshot(
+                description="A buyer", version=1.2, iri=RETAIL_IRI + "Customer"
+            ),
+        },
+        native_classes=frozenset(native_classes),
+    )
+
+
+def test_existing_concept_without_native_class_is_declared_first() -> None:
+    attr = AddAttribute(op="add_attribute", concept="Customer", name="email", datatype="xsd:string")
+    out = to_om_all([attr], _existing_ctx(set()))
+    declare, prop = out.native
+    assert declare["operationType"] == "UPSERT_CONCEPT"
+    concept = declare["concept"]
+    assert concept["iri"] == RETAIL_IRI + "Customer"  # the term's real IRI, not base + name
+    assert (concept["name"], concept["conceptType"]) == ("Customer", "OWL_CLASS")
+    assert concept["fullyQualifiedName"] == "retail.Customer"
+    assert prop["property"]["domain"] == [RETAIL_IRI + "Customer"]
+    assert prop["property"]["iri"] == RETAIL_IRI + "Customer.email"
+    # the class exists natively: nothing to declare
+    (only,) = to_om_all([attr], _existing_ctx({RETAIL_IRI + "Customer"})).native
+    assert only["operationType"] == "UPSERT_PROPERTY"
+    # declared earlier in the change set being appended to: not again
+    (again,) = to_om_all([attr], _existing_ctx(set()), declared_classes={"Customer"}).native
+    assert again["operationType"] == "UPSERT_PROPERTY"
+
+
+def test_relation_and_axiom_declare_each_existing_class_once() -> None:
+    ctx = replace(_existing_ctx(set()), relationship_type_ids={"placedBy": "rt-1"})
+    rel = AddRelation(
+        op="add_relation", source="Order", relation_type="placedBy", target="Customer"
+    )
+    axiom = AddAxiom(op="add_axiom", concept="Customer", axiom={"name": "c", "axiomType": "X"})
+    attr = AddAttribute(op="add_attribute", concept="Customer", name="email", datatype="xsd:string")
+    native = to_om_all([rel, axiom, attr], ctx).native
+    declared = [o["concept"]["iri"] for o in native if o["operationType"] == "UPSERT_CONCEPT"]
+    assert declared == [BASE + "Order", RETAIL_IRI + "Customer"]
+    assert native[0]["operationType"] == "UPSERT_CONCEPT"
+    (prop,) = [o["property"] for o in native if o["operationType"] == "UPSERT_PROPERTY"][:1]
+    assert prop["range"] == [RETAIL_IRI + "Customer"]
+    (ax,) = [o["axiom"] for o in native if o["operationType"] == "UPSERT_AXIOM"]
+    assert ax["subjectIri"] == RETAIL_IRI + "Customer"
+
+
+def test_unknown_native_classes_declare_nothing() -> None:
+    attr = AddAttribute(op="add_attribute", concept="Order", name="x", datatype="xsd:string")
+    assert [o["operationType"] for o in to_om_all([attr], CTX).native] == ["UPSERT_PROPERTY"]
+
+
+def test_one_related_to_glossary_link_per_concept_pair() -> None:
+    ctx = replace(CTX, relationship_type_ids={"relatedTo": "rt-rel"})
+    billed = AddRelation(
+        op="add_relation", source="Order", relation_type="hasBilledTo", target="Customer"
+    )
+    shipped = AddRelation(
+        op="add_relation", source="Order", relation_type="hasShippedTo", target="Customer"
+    )
+    out = to_om_all([billed, shipped], ctx)
+    assert [o["operationType"] for o in out.glossary] == ["ADD_RELATIONSHIP"]
+    names = [o["property"]["name"] for o in out.native if o["operationType"] == "UPSERT_PROPERTY"]
+    assert names == ["Order.hasBilledTo", "Order.hasShippedTo"]  # native stays distinct
+
+
+def test_parent_term_is_created_before_its_child() -> None:
+    parent = AddConcept(op="add_concept", name="Status", description=text("s"))
+    child = AddConcept(op="add_concept", name="Shipped", parent="Status", description=text("c"))
+    ctx = replace(
+        CTX,
+        term_ids={**CTX.term_ids, "Status": draft_term_id(parent), "Shipped": draft_term_id(child)},
+    )
+    out = to_om_all([child, parent], ctx)
+    assert [o["term"]["name"] for o in out.glossary] == ["Status", "Shipped"]

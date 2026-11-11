@@ -404,6 +404,17 @@ def _term_refs(op: ProposalOperation) -> list[str]:
             return []
 
 
+def _native_refs(op: ProposalOperation) -> list[str]:
+    """Concepts whose class a native operation points at (their term IRI is needed)."""
+    match op:
+        case AddAttribute() | AddAxiom() | RemoveAttribute() | RemoveAxiom():
+            return [op.concept]
+        case AddRelation():
+            return [op.source, op.target]
+        case _:
+            return []
+
+
 def _updated_term(op: ProposalOperation) -> str | None:
     if isinstance(op, UpdateConcept):
         return _bare(op.fqn)
@@ -916,7 +927,7 @@ class ProposalService:
         wanted = {
             name
             for op in ops
-            for ref in _term_refs(op)
+            for ref in (*_term_refs(op), *_native_refs(op))
             if (name := _local_ref(ref, slug)) is not None and name not in created
         }
         if wanted:
@@ -952,12 +963,14 @@ class ProposalService:
             )
         native_ids: dict[str, str] = {}
         native_versions: dict[str, float] = {}
-        if target.ontology is not None and any(
-            isinstance(op, RemoveConcept | RemoveAttribute | RemoveAxiom) for op in ops
-        ):
+        native_classes: set[str] | None = None
+        removes = any(isinstance(op, RemoveConcept | RemoveAttribute | RemoveAxiom) for op in ops)
+        if target.ontology is not None and (removes or terms):
             concepts, properties, axioms = await _om(
                 f"listing the native members of {slug!r}", self._om.list_native_members(slug)
             )
+            # existing terms whose class the native ontology lacks get one (pair_existing)
+            native_classes = {str(iri) for m in concepts if (iri := m.get("iri")) is not None}
             for prefix, members in (("concept", concepts), ("attr", properties)):
                 for m in members:
                     _native_entry(native_ids, native_versions, f"{prefix}:{m.get('iri')}", m)
@@ -976,6 +989,7 @@ class ProposalService:
             relationship_type_ids=relationship_types,
             native_ids=native_ids,
             native_versions=native_versions,
+            native_classes=native_classes,
             paired=target.ontology is not None,
         )
 
@@ -1493,6 +1507,15 @@ class ProposalService:
                     else {
                         op.name for op in p.parts[index].operations if isinstance(op, AddConcept)
                     },
+                    # existing concepts whose class an earlier native op there declared
+                    declared_classes=()
+                    if index is None
+                    else {
+                        name
+                        for op in p.parts[index].operations
+                        for ref in _native_refs(op)
+                        if (name := _local_ref(ref, p.model)) is not None
+                    },
                 ),
             )
             for index, chunk in chunks
@@ -1544,11 +1567,14 @@ class ProposalService:
         if not axioms or target.ontology is None:
             return
         native = to_om_all(
-            [op for op in everything if isinstance(op, AddConcept | AddAttribute)], ctx
+            [op for op in everything if isinstance(op, AddConcept | AddAttribute | AddAxiom)], ctx
         ).native
         declared = {iri for item in native if (iri := _declared_iri(item)) is not None}
         for op in axioms:
-            body = dict(to_om_all([op], ctx).native[0]["axiom"])
+            item = next(
+                o for o in to_om_all([op], ctx).native if o["operationType"] == "UPSERT_AXIOM"
+            )
+            body = dict(item["axiom"])
             for key in ("id", "fullyQualifiedName"):
                 body.pop(key, None)
             name = str(body["name"])
