@@ -144,3 +144,15 @@ def test_secret_from_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> No
     assert "k" * 40 not in repr(settings)
     token, _ = confirm_tokens_from_settings(settings).issue("t", ARGS, "d")
     confirm_tokens_from_settings(settings).verify(token, "t", ARGS, "d")
+
+
+def test_overlong_token_is_invalid_before_parsing() -> None:
+    err = _fail(_tokens(Clock()), "a" * 2049)
+    assert err.message == "confirm token invalid"
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), object(), {1, 2}])
+def test_unbindable_args_are_validation_error(bad: object) -> None:
+    with pytest.raises(LakeloomError) as exc:
+        _tokens(Clock()).issue("t", {"x": bad}, "d")
+    assert exc.value.code == "validation_error"

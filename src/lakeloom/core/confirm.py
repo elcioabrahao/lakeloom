@@ -33,6 +33,7 @@ __all__ = [
 
 MIN_SECRET_BYTES = 32
 _VERSION = 1
+MAX_TOKEN_LENGTH = 2048
 _log = logging.getLogger("lakeloom.confirm")
 
 
@@ -48,7 +49,14 @@ def _unb64(text: str) -> bytes:
 
 def args_digest(args: Mapping[str, Any]) -> str:
     bound = {k: v for k, v in args.items() if k != "confirm_token"}
-    canonical = json.dumps(bound, sort_keys=True, separators=(",", ":"), default=str)
+    try:
+        canonical = json.dumps(bound, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        raise LakeloomError(
+            "validation_error",
+            "arguments cannot be bound to a confirm token",
+            "Pass only JSON values (no NaN/Infinity or unsupported types).",
+        ) from None
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -114,6 +122,8 @@ class ConfirmTokens:
             )
 
     def _parse(self, token: str) -> dict[str, Any]:
+        if len(token) > MAX_TOKEN_LENGTH:
+            raise _invalid()
         try:
             part, mac_part = token.split(".")
             if not hmac.compare_digest(self._mac(part), _unb64(mac_part)):

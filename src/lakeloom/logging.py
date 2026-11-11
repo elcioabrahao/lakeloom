@@ -14,6 +14,7 @@ from typing import Any, TextIO
 
 from opentelemetry import trace
 
+AUDIT_LOGGER = "lakeloom.audit"
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 
 _STANDARD = frozenset(logging.makeLogRecord({}).__dict__) | {"message", "asctime", "taskName"}
@@ -51,3 +52,15 @@ def configure_logging(level: str, stream: TextIO | None = None) -> None:
     handler._lakeloom = True  # type: ignore[attr-defined]  # pyright: ignore[reportAttributeAccessIssue]
     root.addHandler(handler)
     root.setLevel(level.upper())
+    # The audit trail (NFR-SEC-12) is not subject to LAKELOOM_LOG_LEVEL: its own handler and
+    # level, no propagation (so no double emission).
+    audit = logging.getLogger(AUDIT_LOGGER)
+    for old in list(audit.handlers):
+        if getattr(old, "_lakeloom", False):
+            audit.removeHandler(old)
+    audit_handler = logging.StreamHandler(handler.stream)
+    audit_handler.setFormatter(JsonFormatter())
+    audit_handler._lakeloom = True  # type: ignore[attr-defined]  # pyright: ignore[reportAttributeAccessIssue]
+    audit.addHandler(audit_handler)
+    audit.setLevel(logging.INFO)
+    audit.propagate = False

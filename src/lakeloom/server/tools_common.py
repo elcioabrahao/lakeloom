@@ -6,11 +6,12 @@ any other failure behind ``upstream_unavailable`` (its text can carry upstream d
 and counts the call in ``lakeloom_tool_calls_total`` with outcome ok/error/forbidden.
 """
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from mcp.server.mcpserver import Context
 from mcp.types import CallToolResult, TextContent
@@ -91,10 +92,13 @@ async def guarded(
     """Run ``body`` for a caller holding ``scope`` inside a span; typed errors and metrics.
 
     ``audited=True`` (writes and review decisions, NFR-SEC-12) also writes an audit record
-    with the outcome, to the JSON log and, when ``audit`` is given, the state store. The
-    body can set the model / proposal / change set through ``current_audit()``; arguments
-    are never recorded. An audit failure never fails the call.
+    with the outcome, to the JSON log and the state store (``audit`` is then required: the
+    call fails closed with ``RuntimeError`` otherwise). The body can set the model / proposal
+    / change set through ``current_audit()``; arguments are never recorded. An audit failure
+    never fails the call, and a cancelled call is still audited (error_code ``cancelled``).
     """
+    if audited and audit is None:
+        raise RuntimeError(f"tool {tool} is audited but no audit repository was passed")
     principal = current_principal(ctx)
     audit_ctx = AuditContext()
     token = audit_context.set(audit_ctx)
@@ -106,15 +110,25 @@ async def guarded(
             "lakeloom.principal_type": "unknown" if principal is None else principal.type.value,
         },
     ) as span:
+        result, outcome = CallToolResult(content=[]), "error"
         try:
             result, outcome = await _run(tool, scope, principal, body)
+        except BaseException:
+            # Cancelled (or otherwise aborted) writes are audited too.
+            if audited:
+                await asyncio.shield(
+                    _audit(tool, ctx, principal, audit_ctx, "error", "cancelled", audit)
+                )
+            raise
         finally:
             audit_context.reset(token)
         span.set_attribute("lakeloom.outcome", outcome)
         if outcome != "ok":
             span.set_status(Status(StatusCode.ERROR, outcome))
     if audited:
-        await _audit(tool, ctx, principal, audit_ctx, result, outcome, audit)
+        code = _error_code(result)
+        status = "ok" if outcome == "ok" else "forbidden" if code == "forbidden" else "error"
+        await asyncio.shield(_audit(tool, ctx, principal, audit_ctx, status, code, audit))
     TOOL_CALLS.labels(tool=tool, outcome=outcome).inc()
     record_tool_call(tool, outcome)
     return result
@@ -148,21 +162,24 @@ async def _run(
         )
 
 
+def _error_code(result: CallToolResult) -> str | None:
+    structured: dict[str, Any] = result.structured_content or {}
+    error = cast(dict[str, object], structured.get("error") or {})
+    code = error.get("code")
+    return code if isinstance(code, str) else None
+
+
 async def _audit(
     tool: str,
     ctx: Context,
     principal: Principal | None,
     audit_ctx: AuditContext,
-    result: CallToolResult,
-    outcome: str,
+    status: Literal["ok", "error", "forbidden"],
+    code: str | None,
     audit: AuditRepository | None,
 ) -> None:
-    structured: dict[str, Any] = result.structured_content or {}
-    error = cast(dict[str, object], structured.get("error") or {})
-    code = error.get("code")
-    await record(
-        audit,
-        AuditRecord(
+    try:
+        rec = AuditRecord(
             at=datetime.now(UTC),
             principal_subject="anonymous" if principal is None else principal.subject,
             principal_type="unknown" if principal is None else principal.type.value,
@@ -171,7 +188,10 @@ async def _audit(
             model=audit_ctx.model,
             proposal_id=audit_ctx.proposal_id,
             change_set_id=audit_ctx.change_set_id,
-            result="ok" if outcome == "ok" else "forbidden" if code == "forbidden" else "error",
-            error_code=code if isinstance(code, str) else None,
-        ),
-    )
+            result=status,
+            error_code=code,
+        )
+    except Exception as exc:
+        _log.error("audit record for %s failed (%s)", tool, type(exc).__name__)
+        return
+    await record(audit, rec)

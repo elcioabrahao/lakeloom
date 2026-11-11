@@ -1,12 +1,14 @@
 """Audit records: JSON line + state store (NFR-SEC-12)."""
 
+import asyncio
+import io
 import json
 import logging
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import cast
 
 import pytest
 from mcp.server.mcpserver import Context
@@ -172,4 +174,89 @@ def test_current_audit_without_guard_is_detached() -> None:
     assert current_audit().model is None
 
 
-_ = Any
+def _ctx_named(name: str) -> Context:
+    params = SimpleNamespace(client_info=SimpleNamespace(name=name))
+    return cast(
+        Context,
+        SimpleNamespace(
+            request_context=SimpleNamespace(request=None),
+            session=SimpleNamespace(client_params=params),
+        ),
+    )
+
+
+def test_oversized_fields_are_truncated_to_column_width() -> None:
+    rec = _rec().model_copy(update={})
+    big = AuditRecord.model_validate(
+        rec.model_dump() | {"client": "c" * 300, "model": "m" * 300, "proposal_id": "p" * 100}
+    )
+    assert len(big.client or "") == 255 and len(big.model or "") == 255
+    assert len(big.proposal_id or "") == 64
+
+
+async def test_guarded_audit_survives_oversized_client_name(engine: AsyncEngine) -> None:
+    repo = AuditRepository(engine)
+    local_principal.set(_principal())
+
+    async def body(_p: Principal) -> CallToolResult:
+        return _ok()
+
+    await guarded("t", _ctx_named("c" * 300), "lakeloom:propose", body, audited=True, audit=repo)
+    [r] = (await repo.list(None, None, 10)).items
+    assert r.client == "c" * 255
+
+
+async def test_audited_without_repository_fails_closed() -> None:
+    local_principal.set(_principal())
+
+    async def body(_p: Principal) -> CallToolResult:
+        raise AssertionError("must not run")
+
+    with pytest.raises(RuntimeError):
+        await guarded("t", _ctx(), "lakeloom:propose", body, audited=True)
+
+
+def test_audit_line_emitted_at_warning_root_level_once() -> None:
+    buf = io.StringIO()
+    configure_logging("WARNING", stream=buf)
+    try:
+        logging.getLogger("lakeloom.audit").info("audit", extra=_rec().model_dump(mode="json"))
+        logging.getLogger("lakeloom.other").info("hidden")
+    finally:
+        configure_logging("INFO")
+    lines = [json.loads(x) for x in buf.getvalue().splitlines()]
+    assert [x["logger"] for x in lines] == ["lakeloom.audit"]
+
+
+async def test_cancelled_call_is_still_audited(engine: AsyncEngine) -> None:
+    repo = AuditRepository(engine)
+    local_principal.set(_principal())
+    started = asyncio.Event()
+
+    async def body(_p: Principal) -> CallToolResult:
+        started.set()
+        await asyncio.sleep(10)
+        return _ok()
+
+    task = asyncio.create_task(
+        guarded("t", _ctx(), "lakeloom:propose", body, audited=True, audit=repo)
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    [r] = (await repo.list(None, None, 10)).items
+    assert (r.result, r.error_code) == ("error", "cancelled")
+
+
+async def test_audit_record_build_failure_never_fails_call(engine: AsyncEngine) -> None:
+    local_principal.set(_principal())
+    bad = cast(Context, SimpleNamespace(request_context=SimpleNamespace(request=None), session=1))
+
+    async def body(_p: Principal) -> CallToolResult:
+        return _ok()
+
+    result = await guarded(
+        "t", bad, "lakeloom:propose", body, audited=True, audit=AuditRepository(engine)
+    )
+    assert not result.is_error

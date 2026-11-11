@@ -2,10 +2,14 @@
 
 import asyncio
 import os
+from importlib.resources import as_file, files
 from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import inspect, text
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from lakeloom.state.db import create_engine, upgrade
@@ -48,6 +52,27 @@ async def test_0002_creates_proposals_and_audit_log(tmp_path: Path) -> None:
         await engine.dispose()
 
 
+async def test_0002_downgrade_drops_tables_keeps_0001(tmp_path: Path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'state.db'}")
+    try:
+        await upgrade(engine)
+
+        def down(conn: Connection) -> None:
+            with as_file(files("lakeloom.state") / "migrations") as script_dir:
+                cfg = Config()
+                cfg.set_main_option("script_location", str(script_dir))
+                cfg.attributes["connection"] = conn
+                command.downgrade(cfg, "0001")
+
+        async with engine.begin() as conn:
+            await conn.run_sync(down)
+        tables = set(await _tables(engine))
+        assert "scan_records" in tables
+        assert not {"proposals", "audit_log"} & tables
+    finally:
+        await engine.dispose()
+
+
 @pytest.mark.contract
 async def test_upgrade_postgres() -> None:
     url = os.environ.get("LAKELOOM_TEST_DB_URL")
@@ -79,3 +104,40 @@ async def test_concurrent_upgrades_postgres() -> None:
     finally:
         for e in engines:
             await e.dispose()
+
+
+@pytest.mark.contract
+async def test_postgres_audit_oversized_client_is_stored() -> None:
+    from datetime import UTC, datetime
+
+    from lakeloom.core.audit import AuditRecord
+    from lakeloom.state.audit import AuditRepository
+
+    url = os.environ.get("LAKELOOM_TEST_DB_URL")
+    if not url:
+        pytest.skip("LAKELOOM_TEST_DB_URL not set")
+    engine = create_engine(url)
+    try:
+        await upgrade(engine)
+        rec = AuditRecord(
+            at=datetime.now(UTC),
+            principal_subject="s" * 400,
+            principal_type="agent",
+            client="c" * 300,
+            tool="t" * 200,
+            model="m" * 300,
+            proposal_id="p" * 100,
+            change_set_id="x" * 300,
+            result="ok",
+            error_code="e" * 100,
+        )
+        await AuditRepository(engine).add(rec)
+        async with engine.connect() as conn:
+            n = (
+                await conn.execute(
+                    text("SELECT count(*) FROM audit_log WHERE length(client) = 255")
+                )
+            ).scalar_one()
+        assert n >= 1
+    finally:
+        await engine.dispose()

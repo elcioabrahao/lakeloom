@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationInfo, field_validator
 
 from lakeloom.state.audit import AuditRepository
 
@@ -20,6 +20,20 @@ __all__ = ["AuditContext", "AuditRecord", "audit_context", "current_audit", "rec
 
 _log = logging.getLogger("lakeloom.audit")
 _errors = logging.getLogger("lakeloom.audit.errors")
+
+
+# Column widths of ``audit_log``: client-controlled values are cut to fit, so PostgreSQL never
+# rejects (and the record is never lost on) an oversized client name.
+MAX_LENGTHS = {
+    "principal_subject": 255,
+    "principal_type": 64,
+    "client": 255,
+    "tool": 128,
+    "model": 255,
+    "proposal_id": 64,
+    "change_set_id": 255,
+    "error_code": 64,
+}
 
 
 class AuditRecord(BaseModel):
@@ -33,6 +47,13 @@ class AuditRecord(BaseModel):
     change_set_id: str | None = None
     result: Literal["ok", "error", "forbidden"]
     error_code: str | None = None
+
+    @field_validator(*MAX_LENGTHS, mode="after")
+    @classmethod
+    def _fit_column(cls, value: str | None, info: ValidationInfo) -> str | None:
+        if value is None or info.field_name is None:
+            return value
+        return value[: MAX_LENGTHS[info.field_name]]
 
 
 @dataclass
