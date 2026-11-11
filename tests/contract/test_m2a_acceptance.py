@@ -8,6 +8,10 @@ reruns and leftovers never collide. Teardown discards the proposals through the 
 (dry run + confirm) and hard-deletes the change sets, the ontology and the glossary, then
 checks they are gone (404 with ``include=all``) and that the seeded ``retail`` glossary is
 untouched. Nothing is applied and no release is sealed.
+
+The incremental variant proposes ``customers`` first, then ``customers`` + ``orders`` while the
+first proposal is still open: the second proposal holds ``Order`` and drops the relation to the
+pending ``Customer`` with a warning instead of failing.
 """
 
 import json
@@ -60,6 +64,41 @@ async def _discard(url: str, token: str, proposal_id: str) -> None:
     confirm = data(preview)["confirm_token"]
     args = {"proposal_id": proposal_id, "confirm_token": confirm}
     assert ok(await call(url, token, "discard_proposal", args))["discarded"] is True
+
+
+def _change_sets(out: dict[str, Any]) -> list[str]:
+    return [
+        cs
+        for part in out["proposal"]["parts"]
+        for cs in part["change_set_ids"].values()
+        if cs is not None
+    ]
+
+
+async def _create_model(url: str, admin_token: str, slug: str) -> None:
+    args = {"name": slug, "description": "M2a acceptance throwaway model"}
+    preview = ok(await call(url, admin_token, "create_model", args))
+    confirmed = {**args, "confirm_token": preview["confirm_token"]}
+    assert ok(await call(url, admin_token, "create_model", confirmed))["created"] is True
+
+
+async def _teardown(
+    url: str, token: str, om: httpx.AsyncClient, slug: str, proposals: list[str], cs: list[str]
+) -> None:
+    for pid in proposals:
+        await _discard(url, token, pid)
+    for cs_id in cs:
+        await om.delete(f"/api/v1/ontologyChangeSets/{cs_id}", params={"hardDelete": "true"})
+    for kind in ("ontologies", "glossaries"):
+        await om.delete(
+            f"/api/v1/{kind}/name/{slug}", params={"hardDelete": "true", "recursive": "true"}
+        )
+    for path in (
+        f"/api/v1/ontologies/name/{slug}",
+        f"/api/v1/glossaries/name/{slug}",
+        *(f"/api/v1/ontologyChangeSets/{c}" for c in cs),
+    ):
+        assert (await om.get(path, params={"include": "all"})).status_code == 404, path
 
 
 async def test_m2a_acceptance_bootstrap_flow(
@@ -147,7 +186,11 @@ async def test_m2a_acceptance_bootstrap_flow(
         rerun = await call(
             lakeloom_url, agent_token, "propose_from_scan", {"scan_id": rescan_id, "model": slug}
         )
-        assert rerun.is_error is True
+        if rerun.is_error is not True:  # unexpected: record it so teardown removes it
+            extra = data(rerun)
+            proposals.append(str(extra["proposal_id"]))
+            change_sets += _change_sets(extra)
+            pytest.fail("re-run proposed again: " + json.dumps(extra)[:2000])
         again = data(rerun)
         assert again["error"]["code"] == "validation_error"
         if not again["error"]["message"].startswith("nothing to propose"):
@@ -155,20 +198,56 @@ async def test_m2a_acceptance_bootstrap_flow(
         assert again["warnings"] or again["matches"]
         assert all(w.startswith(f"already proposed in {pid}: ") for w in again["warnings"])
     finally:
-        for pid in proposals:
-            await _discard(lakeloom_url, agent_token, pid)
-        for cs_id in change_sets:
-            await om.delete(f"/api/v1/ontologyChangeSets/{cs_id}", params={"hardDelete": "true"})
-        for kind in ("ontologies", "glossaries"):
-            await om.delete(
-                f"/api/v1/{kind}/name/{slug}", params={"hardDelete": "true", "recursive": "true"}
+        await _teardown(lakeloom_url, agent_token, om, slug, proposals, change_sets)
+    after = (await om.get("/api/v1/glossaries/name/retail")).raise_for_status().json()
+    assert (after["version"], after["updatedAt"]) == (retail["version"], retail["updatedAt"])
+
+
+async def test_m2a_acceptance_incremental_scan(
+    lakeloom_url: str, agent_token: str, admin_agent_token: str, om: httpx.AsyncClient
+) -> None:
+    """customers first, then customers + orders while the first proposal is open (FR-PRO-02)."""
+    slug = f"retail_inc_{uuid.uuid4().hex[:8]}"
+    retail = (await om.get("/api/v1/glossaries/name/retail")).raise_for_status().json()
+    proposals: list[str] = []
+    change_sets: list[str] = []
+    try:
+        scan_id = await scan(lakeloom_url, agent_token)
+        await _create_model(lakeloom_url, admin_agent_token, slug)
+        args: dict[str, Any] = {"scan_id": scan_id, "model": slug, "tables": ["customers"]}
+        first = ok(await call(lakeloom_url, agent_token, "propose_from_scan", args))
+        proposals.append(str(first["proposal_id"]))
+        change_sets += _change_sets(first)
+        args["tables"] = ["customers", "orders"]
+        second = ok(await call(lakeloom_url, agent_token, "propose_from_scan", args))
+        proposals.append(str(second["proposal_id"]))
+        change_sets += _change_sets(second)
+        concepts = [
+            op["name"]
+            for part in second["proposal"]["parts"]
+            for op in part["operations"]
+            if op["op"] == "add_concept"
+        ]
+        assert concepts == ["Order"]
+        relations = [
+            op
+            for part in second["proposal"]["parts"]
+            for op in part["operations"]
+            if op["op"] == "add_relation"
+        ]
+        assert not [r for r in relations if r["target"] == "Customer"]
+        assert any(
+            w.endswith(
+                f"depends on Customer pending in proposal {first['proposal_id']}; "
+                "propose again after it is applied"
             )
-    for path in (
-        f"/api/v1/ontologies/name/{slug}",
-        f"/api/v1/glossaries/name/{slug}",
-        *(f"/api/v1/ontologyChangeSets/{c}" for c in change_sets),
-    ):
-        assert (await om.get(path, params={"include": "all"})).status_code == 404, path
+            for w in second["warnings"]
+        ), second["warnings"]
+        for cs_id in _change_sets(second):
+            cs = (await om.get(f"/api/v1/ontologyChangeSets/{cs_id}")).raise_for_status().json()
+            assert cs["state"] == "DRAFT"
+    finally:
+        await _teardown(lakeloom_url, agent_token, om, slug, proposals, change_sets)
     after = (await om.get("/api/v1/glossaries/name/retail")).raise_for_status().json()
     assert (after["version"], after["updatedAt"]) == (retail["version"], retail["updatedAt"])
 

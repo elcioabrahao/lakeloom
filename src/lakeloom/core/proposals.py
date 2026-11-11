@@ -56,10 +56,10 @@ from pydantic import BaseModel, Field
 
 from lakeloom.config import Settings
 from lakeloom.core.audit import AuditContext, AuditRecord, current_audit, record
-from lakeloom.core.concepts import direct_glossary_tags, explain_concept
+from lakeloom.core.concepts import direct_glossary_tags, resolve_concept
 from lakeloom.core.confirm import ConfirmTokens
 from lakeloom.core.context import resolve_asset
-from lakeloom.core.dedupe import dedupe
+from lakeloom.core.dedupe import dedupe, import_slugs, screen
 from lakeloom.core.mapper import map_scan
 from lakeloom.core.model_policy import ModelPolicyEntry, policy_for
 from lakeloom.core.models import ModelInfo, ModelService
@@ -128,6 +128,8 @@ DRAFT_TERM_VERSION = 0.1  # a term created in the same proposal; OM starts terms
 PROVENANCE_FENCE = "lakeloom-provenance"
 _NATIVE_OPS = (AddConcept, RemoveConcept, AddAttribute, RemoveAttribute, AddAxiom, RemoveAxiom)
 _MAX_HINT_ITEMS = 20
+_MAX_DETAIL_ITEMS = 100  # per list in NothingToPropose.details()
+AGENT_RULE = "R-AGENT"  # the only rule id of an operation an agent passed (not trusted)
 _log = logging.getLogger(__name__)
 _OM_READS = 8  # concurrent change-set reads
 
@@ -277,9 +279,13 @@ class NothingToPropose(LakeloomError):
         self.warnings = warnings
 
     def details(self) -> dict[str, Any]:
+        """Matches and warnings, at most 100 of each; ``*_truncated`` counts the rest."""
+        cap = _MAX_DETAIL_ITEMS
         return {
-            "matches": [m.model_dump(mode="json") for m in self.matches],
-            "warnings": list(self.warnings),
+            "matches": [m.model_dump(mode="json") for m in self.matches[:cap]],
+            "warnings": list(self.warnings[:cap]),
+            "matches_truncated": max(0, len(self.matches) - cap),
+            "warnings_truncated": max(0, len(self.warnings) - cap),
         }
 
 
@@ -358,8 +364,9 @@ def _bare(ref: str) -> str:
 
 
 def _local_ref(ref: str, model: str) -> str | None:
-    """The bare name of a ref to ``model`` (``None`` for a ref into another model)."""
-    if "." in ref and ref.rsplit(".", 1)[0] != model:
+    """The bare name of a ref to ``model`` (``None`` for a ref into another model). An FQN's
+    first segment is the model (child terms nest: ``retail.Order.OrderStatus``)."""
+    if "." in ref and ref.split(".", 1)[0] != model:
         return None
     return _bare(ref)
 
@@ -896,11 +903,7 @@ class ProposalService:
             for name in sorted(wanted):
                 found = by_name.get(name, [])
                 if not found:
-                    raise _fail(
-                        f"concept {name!r} does not exist in model {slug!r}",
-                        "propose it with add_concept in the same proposal, or check the "
-                        "name with find_concepts",
-                    )
+                    raise await self._missing_concept(slug, name)
                 if len(found) > 1:
                     fqns = ", ".join(code_span(t.fully_qualified_name) for t in found)
                     raise _fail(f"concept name {name!r} is ambiguous in {slug!r}", fqns)
@@ -953,6 +956,22 @@ class ProposalService:
             native_ids=native_ids,
             native_versions=native_versions,
             paired=target.ontology is not None,
+        )
+
+    async def _missing_concept(self, slug: str, name: str) -> LakeloomError:
+        """The error for a referenced concept OM does not have: pending in another open
+        proposal (wait for it), or unknown (propose it here)."""
+        pid = (await self._repo.pending_op_keys(slug)).get(f"concept:{name}")
+        if pid is not None:
+            return _fail(
+                f"concept {name!r} does not exist in model {slug!r} yet",
+                f"{name} is pending in proposal {pid}; propose again after it is applied "
+                "(do not propose it a second time)",
+            )
+        return _fail(
+            f"concept {name!r} does not exist in model {slug!r}",
+            "propose it with add_concept in the same proposal, or check the name with "
+            "find_concepts",
         )
 
     @staticmethod
@@ -1305,15 +1324,40 @@ class ProposalService:
         principal: Caller,
         client: str | None,
     ) -> Proposal:
+        stamped = list(operations)
+
         async def run(trail: AuditContext) -> tuple[Proposal, str | None]:
             trail.proposal_id = proposal_id
             async with self._lock(proposal_id):
                 p = await self._repo.get(proposal_id)
                 trail.model = p.model
-                await self._append(trail, p, list(operations))
+                self._require_draft(p, "changed")
+                ops: list[ProposalOperation] = []
+                realized: list[str] = []
+                for op in stamped:
+                    out = await self._agent_realization(p.model, op)
+                    if isinstance(out, str):
+                        realized.append(out)
+                    else:
+                        ops.append(out)
+                if not ops:
+                    raise NothingToPropose([], realized)
+                await self._append(trail, p, ops, screened=True, dropped=realized)
                 return p, None
 
         return await self._audited("propose_change", principal, client, run)
+
+    async def _agent_realization(
+        self, model: str, op: ProposalOperation
+    ) -> ProposalOperation | str:
+        """An ``add_realization`` from propose_change resolved like propose_realization's
+        (a string: why it was dropped)."""
+        if not isinstance(op, AddRealization):
+            return op
+        resolved = await self._realization(model, op.concept, op.asset_fqn, op.column, strict=False)
+        if isinstance(resolved, str):
+            return resolved
+        return resolved.model_copy(update={"evidence": [*resolved.evidence, *op.evidence][:20]})
 
     @staticmethod
     def _require_draft(p: Proposal, action: str) -> None:
@@ -1324,8 +1368,16 @@ class ProposalService:
             )
 
     async def _append(
-        self, trail: AuditContext, p: Proposal, operations: list[ProposalOperation]
+        self,
+        trail: AuditContext,
+        p: Proposal,
+        operations: list[ProposalOperation],
+        *,
+        screened: bool = False,
+        dropped: Sequence[str] = (),
     ) -> None:
+        """Append ``operations``; ``screened`` also applies FR-PRO-02 (:func:`screen`): ops
+        pending in another proposal or naming an existing concept/attribute are dropped."""
         self._require_draft(p, "changed")
         existing = p.operations()
         have = {op_key(op) for op in existing}
@@ -1343,6 +1395,32 @@ class ProposalService:
                 "nothing to add: every operation is already in this proposal",
                 "; ".join(code_span(k) for k in skipped[:_MAX_HINT_ITEMS]) or "pass operations",
             )
+        dropped = list(dropped)
+        found: list[ProposalMatch] = []
+        if screened:
+            result = await screen(
+                new,
+                model=p.model,
+                models=self._models,
+                pending=await self._repo.pending_op_keys(p.model),
+                own=p.id,
+            )
+            new = result.operations
+            dropped += result.warnings
+            found = [
+                ProposalMatch(
+                    op_key=m.op_key,
+                    candidate_fqn=m.candidate_fqn,
+                    confidence=m.confidence,
+                    matched_on=m.matched_on,
+                    action=m.action,
+                )
+                for m in result.matches
+            ]
+            if not new:
+                raise NothingToPropose(
+                    found, [*dropped, *(f"already in this proposal: {k}" for k in skipped)]
+                )
         updated = {n for op in existing if (n := _updated_term(op)) is not None}
         clash = sorted({n for op in new if (n := _updated_term(op)) in updated})
         if clash:
@@ -1383,6 +1461,8 @@ class ProposalService:
         ]
         await self._validate_axioms(target, [*existing, *new], new, ctx)
         p.warnings.extend(f"already in this proposal: {k}" for k in skipped)
+        p.warnings.extend(w for w in dropped if w not in p.warnings)
+        p.matches.extend(m for m in found if m not in p.matches)
         p.warnings.extend(w for w in self._relation_warnings(new, ctx) if w not in p.warnings)
         for index, chunk, om in planned:
             noted = (len(p.abandoned_change_sets), len(p.warnings))
@@ -1478,13 +1558,15 @@ class ProposalService:
                         )
                     trail.model = p.model
                     self._require_draft(p, "changed")
-                    op = await self._realization(p.model, concept, asset, column)
+                    op = cast(
+                        "AddRealization", await self._realization(p.model, concept, asset, column)
+                    )
                     await self._append(trail, p, [op])
                     return p, None
             if model is None:
                 raise _fail("pass a model or a proposal_id", "name the model to propose into")
             await self._models.get_model(model)
-            op = await self._realization(model, concept, asset, column)
+            op = cast("AddRealization", await self._realization(model, concept, asset, column))
             p = await self._new_realization_proposal(model, op, principal, client)
             trail.proposal_id = p.id
             return p, None
@@ -1492,9 +1574,14 @@ class ProposalService:
         return await self._audited("propose_realization", principal, client, run)
 
     async def _realization(
-        self, model: str, concept: str, asset: str, column: str | None
-    ) -> AddRealization:
-        detail = await explain_concept(self._models, self._om, concept)
+        self, model: str, concept: str, asset: str, column: str | None, *, strict: bool = True
+    ) -> AddRealization | str:
+        """A realization of a concept of ``model`` or a model it imports (plain resolve, no
+        assets read). When it is pending in an open proposal or the asset already realizes
+        the concept: ``validation_error`` (``strict``), else the reason as a warning (the
+        pending check is then left to :func:`screen`)."""
+        within = [model, *await import_slugs(self._models, model)]
+        ref = await resolve_concept(self._models, self._om, concept, within=within)
         resolved = await resolve_asset(asset, sources=self._sources, om=self._om)
         if column is not None and resolved.column is not None and column != resolved.column:
             raise _fail(
@@ -1507,16 +1594,17 @@ class ProposalService:
             )
         op = AddRealization(
             op="add_realization",
-            concept=detail.concept.fqn,
+            concept=ref.fqn,
             asset_fqn=resolved.table_fqn,
             column=resolved.column,
-            rule_ids=["R-AGENT"],
+            rule_ids=[AGENT_RULE],
             evidence=[Evidence(kind="agent", ref=resolved.fqn)],
         )
-        pending = await self._repo.pending_op_keys(model)
-        key = op_key(op)
-        if key in pending:
-            raise _fail(f"already proposed in {pending[key]}: {key}", "review that proposal")
+        if strict:
+            pending = await self._repo.pending_op_keys(model)
+            key = op_key(op)
+            if key in pending:
+                raise _fail(f"already proposed in {pending[key]}: {key}", "review that proposal")
         table = await _om(
             f"reading table {resolved.table_fqn}", self._om.get_table_by_fqn(resolved.table_fqn)
         )
@@ -1526,11 +1614,11 @@ class ProposalService:
             else:
                 col = next((c for c in table.columns if c.name == resolved.column), None)
                 tags = col.tags if col else []
-            if detail.concept.fqn in direct_glossary_tags(tags, column=resolved.column is not None):
-                raise _fail(
-                    f"{resolved.fqn} already realizes {detail.concept.fqn}",
-                    "nothing to propose; call get_asset_context to see its concepts",
-                )
+            if ref.fqn in direct_glossary_tags(tags, column=resolved.column is not None):
+                why = f"{resolved.fqn} already realizes {ref.fqn}"
+                if not strict:
+                    return f"{why}; dropped: {op_key(op)}"
+                raise _fail(why, "nothing to propose; call get_asset_context to see its concepts")
         return op
 
     async def _new_realization_proposal(

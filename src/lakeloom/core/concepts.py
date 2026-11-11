@@ -56,6 +56,7 @@ __all__ = [
     "find_assets_for_concept",
     "find_concepts",
     "realizing_tables",
+    "resolve_concept",
     "score_candidates",
     "summarize_concept",
 ]
@@ -393,11 +394,14 @@ def _not_found(concept: str) -> LakeloomError:
     return LakeloomError("not_found", f"Unknown concept {concept!r}", _FIND_HINT)
 
 
-async def _resolve_by_name(models: ModelService, concept: str) -> _Resolved:
+async def _resolve_by_name(
+    models: ModelService, concept: str, within: Sequence[str] | None = None
+) -> _Resolved:
     """A plain name: the highest-ranked tier of matches (name > synonym > local name) resolves
-    when it holds exactly one concept; otherwise the candidates are listed."""
+    when it holds exactly one concept; otherwise the candidates are listed. ``within`` limits
+    the search to those models."""
     hits: list[tuple[float, _Graph, URIRef]] = []
-    for slug in await _all_slugs(models):
+    for slug in await _all_slugs(models) if within is None else within:
         try:
             g = await _graph(models, slug)
         except LakeloomError as exc:
@@ -425,12 +429,33 @@ async def _resolve_by_name(models: ModelService, concept: str) -> _Resolved:
     )
 
 
-async def _resolve(models: ModelService, om: OMClient, concept: str) -> _Resolved:
-    """Resolve an IRI, a term UUID, a term FQN or a plain name (FR-CTX-03)."""
+async def resolve_concept(
+    models: ModelService, om: OMClient, concept: str, *, within: Sequence[str]
+) -> ConceptRef:
+    """Resolve ``concept`` (IRI, term UUID, FQN or name) to a concept of one of the models
+    ``within``; no assets are read. A concept of another model is a ``validation_error``."""
+    ref = (await _resolve(models, om, concept, within)).ref
+    if ref.model not in within:
+        allowed = ", ".join(f"`{w}`" for w in within)
+        raise LakeloomError(
+            "validation_error",
+            f"concept {ref.fqn!r} is in model {ref.model!r}, not in {within[0]!r} or a model "
+            "it imports",
+            f"use a concept of {allowed}",
+        )
+    return ref
+
+
+async def _resolve(
+    models: ModelService, om: OMClient, concept: str, within: Sequence[str] | None = None
+) -> _Resolved:
+    """Resolve an IRI, a term UUID, a term FQN or a plain name (FR-CTX-03); a plain name or
+    IRI is looked up only ``within`` those models when given."""
     concept = concept.strip()
+    slugs = within
     if "://" in concept or concept.startswith("urn:"):
         node = URIRef(concept)
-        for slug in await _all_slugs(models):
+        for slug in await _all_slugs(models) if slugs is None else slugs:
             g = await _graph(models, slug)
             if node in g.concepts:
                 return _Resolved(g, node)
@@ -450,7 +475,7 @@ async def _resolve(models: ModelService, om: OMClient, concept: str) -> _Resolve
         found = await _by_fqn(models, concept)
         if found is not None:
             return _Resolved(*found)
-    return await _resolve_by_name(models, concept)
+    return await _resolve_by_name(models, concept, slugs)
 
 
 async def _by_fqn(models: ModelService, fqn: str) -> tuple[_Graph, URIRef] | None:

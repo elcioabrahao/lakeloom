@@ -692,3 +692,11 @@ def test_terms_and_classes_are_declared_before_operations_that_reference_them() 
     kinds = [o["operationType"] for o in out.native]
     assert kinds[:2] == ["UPSERT_CONCEPT", "UPSERT_CONCEPT"]
     assert sorted(kinds[2:]) == ["UPSERT_PROPERTY", "UPSERT_PROPERTY"]
+
+
+def test_nested_fqn_of_own_model_is_local() -> None:
+    """``retail.Order.OrderStatus`` (a child term's FQN) is a ref into the model itself."""
+    nested = f"{CTX.glossary_name}.Order.OrderStatus"
+    attr = AddAttribute(op="add_attribute", concept=nested, name="code", datatype="xsd:string")
+    (item,) = to_om(attr, CTX).native
+    assert item["property"]["domain"] == [BASE + "OrderStatus"]

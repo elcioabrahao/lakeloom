@@ -493,3 +493,21 @@ async def test_unknown_asset_keeps_concept_with_warning() -> None:
     )
     assert [c.name for c in of(res, AddConcept)] == ["Order"]
     assert any("no OM asset" in w for w in res.warnings)
+
+
+# --- final fix wave --------------------------------------------------------------------------
+
+
+async def test_ops_on_a_concept_pending_elsewhere_are_dropped_with_warning() -> None:
+    """Incremental scan: Customer is pending in prop_A, so the second scan cannot refer to it
+    (OM has no term yet) — the relation is dropped instead of failing the whole call."""
+    first = await run([customers()], turtles={"retail": PREFIXES})
+    pending = {op_key(o): "prop_A" for o in first.operations}
+    res = await run([customers(), orders()], turtles={"retail": PREFIXES}, pending=pending)
+    keys = [op_key(o) for o in res.operations]
+    assert "concept:Order" in keys
+    assert not [k for k in keys if "Customer" in k]
+    assert (
+        "rel:Order|hasCustomer|Customer depends on Customer pending in proposal prop_A; "
+        "propose again after it is applied" in res.warnings
+    )

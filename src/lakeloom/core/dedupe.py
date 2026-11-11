@@ -12,7 +12,14 @@ Input is the mapper's operations. Output is the operations a proposal should rea
   realized instead (unless OM already tags it);
 * an operation whose :func:`op_key` is in an open proposal is dropped with the proposal id;
 * relations, mappings, axioms and realizations already present in the graph (or in OM tags)
-  are dropped.
+  are dropped;
+* an operation that refers to a concept which is neither in the model nor proposed here but
+  pending in another open proposal (an incremental scan: ``customers`` proposed first, then
+  ``customers`` + ``orders``) is dropped with the warning "depends on <Name> pending in
+  proposal <id>; propose again after it is applied" — OM has no term to point at yet.
+
+:func:`screen` applies the exact checks (pending op keys of other proposals, existing concept
+and attribute names) to operations an agent passes to ``propose_change``.
 
 Operations that would point at a concept of an *imported* model cannot be applied in M2a (the
 operation mapping only knows concepts of its own model), so they are dropped with a warning
@@ -22,7 +29,7 @@ No synonym is added when a match was found through a synonym or a different labe
 existing concept already answers to that name. Nothing is written to OM.
 """
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -52,7 +59,7 @@ from lakeloom.core.operations import (
 from lakeloom.om.client import OMClient
 from lakeloom.om.models import OMTable
 
-__all__ = ["DedupeResult", "Match", "dedupe"]
+__all__ = ["DedupeResult", "Match", "dedupe", "import_slugs", "screen"]
 
 REALIZE_MIN = 0.9
 WARN_MIN = 0.6
@@ -172,6 +179,11 @@ def _mapping_exists(graph: Graph, node: URIRef, op: AddMapping) -> bool:
     return (node, SKOS[op.kind], URIRef(str(op.target_iri))) in graph
 
 
+async def import_slugs(models: ModelService, model: str) -> list[str]:
+    """Slugs of the models ``model`` imports (``owl:imports`` of their base IRIs), sorted."""
+    return await _import_slugs(models, model, await models.graph(model))
+
+
 async def _import_slugs(models: ModelService, model: str, graph: Graph) -> list[str]:
     wanted = {str(o).rstrip("/#") for o in graph.objects(None, OWL.imports)}
     if not wanted:
@@ -188,6 +200,28 @@ async def _import_slugs(models: ModelService, model: str, graph: Graph) -> list[
         cursor = page.next_cursor
         if cursor is None:
             return sorted(slugs)
+
+
+def _local_name(ref: str, model: str) -> str | None:
+    """The bare concept name of a ref into ``model`` (``None`` for another model)."""
+    if "." in ref and ref.split(".", 1)[0] != model:
+        return None
+    return ref.rsplit(".", 1)[-1]
+
+
+def _endpoints(op: ProposalOperation) -> list[str]:
+    """Concept refs an operation needs to exist in OM (realizations are Lakeloom-side)."""
+    match op:
+        case AddConcept():
+            return [op.parent] if op.parent else []
+        case AddAttribute() | AddAxiom() | AddMapping():
+            return [op.concept]
+        case AddRelation():
+            return [op.source, op.target]
+        case AddSynonym():
+            return [op.concept_fqn]
+        case _:
+            return []
 
 
 def _table_of(op: AddConcept) -> str | None:
@@ -323,10 +357,10 @@ class _Dedupe:
 
     def _ref(self, ref: str) -> tuple[str, _Target | None]:
         name = ref
-        if "." in ref:  # a qualified ref matches only when it names this model
-            prefix, _, name = ref.rpartition(".")
-            if prefix != self.model:
+        if "." in ref:  # a qualified ref (FQN, possibly nested) matches only this model
+            if ref.split(".", 1)[0] != self.model:
                 return ref, None
+            name = ref.rsplit(".", 1)[-1]
         target = self.replaced.get(name)
         if target is None:
             return ref, None
@@ -437,6 +471,35 @@ class _Dedupe:
             return []
         return [op]
 
+    def _pending_endpoint(self, op: ProposalOperation, created: set[str]) -> str | None:
+        """The warning for an op whose local concept is pending in another proposal only."""
+        graph = self.graphs[self.model]
+        for ref in _endpoints(op):
+            name = _local_name(ref, self.model)
+            if name is None or name in created or _node_of(graph, self.model, name) is not None:
+                continue
+            pid = self.pending.get(f"concept:{name}")
+            if pid is not None:
+                return (
+                    f"{op_key(op)} depends on {name} pending in proposal {pid}; "
+                    "propose again after it is applied"
+                )
+        return None
+
+    def _drop_pending_endpoints(self, ops: list[ProposalOperation]) -> list[ProposalOperation]:
+        while True:  # dropping a child concept can orphan the ops that refer to it
+            created = {op.name for op in ops if isinstance(op, AddConcept)}
+            kept: list[ProposalOperation] = []
+            for op in ops:
+                why = self._pending_endpoint(op, created)
+                if why is None:
+                    kept.append(op)
+                else:
+                    self.warn(why)
+            if len(kept) == len(ops):
+                return kept
+            ops = kept
+
     def rewrite(self, op: ProposalOperation) -> list[ProposalOperation]:
         match op:
             case AddConcept():
@@ -475,8 +538,10 @@ class _Dedupe:
                 if asset is not None:
                     wanted.append(asset[0])
         self.tables = await fetch_tables(self.models, self.om, sorted(set(wanted)))
+        out: list[ProposalOperation] = []
         for op in ops:
-            self.result.operations.extend(self.rewrite(op))
+            out.extend(self.rewrite(op))
+        self.result.operations = self._drop_pending_endpoints(out)
         self.result.warnings = sorted(set(self.result.warnings))
         return self.result
 
@@ -505,3 +570,54 @@ async def dedupe(
         pending=await pending(model),
         asset_by_table=asset_by_table,
     ).run(list(ops))
+
+
+async def screen(
+    ops: Sequence[ProposalOperation],
+    *,
+    model: str,
+    models: ModelService,
+    pending: Mapping[str, str],
+    own: str,
+) -> DedupeResult:
+    """FR-PRO-02 for operations an agent passes to ``propose_change`` (exact checks only).
+
+    Dropped with a warning: an operation whose :func:`op_key` is pending in another open
+    proposal (``pending``: op key -> proposal id; ``own`` is the proposal being changed), an
+    ``AddConcept`` whose name is an existing concept of ``model`` and an ``AddAttribute``
+    already on its concept. Existing names are also reported as matches (confidence 1.0).
+    """
+    graph = await models.graph(model)
+    result = DedupeResult()
+    for op in ops:
+        key = op_key(op)
+        pid = pending.get(key)
+        if pid is not None and pid != own:
+            result.warnings.append(f"already proposed in {pid}: {key}")
+            continue
+        found = _existing(graph, model, op)
+        if found is not None:
+            fqn, what = found
+            result.matches.append(Match(key, fqn, 1.0, "name", "dropped"))
+            result.warnings.append(f"{what} already exists in {fqn}; dropped: {key}")
+            continue
+        result.operations.append(op)
+    return result
+
+
+def _existing(graph: Graph, model: str, op: ProposalOperation) -> tuple[str, str] | None:
+    """``(concept FQN, what)`` when ``op`` adds a concept or attribute ``model`` already has."""
+    if isinstance(op, AddConcept):
+        node = _node_of(graph, model, op.name)
+        return None if node is None else (_fqn(graph, model, node), f"concept {op.name}")
+    if isinstance(op, AddAttribute):
+        name = _local_name(op.concept, model)
+        node = None if name is None else _node_of(graph, model, name)
+        if node is not None and _norm(op.name) in _attribute_names(graph, node):
+            return _fqn(graph, model, node), f"attribute {op.name}"
+    return None
+
+
+def _fqn(graph: Graph, model: str, node: URIRef) -> str:
+    fqn = graph.value(node, OM_FQN)
+    return str(fqn) if fqn is not None else f"{model}.{_local(str(node))}"

@@ -360,8 +360,11 @@ def _fail(message: str, hint: str) -> LakeloomError:
 
 
 def _local(ctx: OMContext, ref: str) -> str:
-    """The bare term name of ``ref``; a ref qualified by another model is rejected."""
-    if "." in ref and ref.rsplit(".", 1)[0] != ctx.glossary_name:
+    """The bare term name of ``ref``; a ref qualified by another model is rejected.
+
+    A qualified ref is an FQN: its first segment is the model, its last the term (child
+    terms nest, e.g. ``retail.Order.OrderStatus``)."""
+    if "." in ref and ref.split(".", 1)[0] != ctx.glossary_name:
         raise _fail(
             f"reference {ref!r} points outside model {ctx.glossary_name!r}",
             "cross-model references need ontology imports, which are not supported yet; "

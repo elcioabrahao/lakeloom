@@ -29,6 +29,7 @@ from lakeloom.core.operations import (
     Evidence,
     ProposalOperation,
     UpdateConcept,
+    op_key,
 )
 from lakeloom.core.proposals import (
     Actor,
@@ -1137,3 +1138,152 @@ async def test_unpaired_model_relation_is_a_glossary_link_only(make) -> None:
     assert out.parts[0].change_set_ids["native"] is None
     assert out.parts[0].change_set_ids["glossary"] is not None
     assert any("glossary link only" in w for w in out.warnings)
+
+
+# --- final fix wave: scoping and FR-PRO-02 for agent edits ------------------------------------
+
+
+def shop_term(name: str, version: float = 0.3) -> OMGlossaryTerm:
+    return term("shop", name, version, iri=f"http://x/ontology/shop/{name}")
+
+
+async def test_incremental_scan_refers_to_pending_concept(make) -> None:
+    """Scan customers -> proposal A; scan customers + orders -> a proposal for Order whose
+    relation to the still-pending Customer is dropped with a warning (not a failed call)."""
+    kit = make()
+    first = await kit.service.propose_from_scan(
+        await kit.scan(customers()), "shop", principal=AGENT, client=None
+    )
+    second = await kit.service.propose_from_scan(
+        await kit.scan(customers(), orders()), "shop", principal=AGENT, client=None
+    )
+    keys = {op_key(o) for o in second.operations()}
+    assert "concept:Order" in keys and "rel:Order|hasCustomer|Customer" not in keys
+    assert not [k for k in keys if k.startswith(("concept:Customer", "attr:Customer"))]
+    assert (
+        f"rel:Order|hasCustomer|Customer depends on Customer pending in proposal {first.id}; "
+        "propose again after it is applied" in second.warnings
+    )
+
+
+async def test_missing_concept_pending_elsewhere_has_a_truthful_hint(make) -> None:
+    kit = make()
+    first = await kit.service.propose_from_scan(
+        await kit.scan(customers()), "shop", principal=AGENT, client=None
+    )
+    other = await kit.service.propose_from_scan(
+        await kit.scan(orders()), "shop", principal=AGENT, client=None
+    )
+    rel = AddRelation(
+        op="add_relation", source="Order", relation_type="relatedTo", target="Customer"
+    )
+    with pytest.raises(LakeloomError) as info:
+        await kit.service.propose_change(other.id, [rel], principal=AGENT, client=None)
+    assert info.value.code == "validation_error"
+    assert f"pending in proposal {first.id}" in info.value.hint
+    assert "add_concept" not in info.value.hint
+
+
+async def test_realization_concept_must_be_in_model_or_imports(make) -> None:
+    kit = make()
+    kit.om.tables["svc.db.sales.orders"] = OMTable.model_validate(
+        {"id": "t1", "fullyQualifiedName": "svc.db.sales.orders", "columns": [{"name": "status"}]}
+    )
+    with pytest.raises(LakeloomError) as info:
+        await kit.service.propose_realization(
+            None, "shop", "retail.Customer", "svc.db.sales.orders", principal=AGENT, client=None
+        )
+    assert info.value.code == "validation_error"
+    assert "retail.Customer" in info.value.message and "shop" in info.value.message
+    # imported: shop imports retail -> allowed
+    kit.om.turtles["shop"] = (
+        "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
+        "<http://x/ontology/shop/> a owl:Ontology ; owl:imports <http://x/ontology/retail/> .\n"
+    )
+    kit.models.invalidate("shop")
+    p = await kit.service.propose_realization(
+        None, "shop", "retail.Customer", "svc.db.sales.orders", principal=AGENT, client=None
+    )
+    (op,) = p.operations()
+    assert isinstance(op, AddRealization) and op.concept == "retail.Customer"
+
+
+async def test_propose_change_realization_goes_through_the_same_resolution(make) -> None:
+    kit = make()
+    kit.om.tables["svc.db.sales.orders"] = OMTable.model_validate(
+        {
+            "id": "t1",
+            "fullyQualifiedName": "svc.db.sales.orders",
+            "tags": [{"tagFQN": "retail.Customer", "source": "Glossary", "labelType": "Manual"}],
+        }
+    )
+    base = await _shop_proposal(kit)
+    foreign = AddRealization(
+        op="add_realization", concept="retail.Customer", asset_fqn="svc.db.sales.orders"
+    )
+    with pytest.raises(LakeloomError) as info:
+        await kit.service.propose_change(base.id, [foreign], principal=AGENT, client=None)
+    assert info.value.code == "validation_error" and "retail.Customer" in info.value.message
+    # in its own model the realization resolves; an asset that already realizes it is dropped
+    kit.om.tables["svc.db.sales.customers"] = OMTable.model_validate(
+        {"id": "t2", "fullyQualifiedName": "svc.db.sales.customers"}
+    )
+    retail = await kit.service.propose_realization(
+        None, "retail", "Customer", "svc.db.sales.customers", principal=AGENT, client=None
+    )
+    with pytest.raises(NothingToPropose) as nothing:
+        await kit.service.propose_change(retail.id, [foreign], principal=AGENT, client=None)
+    assert nothing.value.warnings == [
+        "svc.db.sales.orders already realizes retail.Customer; "
+        "dropped: real:Customer|svc.db.sales.orders|"
+    ]
+
+
+async def test_propose_change_drops_ops_pending_elsewhere_or_existing(make) -> None:
+    kit = make()
+    plain_orders = table("orders", [col("order_id", "bigint", 0)], comment="Orders")
+    first = await kit.service.propose_from_scan(
+        await kit.scan(plain_orders), "shop", principal=AGENT, client=None
+    )
+    kit.om.turtles["shop"] = (
+        SHOP_TTL
+        + "@prefix om: <https://open-metadata.org/ontology/> .\n"
+        + '<http://x/ontology/shop/Widget> a skos:Concept ; skos:prefLabel "Widget" ;\n'
+        + '    om:fullyQualifiedName "shop.Widget" .\n'
+    )
+    kit.models.invalidate("shop")
+    kit.om.terms["shop"] = [shop_term("Widget")]
+    second = await kit.service.propose_from_scan(
+        await kit.scan(customers()), "shop", principal=AGENT, client=None
+    )
+    pending = AddConcept(op="add_concept", name="Order", description=ut("dup"))
+    existing = AddConcept(op="add_concept", name="Widget", description=ut("dup"))
+    fresh = AddConcept(op="add_concept", name="Gadget", description=ut("new"))
+    out = await kit.service.propose_change(
+        second.id, [pending, existing, fresh], principal=AGENT, client=None
+    )
+    keys = [op_key(o) for o in out.operations()]
+    assert "concept:Gadget" in keys and "concept:Order" not in keys and "concept:Widget" not in keys
+    assert f"already proposed in {first.id}: concept:Order" in out.warnings
+    assert any(
+        m.op_key == "concept:Widget" and m.candidate_fqn == "shop.Widget" for m in out.matches
+    )
+    with pytest.raises(NothingToPropose) as info:
+        await kit.service.propose_change(
+            second.id, [pending, existing], principal=AGENT, client=None
+        )
+    assert [m.candidate_fqn for m in info.value.matches] == ["shop.Widget"]
+
+
+def test_nothing_to_propose_details_are_capped() -> None:
+    from lakeloom.core.proposals import ProposalMatch
+
+    matches = [
+        ProposalMatch(
+            op_key=f"k{i}", candidate_fqn="m.X", confidence=1.0, matched_on="name", action="kept"
+        )
+        for i in range(150)
+    ]
+    details = NothingToPropose(matches, [f"w{i}" for i in range(130)]).details()
+    assert len(details["matches"]) == 100 and details["matches_truncated"] == 50
+    assert len(details["warnings"]) == 100 and details["warnings_truncated"] == 30
