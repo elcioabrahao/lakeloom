@@ -191,3 +191,16 @@ docs/decisions/0011-proposals.md
 ## Out of scope for M2a
 
 Approve/reject/request changes, apply, human identity and token exchange, OM SSO, edit leases, rebase_proposal, list_pending_reviews, auto-approve policies, `review_with_specialist` (M2b); Git commits/PRs (M2c); import/drift/releases (M3).
+
+---
+
+## Amendment A (owner decision 2026-11-11, after Task 1 research — ADR 0011)
+
+OM 2.1.0-rc1 accepts attributes (`UPSERT_PROPERTY`, kind DATA) and axioms (`UPSERT_AXIOM`) only in a **native ontology** change set (`ontology` + `baseWorkingRevision`), and a property's domain must be a class declared in that ontology (`UPSERT_CONCEPT`). A change set cannot mix glossary and native operations. **Decision: hybrid model.** Each Lakeloom model = the OM glossary (concepts as terms, relations, mappings, realizations — unchanged from M1) **plus a paired native ontology with the same name**, whose classes reuse the **same IRI** as the glossary terms and carry attributes and axioms. Consequences for the tasks:
+
+- **Task 2:** `to_om(op, …)` returns `OMOps(glossary: list[dict], native: list[dict])`. `AddConcept` → `CREATE_TERM` (glossary) **and** `UPSERT_CONCEPT` (native, `conceptType: OWL_CLASS`, same IRI, same name/description). `AddAttribute` → `UPSERT_PROPERTY` (native, kind DATA, domain = the class IRI, range = xsd IRI, `isIdentifier`, `enumValues`, `unit`). `AddAxiom` → `UPSERT_AXIOM` (native). Relations/mappings/synonyms/term updates → glossary. Realizations → neither.
+- **Task 6:** each proposal part has up to two OM change sets (`change_set_ids: {glossary, native}`), created, submitted and discarded together; the native one needs the ontology's current `workingRevision` as `baseWorkingRevision`. Applying in M2b: glossary set first, then native.
+- **Task 7:** `create_model` creates the glossary **and** the paired native ontology (`name` = slug, `iri` = model base IRI, `namespace` = slug). For models without a paired ontology (e.g. the seeded `retail`), proposal creation fails with `validation_error` and hint "call create_model with pair_existing=true" — `create_model(name, …, pair_existing: bool=False)` creates only the missing paired ontology for an existing glossary.
+- **New Task 5b (before Task 6): read path merges the paired ontology.** `ModelService.graph(slug)` = glossary export ∪ native ontology export (OM endpoint for native ontology RDF per the spec; record in ADR 0011), so M1b's attribute lookup (`owl:DatatypeProperty` with `rdfs:domain`) and Task 5's "existing attribute" check see native attributes. Export stays deterministic (same canonical serialiser). Contract: after pairing a throwaway model and applying a native draft that adds an attribute (research-style, cleaned up), `explain_concept` shows the attribute.
+- **Seed:** `scripts/seed_om_concepts.py` also creates the paired native ontology for `retail` (classes with the 10 term IRIs; no attributes yet), idempotent.
+- **OM client (Task 1 finding):** submit/discard/add-operations require an edit lease; the client acquires and releases one per call (FR-OM-04). Stale bases surface only at apply (M2b). The bot token can apply its own drafts directly — **M2b must enforce human-only apply in Lakeloom** (FR-REV-01/02).
