@@ -24,6 +24,10 @@ from mcp.shared.exceptions import MCPError
 from mcp.types import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
+    GetPromptRequestParams,
+    GetPromptResult,
+    InputRequiredResult,
+    ListPromptsResult,
     ListResourcesResult,
     ListResourceTemplatesResult,
     PaginatedRequestParams,
@@ -99,13 +103,13 @@ class LakeloomMCP(MCPServer[Any]):
         super().__init__(**kwargs)
         self._deps = deps
 
-    def _require_read(self, context: Context[Any, Any] | None) -> None:
+    def _require_read(self, context: Context[Any, Any] | None, what: str = "MCP resources") -> None:
         principal = None if context is None else current_principal(context)
         if principal is None or READ_SCOPE not in principal.scopes:
             raise _mcp_error(
                 LakeloomError(
                     "forbidden",
-                    f"MCP resources require the {READ_SCOPE} scope",
+                    f"{what} require the {READ_SCOPE} scope",
                     f"token lacks {READ_SCOPE}",
                 )
             )
@@ -125,6 +129,18 @@ class LakeloomMCP(MCPServer[Any]):
     ) -> ListResourceTemplatesResult:
         self._require_read(self._context(ctx))
         return await super()._handle_list_resource_templates(ctx, params)
+
+    async def _handle_list_prompts(
+        self, ctx: ServerRequestContext[Any], params: PaginatedRequestParams | None
+    ) -> ListPromptsResult:
+        self._require_read(self._context(ctx), "MCP prompts")
+        return await super()._handle_list_prompts(ctx, params)
+
+    async def _handle_get_prompt(
+        self, ctx: ServerRequestContext[Any], params: GetPromptRequestParams
+    ) -> GetPromptResult | InputRequiredResult:
+        self._require_read(self._context(ctx), "MCP prompts")
+        return await super()._handle_get_prompt(ctx, params)
 
     async def list_resources(self) -> list[Resource]:
         """``lakeloom://models`` and the concrete URIs of up to 100 models."""

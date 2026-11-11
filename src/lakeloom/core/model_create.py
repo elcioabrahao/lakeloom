@@ -13,9 +13,11 @@ the glossary's id and update time). Once the model exists that state is gone, so
 token fails as ``conflict``. ``pair_existing=True`` creates only the missing ontology of an
 existing glossary (models created before the hybrid model, e.g. the seeded ``retail``).
 
-If the ontology cannot be created after the glossary was, the new glossary is hard-deleted
-again (never recursively) and the error is reported; if even that fails, the hint names the
-glossary id and tells how to finish the pairing.
+If the ontology cannot be created after the glossary was, the ontology is first looked up again
+when the failure was ambiguous (timeout or 5xx: the create may have succeeded; then the model is
+complete and kept); otherwise the new glossary is hard-deleted again (never recursively) and the
+error is reported; if even that fails, the hint names the glossary id and tells how to finish
+the pairing.
 """
 
 import asyncio
@@ -304,6 +306,11 @@ async def _create(
             ),
         )
     except BaseException as exc:
+        if isinstance(exc, LakeloomError) and exc.code == "upstream_unavailable":
+            # ambiguous (timeout, 5xx): the ontology may exist now; then there is nothing to undo
+            created = await _reread_ontology(om, name)
+            if created is not None:
+                return glossary, created
         if existing is not None:
             raise  # the glossary was there before: never delete it
         undone = await asyncio.shield(_undo(om, glossary))
@@ -320,6 +327,16 @@ async def _create(
             "create_model pair_existing=true, or delete that glossary in OpenMetadata",
         ) from None
     return glossary, ontology
+
+
+async def _reread_ontology(om: OMClient, name: str) -> OMOntology | None:
+    try:
+        return await om.get_ontology_by_name(name)
+    except Exception as exc:
+        _log.error(
+            "could not re-read ontology %s after a failed create (%s)", name, type(exc).__name__
+        )
+        return None
 
 
 async def _undo(om: OMClient, glossary: OMGlossary) -> bool:

@@ -260,3 +260,26 @@ async def test_audit_record_build_failure_never_fails_call(engine: AsyncEngine) 
         "t", bad, "lakeloom:propose", body, audited=True, audit=AuditRepository(engine)
     )
     assert not result.is_error
+
+
+async def test_body_can_override_the_outcome_of_a_partial_success(engine: AsyncEngine) -> None:
+    """A partial result (e.g. part 2 of 3 not created) is returned but audited as an error."""
+    repo = AuditRepository(engine)
+    local_principal.set(_principal())
+
+    async def body(_p: Principal) -> CallToolResult:
+        current_audit().error_code = "upstream_unavailable"
+        return _ok()
+
+    result = await guarded(
+        "propose_from_scan", _ctx(), "lakeloom:propose", body, audited=True, audit=repo
+    )
+    assert result.is_error is not True
+    [r] = (await repo.list(None, None, 10)).items
+    assert (r.result, r.error_code) == ("error", "upstream_unavailable")
+
+
+async def test_nul_is_stripped_from_audit_strings(engine: AsyncEngine) -> None:
+    rec = _rec().model_copy(update={"client": "evil\x00client", "model": "re\x00tail"})
+    rec = AuditRecord.model_validate(rec.model_dump())
+    assert (rec.client, rec.model) == ("evilclient", "retail")

@@ -51,18 +51,23 @@ class AuditRecord(BaseModel):
     @field_validator(*MAX_LENGTHS, mode="after")
     @classmethod
     def _fit_column(cls, value: str | None, info: ValidationInfo) -> str | None:
+        """NUL removed (PostgreSQL text rejects it), then cut to the column width."""
         if value is None or info.field_name is None:
             return value
-        return value[: MAX_LENGTHS[info.field_name]]
+        return value.replace("\x00", "")[: MAX_LENGTHS[info.field_name]]
 
 
 @dataclass
 class AuditContext:
-    """Set by a tool body; read by ``guarded`` when it writes the record."""
+    """Set by a tool body; read by ``guarded`` when it writes the record.
+
+    ``error_code`` marks a partial success: the call returns a result, but the record says
+    ``error`` with this code (e.g. a proposal part that could not be created)."""
 
     model: str | None = None
     proposal_id: str | None = None
     change_set_id: str | None = None
+    error_code: str | None = None
 
 
 audit_context: ContextVar[AuditContext | None] = ContextVar("lakeloom_audit_context", default=None)

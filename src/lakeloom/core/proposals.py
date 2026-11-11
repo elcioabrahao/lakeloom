@@ -24,11 +24,13 @@ hint to rebase (M2b).
 
 Audit ownership (NFR-SEC-12): exactly one audit record per call of a write method
 (``propose_from_scan``, ``propose_change``, ``propose_realization``, ``submit``, ``discard``;
-``tool`` = the method name). The service writes it **only when constructed with an**
-``audit`` **repository** (the CLI). MCP tools construct it with ``audit=None`` and rely on
-``guarded(audited=True, audit=...)``; the service still fills the running call's
-:func:`~lakeloom.core.audit.current_audit` context (model, proposal, change set) so guarded's
-record carries them. Reads (``get_proposal``, ``summary_markdown``, ``diff``) are not audited.
+``tool`` = the MCP tool name, ``submit_proposal`` and ``discard_proposal`` included, in the CLI
+too). The service writes it **only when constructed with an** ``audit`` **repository** (the
+CLI). MCP tools construct it with ``audit=None`` and rely on ``guarded(audited=True,
+audit=...)``; the service still fills the running call's
+:func:`~lakeloom.core.audit.current_audit` context (model, proposal, change set, and the error
+code of a partial result, audited as ``error``) so guarded's record carries them. Reads
+(``get_proposal``, ``summary_markdown``, ``diff``) are not audited.
 
 Relations (hybrid model): each ``AddRelation`` is a glossary link plus a native object
 property named after the relation; when OM lacks the relationship type the glossary link
@@ -830,6 +832,7 @@ class ProposalService:
         trail = current_audit()
         try:
             value, partial = await run(trail)
+            trail.error_code = partial  # guarded() audits a partial result as an error
         except LakeloomError as exc:
             await self._record(tool, caller, client, trail, exc.code)
             raise
@@ -1714,20 +1717,16 @@ class ProposalService:
 
     async def get_proposal(self, proposal_id: str) -> Proposal:
         """The proposal with each change set's state refreshed from OM (``MISSING`` when OM
-        no longer has it)."""
-        async with self._lock(proposal_id):
-            p = await self._repo.get(proposal_id)
-            states = await self._om_states(p)
-            changed = False
-            for part in p.parts:
-                for side in SIDES:
-                    cs = part.change_set_ids.get(side)
-                    if cs is not None and part.om_state.get(side) != states[cs][1]:
-                        part.om_state[side] = states[cs][1]
-                        changed = True
-            if changed:
-                await self._save(p)
-            return p
+        no longer has it). A read: the refreshed state is returned, never stored (writes keep
+        the stored states current, and a read must not move ``updated_at``)."""
+        p = await self._repo.get(proposal_id)
+        states = await self._om_states(p)
+        for part in p.parts:
+            for side in SIDES:
+                cs = part.change_set_ids.get(side)
+                if cs is not None:
+                    part.om_state[side] = states[cs][1]
+        return p
 
     async def _om_states(self, p: Proposal) -> dict[str, tuple[float | None, str]]:
         """Change set id -> (OM version, OM state), read with bounded concurrency."""
@@ -1761,7 +1760,7 @@ class ProposalService:
                 await self._save(p)
                 return p, None
 
-        return await self._audited("submit", principal, client, run)
+        return await self._audited("submit_proposal", principal, client, run)
 
     async def _transition(
         self,
@@ -1845,7 +1844,7 @@ class ProposalService:
                 await self._save(p)
                 return p, None
 
-        return await self._audited("discard", principal, client, run)
+        return await self._audited(DISCARD_TOOL, principal, client, run)
 
     @staticmethod
     def _require_open(p: Proposal) -> None:

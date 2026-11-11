@@ -247,7 +247,9 @@ def _map_table(
             children += _enum_children(full, concept, column, values, names, warnings)
     out.extend(children)
 
-    out.extend(_relations(full, concept, desc, concept_of, by_schema_name, policy, warnings))
+    out.extend(
+        _relations(full, concept, desc, concept_of, by_schema_name, policy, warnings, used_attrs)
+    )
 
     if pk_columns:
         out.append(_pk_axiom(full, concept, pk_columns, attr_names))
@@ -373,11 +375,14 @@ def _relations(
     by_schema_name: dict[str, str],
     policy: MappingPolicy,
     warnings: list[str],
+    attributes: set[str],
 ) -> list[ProposalOperation]:
     """One relation per declared FK (R-FK).
 
     ``has<Target>`` when it is the table's only FK to that target, otherwise named after
-    the FK column(s); residual collisions get a numeric suffix and a warning.
+    the FK column(s); residual collisions get a numeric suffix and a warning. A relation is
+    also a native property ``{Concept}.{name}``, so it never takes a name of one of the
+    concept's ``attributes`` (lower-cased) either.
     """
     resolved: list[tuple[Constraint, str, str]] = []
     for constraint in desc.constraints:
@@ -407,7 +412,7 @@ def _relations(
             else _fk_relation_type(constraint.columns)
         )
         rtype, n = wanted, 1
-        while rtype in used:
+        while rtype in used or rtype.lower() in attributes:
             n += 1
             rtype = f"{wanted}{n}"
         if n > 1:

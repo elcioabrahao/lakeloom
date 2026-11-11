@@ -291,7 +291,8 @@ async def test_propose_change_requires_an_operation(make_deps: DepsFactory, kit:
     await upgrade(deps.engine)
     async with mcp_session(create_server_app(deps), kit.token(scope=RW)) as s:
         result = await s.call_tool("propose_change", {"proposal_id": "prop_1", "operations": []})
-    assert structured(result)["error"]["code"] == "validation_error"
+    # rejected by the input schema (minItems 1), like any other schema violation
+    assert result.is_error is True
     assert fake.calls == []
 
 
@@ -545,3 +546,10 @@ async def test_create_model_token_is_bound_to_the_caller(
         other = await s.call_tool("create_model", {"name": "shop", "confirm_token": token})
     assert structured(other)["error"]["code"] == "validation_error"
     assert om.posts == []
+
+
+async def test_propose_change_schema_bounds_the_operations(make_deps: DepsFactory) -> None:
+    deps, _ = build(make_deps)
+    tools = {t.name: t for t in await create_mcp(deps).list_tools()}
+    schema = tools["propose_change"].input_schema["properties"]["operations"]
+    assert (schema["minItems"], schema["maxItems"]) == (1, 200)

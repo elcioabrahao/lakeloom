@@ -506,3 +506,35 @@ def test_evidence_is_capped_for_heavily_tagged_columns() -> None:
     concept, attr = map_scan(record(tbl), POLICY).operations
     assert 0 < len(concept.evidence) <= 18 and 0 < len(attr.evidence) <= 18
     assert attr.evidence[0].kind == "column"  # the column itself is never cut
+
+
+def test_attribute_names_are_claimed_per_concept() -> None:
+    """``e-mail`` and ``e_mail`` normalise to one name: the second gets a suffix."""
+    camel = MappingPolicy(model="m", attribute_naming="camel")
+    tbl = table("t", [col("e-mail", "string", 0), col("e_mail", "string", 1)])
+    for policy in (POLICY, camel):
+        result = map_scan(record(tbl), policy)
+        names = [o.name for o in result.operations if isinstance(o, AddAttribute)]
+        assert len(set(names)) == 2 and names[1].endswith("2")
+        assert any("name collision: column sales.t.e_mail" in w for w in result.warnings)
+
+
+def test_relation_name_never_collides_with_an_attribute() -> None:
+    """Attributes and relations share the native ``{Concept}.{name}`` IRI space."""
+    fk = TableRef(schema="sales", name="customers")
+    tbl = table(
+        "t",
+        [col("hasCustomer", "string", 0), col("customer_id", "int", 1)],
+        constraints=[
+            Constraint(kind="foreign_key", columns=["customer_id"], ref_table=fk, ref_columns=[])
+        ],
+    )
+    result = map_scan(record(customers(), tbl), MappingPolicy(model="m", attribute_naming="as_is"))
+    attrs = {
+        o.name.lower()
+        for o in result.operations
+        if isinstance(o, AddAttribute) and o.concept == "T"
+    }
+    (rel,) = [o for o in result.operations if isinstance(o, AddRelation)]
+    assert rel.relation_type.lower() not in attrs and rel.relation_type == "hasCustomer2"
+    assert any("name collision: FK from sales.t" in w for w in result.warnings)

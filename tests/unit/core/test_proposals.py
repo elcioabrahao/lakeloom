@@ -862,7 +862,14 @@ async def test_partial_create_keeps_recorded_parts_and_no_orphans(make) -> None:
         return await FakeOM.create_change_set(kit2.om, **kw)
 
     kit2.om.create_change_set = flaky  # type: ignore[method-assign]
-    p = await kit2.service.propose_from_scan(scan_id, "shop", principal=AGENT, client=None)
+    trail = AuditContext()
+    token = audit_context.set(trail)
+    try:
+        p = await kit2.service.propose_from_scan(scan_id, "shop", principal=AGENT, client=None)
+    finally:
+        audit_context.reset(token)
+    assert trail.error_code == "upstream_unavailable"  # guarded() audits it as an error
+    assert (await kit2.audit_rows())[-1].result == "error"
     assert p.status == "draft" and len(p.parts) == 1
     assert any("part 2 of 2 could not be created" in w for w in p.warnings)
     recorded = set((await kit2.repo.get(p.id)).change_set_ids())
@@ -932,8 +939,8 @@ async def test_audit_written_for_each_write(make) -> None:
         ("propose_from_scan", "ok", None),
         ("propose_change", "ok", None),
         ("propose_change", "error", "validation_error"),
-        ("discard", "ok", None),
-        ("discard", "ok", None),
+        ("discard_proposal", "ok", None),
+        ("discard_proposal", "ok", None),
     ]
     assert all(r.model == "shop" and r.proposal_id == p.id for r in rows)
     assert all(r.principal_subject == "agent-7" for r in rows)
@@ -959,9 +966,12 @@ async def test_get_proposal_refreshes_om_state(make) -> None:
     first, second = p.change_set_ids()
     kit.om.change_sets[first]["state"] = "APPLIED"
     del kit.om.change_sets[second]
+    stored = await kit.repo.get(p.id)
     out = await kit.service.get_proposal(p.id)
     assert out.parts[0].om_state == {"glossary": "APPLIED", "native": "MISSING"}
-    assert (await kit.repo.get(p.id)).parts[0].om_state == out.parts[0].om_state
+    # a read never writes: the stored record (and its update time) is unchanged
+    after = await kit.repo.get(p.id)
+    assert after.model_dump() == stored.model_dump()
     with pytest.raises(LakeloomError) as info:
         await kit.service.get_proposal("prop_nope")
     assert info.value.code == "not_found"
@@ -1022,7 +1032,8 @@ async def test_server_principal_is_a_caller(make) -> None:
     p = await _shop_proposal(kit)
     out = await kit.service.submit(p.id, principal=who, client=None)
     assert out.status == "submitted"
-    assert (await kit.audit_rows())[-1].principal_type == "agent"
+    last = (await kit.audit_rows())[-1]
+    assert (last.principal_type, last.tool) == ("agent", "submit_proposal")  # the MCP tool name
 
 
 # --- fix round 1 -----------------------------------------------------------------------------

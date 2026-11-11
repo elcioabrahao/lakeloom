@@ -286,3 +286,24 @@ async def test_token_bound_to_the_principal(env: Env) -> None:
         await env.call(description="a", principal="admin-2", confirm_token=preview.confirm_token)
     assert info.value.code == "validation_error"
     assert not post.called
+
+
+@respx.mock
+async def test_ambiguous_ontology_timeout_rereads_before_compensating(env: Env) -> None:
+    """A timed-out create may have succeeded: if the ontology is there, keep the glossary."""
+    missing("glossaries/name/shop")
+    lookups = respx.get(f"{API}/ontologies/name/shop").mock(
+        side_effect=[
+            httpx.Response(404, json={"code": 404, "message": "missing"}),
+            httpx.Response(404, json={"code": 404, "message": "missing"}),
+            httpx.Response(200, json=ontology()),
+        ]
+    )
+    respx.post(f"{API}/glossaries").respond(201, json=glossary())
+    respx.post(f"{API}/ontologies").mock(side_effect=httpx.ReadTimeout("slow"))
+    delete = respx.delete(f"{API}/glossaries/{GID}").respond(200, json={"id": GID})
+    preview = await env.call()
+    assert isinstance(preview, ModelPreview)
+    done = await env.call(confirm_token=preview.confirm_token)
+    assert isinstance(done, CreatedModel) and done.ontology_id == OID
+    assert not delete.called and lookups.call_count == 3

@@ -133,6 +133,8 @@ async def guarded(
     if audited:
         code = _error_code(result)
         status = "ok" if outcome == "ok" else "forbidden" if code == "forbidden" else "error"
+        if status == "ok" and audit_ctx.error_code is not None:  # partial success
+            status, code = "error", audit_ctx.error_code
         await asyncio.shield(_audit(tool, ctx, principal, audit_ctx, status, code, audit))
     TOOL_CALLS.labels(tool=tool, outcome=outcome).inc()
     record_tool_call(tool, outcome)

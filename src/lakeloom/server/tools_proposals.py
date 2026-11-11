@@ -158,8 +158,8 @@ proposed, → `validation_error`.
 GET_PROPOSAL_DESCRIPTION = f"""\
 Show one proposal: its status, parts and their OpenMetadata change sets (with the current \
 state read from OpenMetadata), provenance, matches, warnings and every operation. \
-{_RESULT_NOTE} {_UNTRUSTED_NOTE} Read-only for the catalog; it only refreshes the stored \
-change-set states. Unknown id → `not_found`.
+{_RESULT_NOTE} {_UNTRUSTED_NOTE} Read-only: the change-set states are read from \
+OpenMetadata and nothing is stored. Unknown id → `not_found`.
 
 {_scope(READ_SCOPE)}"""
 
@@ -366,14 +366,16 @@ def register_proposal_tools(mcp: MCPServer, deps: AppDeps) -> None:
         operations: Annotated[
             list[ProposalOperation],
             Field(
+                min_length=1,
+                max_length=MAX_OPERATIONS_PER_CALL,
                 description="Typed operations to add, each selected by its `op` field "
-                f"(1 to {MAX_OPERATIONS_PER_CALL})."
+                f"(1 to {MAX_OPERATIONS_PER_CALL}).",
             ),
         ],
         ctx: Context,
     ) -> Annotated[CallToolResult, ProposalResult]:
         async def body(principal: Principal) -> CallToolResult:
-            if not 1 <= len(operations) <= MAX_OPERATIONS_PER_CALL:
+            if not 1 <= len(operations) <= MAX_OPERATIONS_PER_CALL:  # schema: defence in depth
                 raise LakeloomError(
                     "validation_error",
                     f"pass 1 to {MAX_OPERATIONS_PER_CALL} operations, got {len(operations)}",

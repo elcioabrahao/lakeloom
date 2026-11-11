@@ -108,6 +108,7 @@ async def test_concurrent_upgrades_postgres() -> None:
 
 @pytest.mark.contract
 async def test_postgres_audit_oversized_client_is_stored() -> None:
+    import uuid
     from datetime import UTC, datetime
 
     from lakeloom.core.audit import AuditRecord
@@ -119,11 +120,12 @@ async def test_postgres_audit_oversized_client_is_stored() -> None:
     engine = create_engine(url)
     try:
         await upgrade(engine)
+        marker = f"pg-{uuid.uuid4().hex}"
         rec = AuditRecord(
             at=datetime.now(UTC),
-            principal_subject="s" * 400,
+            principal_subject=marker + "s" * 400,
             principal_type="agent",
-            client="c" * 300,
+            client="c\x00" + "c" * 300,  # NUL is stripped (PostgreSQL text rejects it)
             tool="t" * 200,
             model="m" * 300,
             proposal_id="p" * 100,
@@ -133,11 +135,16 @@ async def test_postgres_audit_oversized_client_is_stored() -> None:
         )
         await AuditRepository(engine).add(rec)
         async with engine.connect() as conn:
-            n = (
+            row = (
                 await conn.execute(
-                    text("SELECT count(*) FROM audit_log WHERE length(client) = 255")
+                    text(
+                        "SELECT client, tool, principal_subject FROM audit_log "
+                        "WHERE principal_subject LIKE :m"
+                    ),
+                    {"m": marker + "%"},
                 )
-            ).scalar_one()
-        assert n >= 1
+            ).one()
+        assert row.client == "c" * 255  # the inserted record itself, NUL gone, cut to width
+        assert len(row.tool) == 128 and len(row.principal_subject) == 255
     finally:
         await engine.dispose()

@@ -78,7 +78,8 @@ Follow these steps in order:
 5. If it does not exist, call create_model with name {mdl}: first without confirm_token \
 (a dry run), show the preview to the user, and only after the user agrees call it again \
 with the returned confirm_token. If the model exists but has no paired native ontology, do \
-the same with pair_existing=true.
+the same with pair_existing=true. create_model needs lakeloom:admin; if forbidden, ask an \
+operator to create or pair the model, then continue.
 6. Call propose_from_scan with the scan_id and model {mdl} (and the tables, if limited). \
 If it reports that nothing is new, show the matches and warnings to the user and stop.
 7. Show the proposal summary to the user and review it together: concepts, attributes, \

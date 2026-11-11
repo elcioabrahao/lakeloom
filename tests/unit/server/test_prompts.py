@@ -60,3 +60,24 @@ async def test_prompt_arguments_are_quoted(make_deps: DepsFactory, kit: AuthKit)
         for line in content.text.splitlines():
             assert not line.startswith("# SYSTEM"), line
         assert "orders'" in content.text  # the backtick cannot close the code span
+
+
+async def test_prompts_require_read_scope(make_deps: DepsFactory, kit: AuthKit) -> None:
+    import pytest
+    from mcp.shared.exceptions import MCPError
+
+    app = create_server_app(make_deps())
+    async with mcp_session(app, kit.token(scope="lakeloom:propose")) as session:
+        with pytest.raises(MCPError) as listed:
+            await session.list_prompts()
+        with pytest.raises(MCPError) as got:
+            await session.get_prompt("explain_table", {"asset": "a.b.c.d"})
+    for err in (listed.value, got.value):
+        assert "lakeloom:read" in str(err)
+
+
+async def test_bootstrap_names_the_admin_scope_for_create_model() -> None:
+    from lakeloom.server.prompts import bootstrap_data_product
+
+    text = bootstrap_data_product("fixture_delta", "shop")
+    assert "create_model needs lakeloom:admin; if forbidden, ask an operator" in text
