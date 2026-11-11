@@ -18,6 +18,7 @@ from urllib.parse import quote
 
 from pydantic import AnyUrl, BaseModel, ConfigDict, Field, model_validator
 
+from lakeloom.core.model_policy import XSD_DATATYPE_PATTERN
 from lakeloom.errors import LakeloomError
 from lakeloom.untrusted import UntrustedText
 
@@ -150,7 +151,7 @@ class AddAttribute(_Op):
     op: Literal["add_attribute"]
     concept: Ref
     name: Name
-    datatype: Annotated[str, Field(pattern=r"^xsd:[A-Za-z]+$")]
+    datatype: Annotated[str, Field(pattern=f"^{XSD_DATATYPE_PATTERN}$")]
     is_identifier: bool = False
     allowed_values: ShortList = Field(default_factory=list[str])
     unit: Annotated[str | None, Field(max_length=64)] = None

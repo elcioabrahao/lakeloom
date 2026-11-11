@@ -20,7 +20,13 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-__all__ = ["DEFAULT_DATATYPES", "MappingPolicy", "ModelPolicyEntry", "policy_for"]
+__all__ = [
+    "DEFAULT_DATATYPES",
+    "XSD_DATATYPE_PATTERN",
+    "MappingPolicy",
+    "ModelPolicyEntry",
+    "policy_for",
+]
 
 # Keys are lower-case Spark base types (parameters such as ``(10,2)`` are stripped).
 DEFAULT_DATATYPES: dict[str, str] = {
@@ -46,7 +52,8 @@ DEFAULT_DATATYPES: dict[str, str] = {
     "binary": "xsd:base64Binary",
 }
 
-_XSD = r"xsd:[A-Za-z][A-Za-z0-9]*"
+# Single source of truth for xsd datatype names (also used by AddAttribute).
+XSD_DATATYPE_PATTERN = r"xsd:[A-Za-z][A-Za-z0-9]*"
 
 
 class _Strict(BaseModel):
@@ -102,7 +109,7 @@ class ModelPolicyEntry(_Strict):
 
 
 def _is_xsd(value: str) -> bool:
-    return re.fullmatch(_XSD, value) is not None
+    return re.fullmatch(XSD_DATATYPE_PATTERN, value) is not None
 
 
 def policy_for(entries: list[ModelPolicyEntry], model: str) -> MappingPolicy:

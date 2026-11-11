@@ -476,3 +476,25 @@ def test_policy_bad_datatype_is_config_error(tmp_path: Path) -> None:
     cfg.write_text("models:\n  - name: m\n    mapping: {datatype_map: {money: decimal}}\n")
     with pytest.raises(ConfigError):
         load_sources_config(cfg)
+
+
+def test_binary_column_maps_end_to_end() -> None:
+    tbl = table("blobs", [col("payload", "binary", 0)])
+    attr = map_scan(record(tbl), POLICY).operations[1]
+    assert isinstance(attr, AddAttribute)
+    assert attr.datatype == "xsd:base64Binary"
+
+
+@pytest.mark.parametrize("xsd", sorted(set(DEFAULT_DATATYPES.values())))
+def test_every_default_datatype_builds_an_attribute(xsd: str) -> None:
+    attr = AddAttribute(op="add_attribute", concept="C", name="a", datatype=xsd)
+    assert attr.datatype == xsd
+
+
+@pytest.mark.parametrize("spark", sorted(DEFAULT_DATATYPES))
+def test_every_default_spark_type_maps_without_warning(spark: str) -> None:
+    result = map_scan(record(table("t", [col("c", spark, 0)])), POLICY)
+    attr = result.operations[1]
+    assert isinstance(attr, AddAttribute)
+    assert attr.datatype == DEFAULT_DATATYPES[spark]
+    assert result.warnings == []
