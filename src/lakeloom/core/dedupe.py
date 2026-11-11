@@ -134,9 +134,12 @@ def _relation_exists(graph: Graph, source: URIRef, kind: str, target: URIRef) ->
     for prop in graph.subjects(RDF.type, OWL.ObjectProperty):
         if not isinstance(prop, URIRef) or str(prop).startswith(str(SKOS)):
             continue
-        if wanted in _names(graph, prop) and (
-            (source, prop, target) in graph or (target, prop, source) in graph
-        ):
+        if wanted not in _names(graph, prop):
+            continue
+        if (source, prop, target) in graph or (target, prop, source) in graph:
+            return True
+        # hybrid model: a relation is also a native object property (domain -> range)
+        if (prop, RDFS.domain, source) in graph and (prop, RDFS.range, target) in graph:
             return True
     return False
 

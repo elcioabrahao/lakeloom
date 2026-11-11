@@ -3,6 +3,7 @@
 A fake OM records every call; the state store is a real SQLite database.
 """
 
+import asyncio
 import json
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 from test_mapper import col, record, table
 
@@ -26,6 +28,7 @@ from lakeloom.core.operations import (
     AddSynonym,
     Evidence,
     ProposalOperation,
+    UpdateConcept,
 )
 from lakeloom.core.proposals import (
     Actor,
@@ -52,7 +55,7 @@ from lakeloom.om.models import (
 from lakeloom.sources.models import Constraint, TableRef
 from lakeloom.state.audit import AuditRepository
 from lakeloom.state.db import create_engine, upgrade
-from lakeloom.state.proposals import ProposalRepository
+from lakeloom.state.proposals import ProposalRepository, ProposalRow
 from lakeloom.state.scans import ScannedTable, ScanRepository
 from lakeloom.untrusted import UntrustedText
 
@@ -532,13 +535,31 @@ async def test_rerun_reports_only_pending_duplicates(make) -> None:
     assert len(kit.om.created()) == 2  # nothing new in OM
 
 
-async def test_unknown_relationship_type_dropped_with_warning(make) -> None:
+async def test_unknown_relationship_type_falls_back_to_related_to(make) -> None:
     kit = make()
-    kit.om.relationship_types = {}
+    kit.om.relationship_types = {"relatedTo": "rt-rel"}
     scan_id = await kit.scan(customers(), orders())
     p = await kit.service.propose_from_scan(scan_id, "shop", principal=AGENT, client=None)
-    assert not any(isinstance(op, AddRelation) for op in p.operations())
-    assert any("relationship type hasCustomer does not exist" in w for w in p.warnings)
+    (rel,) = [op for op in p.operations() if isinstance(op, AddRelation)]
+    assert rel.relation_type == "hasCustomer"  # the intended name is kept
+    assert (
+        "relationship type hasCustomer not defined in OpenMetadata; glossary link uses "
+        "relatedTo (native object property keeps hasCustomer)" in p.warnings
+    )
+    glossary_kw, native_kw = kit.om.created()
+    (link,) = [o for o in glossary_kw["operations"] if o["operationType"] == "ADD_RELATIONSHIP"]
+    assert link["relationship"]["relationshipType"]["id"] == "rt-rel"
+    (prop,) = [
+        o["property"]
+        for o in native_kw["operations"]
+        if o["operationType"] == "UPSERT_PROPERTY" and o["property"]["kind"] == "OBJECT"
+    ]
+    assert prop["name"] == "Order.hasCustomer"
+    assert prop["domain"] == ["http://x/ontology/shop/Order"]
+    assert prop["range"] == ["http://x/ontology/shop/Customer"]
+    block = parse_provenance(glossary_kw["description"])
+    assert "rel:Order|hasCustomer|Customer" in [o["key"] for o in block["operations"]]
+    assert "the Lakeloom store is authoritative" in glossary_kw["description"]
 
 
 async def test_unpaired_model_needs_pairing_for_native_ops(make) -> None:
@@ -999,3 +1020,120 @@ async def test_server_principal_is_a_caller(make) -> None:
     out = await kit.service.submit(p.id, principal=who, client=None)
     assert out.status == "submitted"
     assert (await kit.audit_rows())[-1].principal_type == "agent"
+
+
+# --- fix round 1 -----------------------------------------------------------------------------
+
+
+async def test_append_relation_on_draft_concept_has_no_base_version(make) -> None:
+    kit = make()
+    p = await _shop_proposal(kit)
+    glossary_cs = p.parts[0].change_set_ids["glossary"]
+    rel = AddRelation(
+        op="add_relation", source="Customer", relation_type="relatedTo", target="Customer"
+    )
+    await kit.service.propose_change(p.id, [rel], principal=AGENT, client=None)
+    ((_, ops),) = [a for n, a in kit.om.calls if n == "add_operations" and a[0] == glossary_cs]
+    (link,) = ops
+    assert link["operationType"] == "ADD_RELATIONSHIP" and "baseVersion" not in link
+
+
+@pytest.mark.parametrize("op", ["synonym", "update"])
+async def test_change_to_a_draft_concept_is_a_user_facing_error(make, op: str) -> None:
+    kit = make()
+    p = await _shop_proposal(kit)
+    change: ProposalOperation = (
+        AddSynonym(op="add_synonym", concept_fqn="Customer", synonym="Buyer")
+        if op == "synonym"
+        else UpdateConcept(
+            op="update_concept", fqn="shop.Customer", base_version="0.1", description=ut("d")
+        )
+    )
+    with pytest.raises(LakeloomError) as info:
+        await kit.service.propose_change(p.id, [change], principal=AGENT, client=None)
+    assert info.value.code == "validation_error"
+    assert info.value.message == "Customer is created by this proposal"
+    assert "when proposing it, or discard and re-propose" in info.value.hint
+
+
+async def test_store_failure_after_create_undoes_om_and_drops_the_row(make, monkeypatch) -> None:
+    kit = make()
+    scan_id = await kit.scan(customers())
+
+    async def broken(*_: object, **__: object) -> None:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(kit.repo, "update", broken)
+    with pytest.raises(RuntimeError):
+        await kit.service.propose_from_scan(scan_id, "shop", principal=AGENT, client=None)
+    assert kit.om.change_sets and all(
+        cs["state"] == "DISCARDED" for cs in kit.om.change_sets.values()
+    )
+    assert await kit.repo.open_for_model("shop") == []
+
+
+async def test_cancel_between_the_two_sides_leaves_nothing_unrecorded(make) -> None:
+    kit = make()
+    scan_id = await kit.scan(customers())
+    kit.om.fail["create_native"] = asyncio.CancelledError()  # type: ignore[assignment]
+    with pytest.raises(asyncio.CancelledError):
+        await kit.service.propose_from_scan(scan_id, "shop", principal=AGENT, client=None)
+    ((cs_id, cs),) = kit.om.change_sets.items()
+    assert cs["state"] == "DISCARDED"  # the glossary set created before the cancel
+    assert await kit.repo.open_for_model("shop") == []
+    async with kit.repo._sessions() as session:  # pyright: ignore[reportPrivateUsage]
+        rows = list((await session.execute(select(ProposalRow))).scalars())
+    # the only row left is the discarded record of that change set
+    assert [(r.status, r.payload["abandoned_change_sets"][0]["id"]) for r in rows] == [
+        ("discarded", cs_id)
+    ]
+
+
+async def test_store_failure_after_append_removes_the_operations(make, monkeypatch) -> None:
+    kit = make()
+    p = await _shop_proposal(kit)
+    native_cs = p.parts[0].change_set_ids["native"]
+    assert native_cs is not None
+    before = list(kit.om.change_sets[native_cs]["operations"])
+
+    async def broken(*_: object, **__: object) -> None:
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(kit.repo, "update", broken)
+    attr = AddAttribute(op="add_attribute", concept="Customer", name="email", datatype="xsd:string")
+    with pytest.raises(RuntimeError):
+        await kit.service.propose_change(p.id, [attr], principal=AGENT, client=None)
+    assert kit.om.change_sets[native_cs]["operations"] == before
+
+
+async def test_discard_treats_missing_change_sets_as_gone(make) -> None:
+    kit = make()
+    p = await _shop_proposal(kit)
+    glossary_cs, native_cs = p.change_set_ids()
+    del kit.om.change_sets[native_cs]  # hard-deleted in OM
+    preview = await kit.service.discard(p.id, principal=AGENT, client=None)
+    assert isinstance(preview, ConfirmPreview)
+    out = await kit.service.discard(
+        p.id, principal=AGENT, client=None, confirm_token=preview.confirm_token
+    )
+    assert isinstance(out, Proposal) and out.status == "discarded"
+    assert out.parts[0].om_state == {"glossary": "DISCARDED", "native": "MISSING"}
+    assert [c[1] for c in kit.om.calls if c[0] == "DISCARDED"] == [glossary_cs]
+
+
+async def test_unpaired_model_relation_is_a_glossary_link_only(make) -> None:
+    kit = make(paired=False)
+    kit.om.terms["retail"] = [term("retail", "Customer", 0.3)]
+    kit.om.tables["svc.db.sales.orders"] = OMTable.model_validate(
+        {"id": "t1", "fullyQualifiedName": "svc.db.sales.orders"}
+    )
+    p = await kit.service.propose_realization(
+        None, "retail", "retail.Customer", "svc.db.sales.orders", principal=AGENT, client=None
+    )
+    rel = AddRelation(
+        op="add_relation", source="Customer", relation_type="relatedTo", target="Customer"
+    )
+    out = await kit.service.propose_change(p.id, [rel], principal=AGENT, client=None)
+    assert out.parts[0].change_set_ids["native"] is None
+    assert out.parts[0].change_set_ids["glossary"] is not None
+    assert any("glossary link only" in w for w in out.warnings)

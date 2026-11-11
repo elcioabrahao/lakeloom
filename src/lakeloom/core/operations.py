@@ -11,7 +11,7 @@ ontology whose classes reuse the glossary terms' IRIs. Realizations are Lakeloom
 """
 
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Annotated, Any, Literal, cast
 from urllib.parse import quote
@@ -291,6 +291,10 @@ class OMContext:
     relationship_ids: Mapping[str, str] = field(default_factory=dict[str, str])
     native_ids: Mapping[str, str] = field(default_factory=dict[str, str])
     native_versions: Mapping[str, float] = field(default_factory=dict[str, float])
+    # Hybrid model: relations also become native object properties when the model is paired.
+    paired: bool = True
+    # Glossary relationship type used when OM does not define the relation's own type.
+    fallback_relationship_type: str | None = "relatedTo"
 
 
 @dataclass(frozen=True)
@@ -413,16 +417,24 @@ def _text(value: UntrustedText | None) -> str | None:
     return None if value is None else value.text
 
 
-def to_om_all(ops: Sequence[ProposalOperation], ctx: OMContext) -> OMOps:
+def to_om_all(
+    ops: Sequence[ProposalOperation],
+    ctx: OMContext,
+    *,
+    in_change_set: Collection[str] = (),
+) -> OMOps:
     """Map a batch of proposal operations to OM operations; the entry point for callers.
 
     All changes to one existing term (``UpdateConcept``, ``AddSynonym``) are folded, in
     order, into a single ``UPDATE_TERM`` built from the term's snapshot: separate updates
     from the same static context would overwrite each other. A synonym added to a concept
     created in the same batch is folded into its ``CREATE_TERM``. Relations and mappings on a
-    term created in the same batch carry no ``baseVersion`` (rc1 rejects one, ADR 0011).
+    term created in the same batch carry no ``baseVersion`` (rc1 rejects one, ADR 0011);
+    ``in_change_set`` names concepts created earlier in the change set the batch is appended
+    to, which are treated the same way.
     """
     created = {op.name: op for op in ops if isinstance(op, AddConcept)}
+    unversioned = set(created) | set(in_change_set)
     folded: dict[str, list[UpdateConcept | AddSynonym]] = {}
     extra_synonyms: dict[str, list[str]] = {}
     for op in ops:
@@ -456,7 +468,7 @@ def to_om_all(ops: Sequence[ProposalOperation], ctx: OMContext) -> OMOps:
             op = op.model_copy(update={"synonyms": merged})
         out = to_om(op, ctx)
         anchor = _anchor(op)
-        if anchor is not None and _local(ctx, anchor) in created:
+        if anchor is not None and _local(ctx, anchor) in unversioned:
             # rc1: "baseVersion must be absent for a term created in this change set"
             out = OMOps(
                 glossary=[{k: v for k, v in o.items() if k != "baseVersion"} for o in out.glossary],
@@ -644,6 +656,9 @@ def _add_attribute(op: AddAttribute, ctx: OMContext) -> OMOps:
 
 
 def _relationship_type(ctx: OMContext, name: str) -> dict[str, str]:
+    fallback = ctx.fallback_relationship_type
+    if name not in ctx.relationship_type_ids and fallback in ctx.relationship_type_ids:
+        name = str(fallback)  # the native object property keeps the intended name
     if name not in ctx.relationship_type_ids:
         raise _fail(
             f"unknown relationship type {name!r}",
@@ -674,8 +689,29 @@ def _add_relation(op: AddRelation, ctx: OMContext) -> OMOps:
                 "baseVersion": _lookup(ctx.term_versions, ctx, op.source, "term version"),
                 "relationship": relationship,
             }
-        ]
+        ],
+        native=[_object_property(op, ctx)] if ctx.paired else [],
     )
+
+
+def _object_property(op: AddRelation, ctx: OMContext) -> dict[str, Any]:
+    """The relation as a native ``owl:ObjectProperty`` (kind OBJECT): domain the source class,
+    range the target class; IRI and name follow the property scheme (ADR 0011)."""
+    name = f"{_bare(op.source)}.{op.relation_type}"
+    prop: dict[str, Any] = {
+        "id": _uid("object-property", op_key(op)),
+        "name": name,
+        "displayName": op.relation_type,
+        "fullyQualifiedName": f"{_ontology_name(ctx)}.{name}",
+        "iri": _member_iri(ctx, op.source, op.relation_type),
+        "kind": "OBJECT",
+        "domain": [_concept_iri(ctx, op.source)],
+        "range": [_concept_iri(ctx, op.target)],
+        "ontology": _ontology_ref(ctx),
+    }
+    if op.description is not None:
+        prop["description"] = op.description.text
+    return {"operationType": "UPSERT_PROPERTY", "property": prop}
 
 
 def _remove_relation(op: RemoveRelation, ctx: OMContext) -> OMOps:
@@ -692,8 +728,23 @@ def _remove_relation(op: RemoveRelation, ctx: OMContext) -> OMOps:
                 "targetId": ctx.relationship_ids[key],
                 "baseVersion": _lookup(ctx.term_versions, ctx, op.source, "term version"),
             }
-        ]
+        ],
+        native=_remove_object_property(op, ctx),
     )
+
+
+def _remove_object_property(op: RemoveRelation, ctx: OMContext) -> list[dict[str, Any]]:
+    """Delete the relation's native object property when the ontology has one."""
+    key = f"attr:{_member_iri(ctx, op.source, op.relation_type)}"
+    if not ctx.paired or key not in ctx.native_ids or key not in ctx.native_versions:
+        return []
+    return [
+        {
+            "operationType": "DELETE_PROPERTY",
+            "targetId": ctx.native_ids[key],
+            "baseVersion": ctx.native_versions[key],
+        }
+    ]
 
 
 def _mapping(op: AddMapping | RemoveMapping, ctx: OMContext) -> OMOps:

@@ -3,13 +3,14 @@
 In-process: the fixture lake is scanned from the repository checkout, the throwaway model
 (glossary + paired native ontology) is created in the test, and the proposal's change sets
 are drafted, submitted and discarded in OM. Nothing is applied. Everything created (change
-sets, ontology, glossary, relationship types the test had to add) is hard-deleted and checked
+sets, ontology, glossary) is hard-deleted and checked
 to be gone; the seeded ``retail`` glossary is checked to be untouched.
 """
 
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -40,7 +41,7 @@ pytestmark = pytest.mark.contract
 
 LAKE = Path(__file__).resolve().parents[1] / "fixtures" / "lake"
 TABLES = ("customers", "products", "orders", "invoices")
-RELATION_TYPES = ("hasCustomer", "hasOrder")  # what the mapper names the fixture's FKs
+FK_RELATIONS = {("Order", "hasCustomer", "Customer"), ("Invoice", "hasOrder", "Order")}
 AGENT = Actor(subject="contract-agent", type="agent")
 
 
@@ -60,27 +61,7 @@ async def om(om_url: str, om_bot_token: str) -> AsyncIterator[OMClient]:
         await client.aclose()
 
 
-async def _ensure_relation_types(http: httpx.AsyncClient, slug: str) -> list[str]:
-    """Add the FK relationship types if OM lacks them; return the ids the test created."""
-    created: list[str] = []
-    for name in RELATION_TYPES:
-        found = await http.get(f"/api/v1/relationshipTypes/name/{name}")
-        if found.status_code == 200:
-            continue
-        body = {
-            "name": name,
-            "displayName": name,
-            "description": "contract-test relationship type (deleted after the test)",
-            "category": "CUSTOM",
-            "paletteKey": "BLUE",
-            "rdfPredicate": f"http://localhost:8000/ontology/{slug}/{name}",
-        }
-        response = (await http.put("/api/v1/relationshipTypes", json=body)).raise_for_status()
-        created.append(str(response.json()["id"]))
-    return created
-
-
-async def _change_set(http: httpx.AsyncClient, cs_id: str) -> dict[str, object]:
+async def _change_set(http: httpx.AsyncClient, cs_id: str) -> dict[str, Any]:
     return (await http.get(f"/api/v1/ontologyChangeSets/{cs_id}")).raise_for_status().json()
 
 
@@ -93,11 +74,14 @@ async def test_fr_pro_03_propose_submit_rerun_discard_live(
     engine = create_engine(f"sqlite:///{tmp_path / 'state.db'}")
     await upgrade(engine)
     change_sets: list[str] = []
-    relation_types: list[str] = []
     try:
         await om.create_glossary(name=slug, display_name=None, description="contract tmp")
         await om.create_ontology(name=slug, iri=base_iri, description="contract tmp pair")
-        relation_types = await _ensure_relation_types(http, slug)
+        related_to = (
+            (await http.get("/api/v1/relationshipTypes/name/relatedTo")).raise_for_status().json()
+        )
+        for _, kind, _ in FK_RELATIONS:  # the mapper's FK types are not defined in OM
+            assert (await http.get(f"/api/v1/relationshipTypes/name/{kind}")).status_code == 404
 
         settings = Settings(public_url="http://localhost:8000", max_proposal_ops=20)  # pyright: ignore[reportCallIssue]
         source = DeltaStorageSource(
@@ -131,7 +115,11 @@ async def test_fr_pro_03_propose_submit_rerun_discard_live(
         change_sets = p.change_set_ids()
         assert len(p.parts) >= 2  # split at 20 operations (FR-PRO-08)
         assert all(len(part.operations) <= 20 for part in p.parts)
-        assert sum(isinstance(op, AddRelation) for op in p.operations()) == 2
+        relations = [op for op in p.operations() if isinstance(op, AddRelation)]
+        assert {(r.source, r.relation_type, r.target) for r in relations} == FK_RELATIONS
+        assert sum("glossary link uses relatedTo" in w for w in p.warnings) == 2
+        links: list[dict[str, Any]] = []
+        object_properties: list[dict[str, Any]] = []
         for part in p.parts:
             assert part.change_set_ids["glossary"] and part.change_set_ids["native"]
             for side in ("glossary", "native"):
@@ -147,6 +135,19 @@ async def test_fr_pro_03_propose_submit_rerun_discard_live(
                 assert [o["key"] for o in block["operations"]] == [
                     op_key(op) for op in part.operations
                 ]
+                ops = cast("list[dict[str, Any]]", cs["operations"])
+                links += [o for o in ops if o["operationType"] == "ADD_RELATIONSHIP"]
+                object_properties += [
+                    o["property"]
+                    for o in ops
+                    if o["operationType"] == "UPSERT_PROPERTY" and o["property"]["kind"] == "OBJECT"
+                ]
+        # OM accepted the drafts: relatedTo links on the glossary, typed object properties natively
+        assert len(links) == 2
+        assert {lk["relationship"]["relationshipType"]["id"] for lk in links} == {related_to["id"]}
+        assert {
+            (op["name"], tuple(op["domain"]), tuple(op["range"])) for op in object_properties
+        } == {(f"{s}.{k}", (f"{base_iri}{s}",), (f"{base_iri}{t}",)) for s, k, t in FK_RELATIONS}
 
         submitted = await service.submit(p.id, principal=AGENT, client="contract")
         assert submitted.status == "submitted"
@@ -176,13 +177,10 @@ async def test_fr_pro_03_propose_submit_rerun_discard_live(
         await http.delete(
             f"/api/v1/glossaries/name/{slug}", params={"hardDelete": "true", "recursive": "true"}
         )
-        for rt in relation_types:
-            await http.delete(f"/api/v1/relationshipTypes/{rt}", params={"hardDelete": "true"})
     for path in (
         f"/api/v1/ontologies/name/{slug}",
         f"/api/v1/glossaries/name/{slug}",
         *(f"/api/v1/ontologyChangeSets/{c}" for c in change_sets),
-        *(f"/api/v1/relationshipTypes/{r}" for r in relation_types),
     ):
         assert (await http.get(path, params={"include": "all"})).status_code == 404, path
     after = (await http.get("/api/v1/glossaries/name/retail")).raise_for_status().json()

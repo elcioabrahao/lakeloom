@@ -486,7 +486,7 @@ def test_to_om_all_keeps_order_and_other_ops() -> None:
         "ADD_RELATIONSHIP",
         "CREATE_TERM",
     ]
-    assert len(result.native) == 1
+    assert [n["operationType"] for n in result.native] == ["UPSERT_PROPERTY", "UPSERT_CONCEPT"]
 
 
 def test_synonym_on_concept_created_in_batch_is_folded_into_create() -> None:
@@ -606,3 +606,56 @@ def test_relation_and_mapping_from_a_term_created_in_the_batch_have_no_base_vers
     assert "baseVersion" not in rels[0] and rels[0]["targetId"] == draft_term_id(widget)
     assert "baseVersion" not in by_type["UPSERT_MAPPING"]
     assert rels[1]["baseVersion"] == 0.3  # from an existing term: still versioned
+
+
+def test_relation_is_also_a_native_object_property() -> None:
+    rel = AddRelation(
+        op="add_relation", source="Order", relation_type="placedBy", target="Customer"
+    )
+    (n,) = to_om(rel, CTX).native
+    assert n["operationType"] == "UPSERT_PROPERTY"
+    prop = n["property"]
+    assert prop["kind"] == "OBJECT"
+    assert prop["name"] == "Order.placedBy" and prop["displayName"] == "placedBy"
+    assert prop["iri"] == BASE + "Order.placedBy"
+    assert prop["domain"] == [BASE + "Order"] and prop["range"] == [BASE + "Customer"]
+    assert prop["ontology"] == {"id": "o-1", "type": "ontology"}
+    assert to_om(rel, replace(CTX, paired=False)).native == []
+
+
+def test_unknown_relationship_type_falls_back_to_related_to_on_the_glossary() -> None:
+    ctx = replace(CTX, relationship_type_ids={**CTX.relationship_type_ids, "relatedTo": "rt-rel"})
+    rel = AddRelation(
+        op="add_relation", source="Order", relation_type="hasBuyer", target="Customer"
+    )
+    out = to_om(rel, ctx)
+    assert out.glossary[0]["relationship"]["relationshipType"]["id"] == "rt-rel"
+    assert out.native[0]["property"]["name"] == "Order.hasBuyer"  # intended name kept
+
+
+def test_remove_relation_deletes_known_object_property() -> None:
+    key = "attr:" + BASE + "Order.placedBy"
+    ctx = replace(
+        CTX,
+        native_ids={**CTX.native_ids, key: "np-9"},
+        native_versions={**CTX.native_versions, key: 0.4},
+    )
+    rel = RemoveRelation(
+        op="remove_relation", source="Order", relation_type="placedBy", target="Customer"
+    )
+    assert to_om(rel, ctx).native == [
+        {"operationType": "DELETE_PROPERTY", "targetId": "np-9", "baseVersion": 0.4}
+    ]
+
+
+def test_append_to_change_set_with_draft_term_strips_base_version() -> None:
+    widget = AddConcept(op="add_concept", name="Widget", description=text("w"))
+    ctx = replace(
+        CTX,
+        term_ids={**CTX.term_ids, "Widget": draft_term_id(widget)},
+        term_versions={**CTX.term_versions, "Widget": 0.1},
+    )
+    rel = AddRelation(op="add_relation", source="Widget", relation_type="placedBy", target="Order")
+    assert to_om_all([rel], ctx).glossary[0]["baseVersion"] == 0.1
+    (g,) = to_om_all([rel], ctx, in_change_set={"Widget"}).glossary
+    assert "baseVersion" not in g

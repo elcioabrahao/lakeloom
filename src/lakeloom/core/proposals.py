@@ -29,11 +29,21 @@ Audit ownership (NFR-SEC-12): exactly one audit record per call of a write metho
 ``guarded(audited=True, audit=...)``; the service still fills the running call's
 :func:`~lakeloom.core.audit.current_audit` context (model, proposal, change set) so guarded's
 record carries them. Reads (``get_proposal``, ``summary_markdown``, ``diff``) are not audited.
+
+Relations (hybrid model): each ``AddRelation`` is a glossary link plus a native object
+property named after the relation; when OM lacks the relationship type the glossary link
+uses ``relatedTo`` (with a warning). An unpaired model gets the glossary link only.
+
+Concurrency: a per-proposal lock serialises edits, a per-model lock serialises
+``propose_from_scan`` (dedupe reads the model's open proposals), and the store is
+compare-and-set. The locks are in-process: with several replicas, two scans of one model at
+the same instant can still propose the same operation (accepted limitation for M2a).
 """
 
 import asyncio
 import hashlib
 import json
+import logging
 import uuid
 import weakref
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -118,6 +128,7 @@ DRAFT_TERM_VERSION = 0.1  # a term created in the same proposal; OM starts terms
 PROVENANCE_FENCE = "lakeloom-provenance"
 _NATIVE_OPS = (AddConcept, RemoveConcept, AddAttribute, RemoveAttribute, AddAxiom, RemoveAxiom)
 _MAX_HINT_ITEMS = 20
+_log = logging.getLogger(__name__)
 _OM_READS = 8  # concurrent change-set reads
 
 
@@ -439,6 +450,7 @@ def part_description(proposal: Proposal, part: ProposalPart, side: Side) -> str:
         f"for model {code_span(proposal.model)}.",
         "",
         f"Source tables: {tables}. Operations in this part: {len(part.operations)}.",
+        "Operations may be appended later; the Lakeloom store is authoritative.",
         "",
         *_count_line(part.operations),
         "",
@@ -703,6 +715,15 @@ def _with_ids(ops: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return [{**op, "id": str(uuid.uuid4())} for op in ops]
 
 
+@dataclass(frozen=True)
+class _Done:
+    """One OM write of a part: a created change set (``appended_to`` None) or an append."""
+
+    side: Side
+    appended_to: str | None
+    op_ids: list[str]
+
+
 @dataclass
 class _Target:
     info: ModelInfo
@@ -925,25 +946,28 @@ class ProposalService:
             relationship_type_ids=relationship_types,
             native_ids=native_ids,
             native_versions=native_versions,
+            paired=target.ontology is not None,
         )
 
-    async def _drop_unknown_relation_types(
-        self, ops: list[ProposalOperation], warnings: list[str]
-    ) -> list[ProposalOperation]:
-        if not any(isinstance(op, AddRelation) for op in ops):
-            return ops
-        known = await _om("listing relationship types", self._om.list_relationship_types())
-        kept: list[ProposalOperation] = []
+    @staticmethod
+    def _relation_warnings(ops: Iterable[ProposalOperation], ctx: OMContext) -> list[str]:
+        """Say where a relation's glossary link falls back to ``relatedTo`` or is the only
+        representation (unpaired model)."""
+        out: list[str] = []
         for op in ops:
-            if isinstance(op, AddRelation) and op.relation_type not in known:
-                warnings.append(
-                    f"relationship type {op.relation_type} does not exist in OpenMetadata; "
-                    f"{op_key(op)} not proposed (create the type, then add the relation "
-                    "with propose_change)"
-                )
+            if not isinstance(op, AddRelation):
                 continue
-            kept.append(op)
-        return kept
+            if op.relation_type not in ctx.relationship_type_ids:
+                out.append(
+                    f"relationship type {op.relation_type} not defined in OpenMetadata; glossary "
+                    f"link uses relatedTo (native object property keeps {op.relation_type})"
+                )
+            if not ctx.paired:
+                out.append(
+                    f"model {ctx.glossary_name} has no paired native ontology; {op_key(op)} is a "
+                    "glossary link only (call create_model with pair_existing=true)"
+                )
+        return sorted(set(out))
 
     # -- change sets -----------------------------------------------------------------------
 
@@ -1021,15 +1045,17 @@ class ProposalService:
 
     async def _write_part(
         self, p: Proposal, part: ProposalPart, chunk: list[ProposalOperation], om: OMOps, t: _Target
-    ) -> None:
+    ) -> list[_Done]:
         """Put ``om`` into the part's change sets (creating missing sides), all or nothing,
-        then add ``chunk`` to the part. Rolls the first side back if the second fails."""
-        done: list[tuple[Side, str | None, list[str]]] = []  # (side, appended to, op ids)
+        then add ``chunk`` to the part. On any failure, cancellation included, what was
+        written is undone (shielded) before the error propagates. Returns what was written,
+        for :meth:`_save_or_undo`."""
+        done: list[_Done] = []
+        sides: list[tuple[Side, list[dict[str, Any]]]] = [
+            ("glossary", om.glossary),
+            ("native", om.native),
+        ]
         try:
-            sides: list[tuple[Side, list[dict[str, Any]]]] = [
-                ("glossary", om.glossary),
-                ("native", om.native),
-            ]
             for side, ops in sides:
                 if not ops:
                     continue
@@ -1039,28 +1065,94 @@ class ProposalService:
                     # the description lists the part as it will be once this write succeeds
                     shown = part.model_copy(update={"operations": [*part.operations, *chunk]})
                     await self._create_side(p, part, shown, side, prepared, t)
-                    done.append((side, None, []))
+                    done.append(_Done(side, None, []))
                 else:
                     cs = await _om(
                         f"adding operations to change set {cs_id}",
                         self._om.add_operations(cs_id, prepared),
                     )
                     part.om_state[side] = str(cs.state)
-                    done.append((side, cs_id, [str(o["id"]) for o in prepared]))
-        except LakeloomError:
-            for side_, cs_id, ids in reversed(done):
-                if cs_id is None:
-                    await self._abandon(p, part, side_)
-                    continue
-                try:
-                    await self._om.remove_operations(cs_id, ids)
-                except (OMError, ValueError):
-                    p.warnings.append(
-                        f"change set {cs_id} may still hold {len(ids)} operations that are not "
-                        "in this proposal; discard the proposal and propose again"
-                    )
+                    done.append(_Done(side, cs_id, [str(o["id"]) for o in prepared]))
+        except BaseException:
+            left = await asyncio.shield(self._undo(p, part, done))
+            p.warnings.extend(
+                f"change set {cs} may still hold operations that are not in this proposal; "
+                "discard the proposal and propose again"
+                for cs in left
+            )
             raise
         part.operations.extend(chunk)
+        return done
+
+    async def _undo(self, p: Proposal, part: ProposalPart, done: Sequence[_Done]) -> list[str]:
+        """Revert writes of one part: discard created change sets (recorded as abandoned),
+        remove appended operations. Returns the change sets that could not be reverted."""
+        left: list[str] = []
+        for d in reversed(done):
+            if d.appended_to is None:
+                cs_id = part.change_set_ids[d.side]
+                await self._abandon(p, part, d.side)
+                if p.abandoned_change_sets and not p.abandoned_change_sets[-1].discarded:
+                    left.append(str(cs_id))
+                continue
+            try:
+                await self._om.remove_operations(d.appended_to, d.op_ids)
+            except (OMError, ValueError):
+                left.append(d.appended_to)
+        return left
+
+    async def _save_or_undo(
+        self,
+        p: Proposal,
+        part: ProposalPart,
+        done: Sequence[_Done],
+        chunk: Sequence[ProposalOperation],
+        *,
+        new_part: bool,
+    ) -> None:
+        """Store ``p`` after OM accepted a part's writes. If the store write fails (or the call
+        is cancelled), the OM writes are undone so OM holds nothing the store does not know."""
+        try:
+            await self._save(p)
+        except BaseException:
+            left = await asyncio.shield(self._undo(p, part, done))
+            if new_part:
+                p.parts.remove(part)
+            else:
+                del part.operations[len(part.operations) - len(chunk) :]
+            ids = [str(a.id) for a in p.abandoned_change_sets]
+            _log.error(
+                "proposal %s: store write failed after OM writes; undone (abandoned change "
+                "sets %s; not reverted %s)",
+                p.id,
+                ids,
+                left,
+            )
+            raise
+
+    async def _drop_ghost(self, p: Proposal) -> None:
+        """A proposal whose creation failed before any part was stored: mark it discarded when
+        it is the only record of a discarded change set, else (or if that fails) delete the
+        row; the abandoned change set ids are logged if even that fails."""
+        try:
+            if p.abandoned_change_sets and p.status != "discarded":
+                p.status = "discarded"
+                p.warnings.append("no part could be created; see the abandoned change sets")
+                try:
+                    await self._save(p)
+                    return
+                except Exception:
+                    p.status = "draft"  # fall through: no ghost draft row may stay
+            if p.status != "discarded":
+                await self._repo.delete(p.id)
+        except Exception as exc:
+            _log.error(
+                "proposal %s: could not clean up after a failed creation (%s); abandoned "
+                "change sets %s",
+                p.id,
+                type(exc).__name__,
+                [a.id for a in p.abandoned_change_sets],
+            )
 
     # -- propose_from_scan -------------------------------------------------------------------
 
@@ -1075,7 +1167,10 @@ class ProposalService:
     ) -> Proposal:
         async def run(trail: AuditContext) -> tuple[Proposal, str | None]:
             trail.model = model
-            return await self._from_scan(trail, scan_id, model, principal, client, tables)
+            # dedupe reads the open proposals of the model: two concurrent scans of one model
+            # must not both propose the same concept (single replica; see module docstring)
+            async with self._lock(f"model:{model}"):
+                return await self._from_scan(trail, scan_id, model, principal, client, tables)
 
         return await self._audited("propose_from_scan", principal, client, run)
 
@@ -1126,7 +1221,7 @@ class ProposalService:
             )
             for m in result.matches
         ]
-        ops = await self._drop_unknown_relation_types(result.operations, warnings)
+        ops = result.operations
         if not ops:
             raise NothingToPropose(matches, sorted(set(warnings)))
         self._require_pair(target, ops)
@@ -1134,6 +1229,7 @@ class ProposalService:
         groups, split_warnings = split_parts(ops, names, self.max_ops)
         ctx = await self._context(target, ops)
         planned = [(tbls, chunk, to_om_all(chunk, ctx)) for tbls, chunk in groups]  # fail closed
+        warnings += self._relation_warnings(ops, ctx)
         used = {t for tbls, _, _ in planned for t in tbls}
         now = _now()
         provenance = Provenance(
@@ -1162,31 +1258,29 @@ class ProposalService:
         )
         trail.proposal_id = p.id
         await self._repo.add(p)
-        for n, (tbls, chunk, om) in enumerate(planned, 1):
-            part = ProposalPart(n=n, tables=tbls, table=tbls[0] if len(tbls) == 1 else None)
-            try:
-                await self._write_part(p, part, chunk, om, target)
-            except LakeloomError as exc:
-                return await self._partial(p, n, len(planned), len(chunk), exc)
-            p.parts.append(part)
-            trail.change_set_id = next(
-                (cs for cs in reversed(p.change_set_ids())), trail.change_set_id
-            )
-            await self._save(p)
+        try:
+            for n, (tbls, chunk, om) in enumerate(planned, 1):
+                part = ProposalPart(n=n, tables=tbls, table=tbls[0] if len(tbls) == 1 else None)
+                try:
+                    done = await self._write_part(p, part, chunk, om, target)
+                except LakeloomError as exc:
+                    if not p.parts:
+                        raise
+                    return await self._partial(p, n, len(planned), len(chunk), exc)
+                p.parts.append(part)
+                await self._save_or_undo(p, part, done, chunk, new_part=True)
+                ids = p.change_set_ids()
+                trail.change_set_id = ids[-1] if ids else trail.change_set_id
+        except BaseException:
+            if not p.parts:
+                await asyncio.shield(self._drop_ghost(p))
+            raise
         return p, None
 
     async def _partial(
         self, p: Proposal, n: int, total: int, count: int, exc: LakeloomError
     ) -> tuple[Proposal, str | None]:
-        """Part ``n`` failed: keep what exists (or nothing) and say so."""
-        if not p.parts:
-            if not p.abandoned_change_sets:
-                await self._repo.delete(p.id)
-                raise exc
-            p.status = "discarded"  # nothing usable; the row keeps the discarded change sets
-            p.warnings.append(f"part 1 could not be created ({exc.code}): {exc.message}")
-            await self._save(p)
-            raise exc
+        """Part ``n`` (> 1) failed: keep the stored parts and say so."""
         p.warnings.append(
             f"part {n} of {total} could not be created ({exc.code}: {exc.message}); its "
             f"{count} operations and those of later parts are not in this proposal; run "
@@ -1251,27 +1345,53 @@ class ProposalService:
                 "one proposal changes an existing concept once; discard it and propose the "
                 "combined change",
             )
+        drafts = {op.name for op in existing if isinstance(op, AddConcept)}
+        for op in new:
+            name = _updated_term(op)
+            if name is not None and name in drafts:
+                what = "synonym" if isinstance(op, AddSynonym) else "description/update"
+                raise _fail(
+                    f"{name} is created by this proposal",
+                    f"include the {what} when proposing it, or discard and re-propose",
+                )
         target = await self._target(p.model)
         self._require_pair(target, new)
         ctx = await self._context(target, [*existing, *new])
         chunks = self._chunks(p, new)
-        planned = [(index, chunk, to_om_all(chunk, ctx)) for index, chunk in chunks]
+        planned = [
+            (
+                index,
+                chunk,
+                to_om_all(
+                    chunk,
+                    ctx,
+                    # concepts created earlier in the change set this chunk is appended to
+                    in_change_set=()
+                    if index is None
+                    else {
+                        op.name for op in p.parts[index].operations if isinstance(op, AddConcept)
+                    },
+                ),
+            )
+            for index, chunk in chunks
+        ]
         await self._validate_axioms(target, [*existing, *new], new, ctx)
         p.warnings.extend(f"already in this proposal: {k}" for k in skipped)
+        p.warnings.extend(w for w in self._relation_warnings(new, ctx) if w not in p.warnings)
         for index, chunk, om in planned:
             noted = (len(p.abandoned_change_sets), len(p.warnings))
             part = ProposalPart(n=len(p.parts) + 1) if index is None else p.parts[index]
             try:
-                await self._write_part(p, part, chunk, om, target)
+                done = await self._write_part(p, part, chunk, om, target)
             except LakeloomError:
                 if (len(p.abandoned_change_sets), len(p.warnings)) != noted:
                     await self._save(p)  # keep the record of a discarded change set
                 raise
             if index is None:
                 p.parts.append(part)
+            await self._save_or_undo(p, part, done, chunk, new_part=index is None)
             ids = p.change_set_ids()
             trail.change_set_id = ids[-1] if ids else None
-            await self._save(p)
 
     def _chunks(
         self, p: Proposal, new: list[ProposalOperation]
@@ -1497,15 +1617,20 @@ class ProposalService:
                 cs_id = part.change_set_ids.get(side)
                 if cs_id is None or part.om_state.get(side) == state:
                     continue
+                if state == "DISCARDED" and part.om_state.get(side) == "MISSING":
+                    continue  # gone from OM: nothing left to discard
                 trail.change_set_id = cs_id
                 try:
                     cs = await _om(f"moving change set {cs_id} to {state}", command(cs_id))
-                except LakeloomError:
+                except LakeloomError as exc:
+                    if state == "DISCARDED" and exc.code == "not_found":
+                        part.om_state[side] = "MISSING"  # deleted meanwhile: already gone
+                        continue
                     await self._save(p)
                     raise
                 part.om_state[side] = str(cs.state)
 
-    async def _digest(self, p: Proposal) -> str:
+    async def _digest(self, p: Proposal) -> tuple[str, dict[str, tuple[float | None, str]]]:
         states = await self._om_states(p)
         data = {
             "id": p.id,
@@ -1513,7 +1638,7 @@ class ProposalService:
             "updated_at": p.updated_at.isoformat(),
             "change_sets": [[cs, *states[cs]] for cs in p.change_set_ids()],
         }
-        return hashlib.sha256(_json_block(data).encode("utf-8")).hexdigest()
+        return hashlib.sha256(_json_block(data).encode("utf-8")).hexdigest(), states
 
     async def discard(
         self,
@@ -1534,7 +1659,7 @@ class ProposalService:
             async with self._lock(proposal_id):
                 p = await self._repo.get(proposal_id)
                 trail.model = p.model
-                digest = await self._digest(p)
+                digest, states = await self._digest(p)
                 if confirm_token is None:
                     self._require_open(p)
                     token, expires = self._confirm.issue(DISCARD_TOOL, args, digest)
@@ -1549,6 +1674,11 @@ class ProposalService:
                     ), None
                 self._confirm.verify(confirm_token, DISCARD_TOOL, args, digest)
                 self._require_open(p)
+                for part in p.parts:  # act on what OM holds now (MISSING: already gone)
+                    for side in SIDES:
+                        cs = part.change_set_ids.get(side)
+                        if cs is not None:
+                            part.om_state[side] = states[cs][1]
                 await self._transition(trail, p, "DISCARDED", self._om.discard_change_set)
                 p.status = "discarded"
                 await self._save(p)

@@ -264,7 +264,7 @@ IRI scheme (`OMContext.base_iri` is the model base, e.g. `http://localhost:8000/
 | UpdateConcept | one UPDATE_TERM per term with the full term built from a `TermSnapshot` plus the changes | - |
 | RemoveConcept | DELETE_TERM | DELETE_CONCEPT (fails closed if the class is not in `native_ids`) |
 | AddAttribute / RemoveAttribute | - | UPSERT_PROPERTY / DELETE_PROPERTY |
-| AddRelation / RemoveRelation | ADD_RELATIONSHIP / DELETE_RELATIONSHIP | - |
+| AddRelation / RemoveRelation | ADD_RELATIONSHIP / DELETE_RELATIONSHIP (`relatedTo` when the type is undefined) | UPSERT_PROPERTY kind OBJECT / DELETE_PROPERTY (paired models; Task 6 fix round 1) |
 | AddMapping / RemoveMapping | UPSERT_MAPPING / DELETE_MAPPING (`closeMatch` -> `CLOSE_MATCH`, ...) | - |
 | AddAxiom / RemoveAxiom | - | UPSERT_AXIOM / DELETE_AXIOM |
 | AddSynonym | folded into the term's single UPDATE_TERM (snapshot synonyms + new, case-insensitive dedupe); into the CREATE_TERM if the concept is created in the same batch | - |
@@ -366,14 +366,32 @@ is applied.
   change set`. `to_om_all` drops it for such terms. A relation whose endpoint is created in
   *another* part's change set still carries the draft id and version 0.1; applying parts in
   order and remapping draft ids is M2b's job.
-- **Relationship types** are looked up by name (`GET /v1/relationshipTypes`). The mapper's
-  `has<Target>` types usually do not exist; `propose_from_scan` drops such relations with a
-  warning, `propose_change` fails closed (`validation_error`). Creating relationship types is
-  not done by Lakeloom in M2a.
+- **Relations (fix round 1, controller ruling).** Each `AddRelation` maps to two operations:
+  the glossary `ADD_RELATIONSHIP` and, when the model is paired, a native
+  `UPSERT_PROPERTY` with `kind: "OBJECT"`, name `{Source}.{relationType}`, IRI
+  `{base}{Source}.{relationType}`, `displayName` the relation type, `domain` `[source class
+  IRI]`, `range` `[target class IRI]`. A live draft on a throwaway paired model was accepted
+  (2026-11-11, contract test; draft only, never applied). Relationship types are looked up
+  by name (`GET /v1/relationshipTypes`); when the relation's own type (e.g. the mapper's
+  `has<Target>`) is not defined in OM, the glossary link uses the core `relatedTo` type and
+  the proposal warns "relationship type <name> not defined in OpenMetadata; glossary link
+  uses relatedTo (native object property keeps <name>)". Lakeloom never creates
+  relationship types. Unpaired models get the glossary link only (with a warning).
+  `RemoveRelation` also deletes the object property when the ontology has it. Dedupe treats a
+  relation as present when an `owl:ObjectProperty` named after it has the source as
+  `rdfs:domain` and the target as `rdfs:range`.
+- **Appending to a change set** that already creates a term: relations and mappings on it
+  carry no `baseVersion` either (`to_om_all(..., in_change_set=...)`). A synonym or update
+  of a concept the proposal itself creates is refused (`validation_error`).
 - **Consistency.** All OM payloads are built (failing closed) before the first write; each
-  part is stored right after its change sets exist; when the second side of a part fails, the
-  first is undone (`OMClient.remove_operations`) or, if it was just created, discarded and
-  listed in `Proposal.abandoned_change_sets`. Submit/discard store per-side progress, so a
+  part is stored right after its change sets exist; when the second side of a part fails
+  (any error, cancellation included), the first is undone under `asyncio.shield`
+  (`OMClient.remove_operations`) or, if it was just created, discarded and listed in
+  `Proposal.abandoned_change_sets`. If the store write after a successful OM write fails,
+  the OM writes are undone the same way (ERROR log with the change-set ids when undo fails);
+  a proposal row without any stored part is removed, or marked `discarded` when it is the
+  only record of a discarded change set. Discard treats change sets OM no longer has
+  (404 / `MISSING`) as already gone. Submit/discard store per-side progress, so a
   retry continues where it stopped. Store updates are compare-and-set on a revision counter.
 - **Axioms** added with `propose_change` are validated with `POST /v1/ontologyAxioms/validate`;
   `UNDECLARED_CLASS` / `UNDECLARED_PROPERTY` are excused only for IRIs the same proposal

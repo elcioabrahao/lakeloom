@@ -1,6 +1,7 @@
 """Duplicate avoidance against models, imports and open proposals (FR-PRO-02)."""
 
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import cast
 
 from test_mapper import POLICY, col, customers, orders, record, table
@@ -315,6 +316,52 @@ async def test_rescan_proposes_nothing_new() -> None:
         "retail.Customer is already realized by lake.sales.customers",
         "retail.Order is already realized by lake.sales.orders",
     ]
+
+
+def object_property_ttl(ops: list[ProposalOperation]) -> str:
+    """Native object properties of applied relations, built by ``to_om_all`` (ADR 0011)."""
+    out: list[str] = []
+    rels = [o for o in ops if isinstance(o, AddRelation)]
+    names = {n for r in rels for n in (r.source, r.target)}
+    ctx = replace(
+        CTX,
+        term_ids={n: f"t-{n}" for n in names},
+        term_versions=dict.fromkeys(names, 0.1),
+        relationship_type_ids={r.relation_type: "rt" for r in rels},
+    )
+    for item in to_om_all(rels, ctx).native:
+        prop = item["property"]
+        assert prop["kind"] == "OBJECT"
+        out.append(
+            f"<{prop['iri']}> a owl:ObjectProperty ; rdfs:domain <{prop['domain'][0]}> ;"
+            f" rdfs:range <{prop['range'][0]}> ."
+        )
+    return "\n".join(out) + "\n"
+
+
+async def test_rescan_dedupes_relation_held_as_native_object_property() -> None:
+    """Applied relations live as native object properties (glossary link: relatedTo)."""
+    ops = mapped(orders(), customers())
+    applied = RETAIL + native_ttl(ops) + object_property_ttl(ops)
+    applied += "r:Order om:relatedTo r:Customer .\n"
+    tables = {
+        "lake.sales.customers": om_table(
+            "lake.sales.customers",
+            ["retail.Customer"],
+            {"customer_id": ["retail.Customer"], "name": ["retail.Customer"]},
+        ),
+        "lake.sales.orders": om_table(
+            "lake.sales.orders",
+            ["retail.Order"],
+            {
+                c: ["retail.Order"]
+                for c in ("order_id", "customer_id", "order_date", "status", "total_amount")
+            },
+        ),
+    }
+    res = await run([orders(), customers()], turtles={"retail": applied}, om_tables=tables)
+    assert of(res, AddRelation) == []
+    assert res.operations == []
 
 
 async def test_enum_child_without_table_is_kept_with_warning() -> None:
