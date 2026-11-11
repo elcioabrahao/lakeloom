@@ -1,5 +1,5 @@
 import pytest
-from pydantic import TypeAdapter, ValidationError
+from pydantic import AnyUrl, TypeAdapter, ValidationError
 
 from lakeloom.core.operations import (
     MAX_DESCRIPTION_CHARS,
@@ -10,6 +10,7 @@ from lakeloom.core.operations import (
     AddRealization,
     AddRelation,
     AddSynonym,
+    Evidence,
     OMContext,
     ProposalOperation,
     RemoveAttribute,
@@ -18,10 +19,12 @@ from lakeloom.core.operations import (
     RemoveMapping,
     RemoveRealization,
     RemoveRelation,
+    TermSnapshot,
     UpdateConcept,
     draft_term_id,
     op_key,
     to_om,
+    to_om_all,
 )
 from lakeloom.errors import LakeloomError
 from lakeloom.untrusted import UntrustedText
@@ -34,8 +37,14 @@ def text(value: str) -> UntrustedText:
     return UntrustedText(text=value, source="lake comment")
 
 
-CUSTOMER = AddConcept(name="Customer", description=text("A buyer"))
-ORDER = AddConcept(name="Order", display_name="Order", synonyms=["Purchase"], parent="retail.Thing")
+CUSTOMER = AddConcept(op="add_concept", name="Customer", description=text("A buyer"))
+ORDER = AddConcept(
+    op="add_concept",
+    name="Order",
+    display_name="Order",
+    synonyms=["Purchase"],
+    parent="retail.Thing",
+)
 CTX = OMContext(
     glossary_name="retail",
     glossary_id="g-1",
@@ -49,33 +58,73 @@ CTX = OMContext(
         "Customer": "t-cust",
     },
     term_versions={"retail.Order": 0.3, "retail.Customer": 1.2},
-    term_synonyms={"retail.Order": ["Purchase"]},
+    terms={
+        "retail.Order": TermSnapshot(
+            description="An order",
+            version=0.3,
+            display_name="Order X",
+            iri=BASE + "Order",
+            parent_id="t-thing",
+            synonyms=("Purchase",),
+        ),
+        "retail.Customer": TermSnapshot(description="A buyer", version=1.2),
+    },
     relationship_type_ids={"placedBy": "rt-1"},
     relationship_ids={"rel:Order|placedBy|Customer": "r-1"},
     native_ids={
-        BASE + "Order": "nc-1",
-        BASE + "Order.order_id": "np-1",
-        BASE + "Order.card": "na-1",
+        "concept:" + BASE + "Order": "nc-1",
+        "attr:" + BASE + "Order.order_id": "np-1",
+        "axiom:" + BASE + "Order.card": "na-1",
     },
-    native_versions={BASE + "Order": 0.2, BASE + "Order.order_id": 0.1, BASE + "Order.card": 0.1},
+    native_versions={
+        "concept:" + BASE + "Order": 0.2,
+        "attr:" + BASE + "Order.order_id": 0.1,
+        "axiom:" + BASE + "Order.card": 0.1,
+    },
 )
 
 ALL_OPS: list[ProposalOperation] = [
     CUSTOMER,
     ORDER,
-    UpdateConcept(fqn="retail.Order", base_version="0.3", description=text("d"), synonyms=["x"]),
-    RemoveConcept(fqn="retail.Order", base_version="0.3"),
-    AddAttribute(concept="Order", name="order_id", datatype="xsd:string", is_identifier=True),
-    RemoveAttribute(concept="Order", name="order_id", base_version="0.1"),
-    AddRelation(source="Order", relation_type="placedBy", target="Customer"),
-    RemoveRelation(source="Order", relation_type="placedBy", target="Customer"),
-    AddMapping(concept="Order", kind="closeMatch", target_iri="https://schema.org/Order"),  # type: ignore[arg-type]
-    RemoveMapping(concept="Order", kind="closeMatch", target_iri="https://schema.org/Order"),  # type: ignore[arg-type]
-    AddAxiom(concept="Order", axiom={"name": "card", "axiomType": "SUBCLASS_OF"}),
-    RemoveAxiom(concept="Order", name="card", base_version="0.1"),
-    AddSynonym(concept_fqn="retail.Order", synonym="Sale"),
-    AddRealization(concept="Order", asset_fqn="a.b.c.orders", column=None),
-    RemoveRealization(concept="Order", asset_fqn="a.b.c.orders", column="id"),
+    UpdateConcept(
+        op="update_concept",
+        fqn="retail.Order",
+        base_version="0.3",
+        description=text("d"),
+        synonyms=["x"],
+    ),
+    RemoveConcept(op="remove_concept", fqn="retail.Order", base_version="0.3"),
+    AddAttribute(
+        op="add_attribute",
+        concept="Order",
+        name="order_id",
+        datatype="xsd:string",
+        is_identifier=True,
+    ),
+    RemoveAttribute(op="remove_attribute", concept="Order", name="order_id"),
+    AddRelation(op="add_relation", source="Order", relation_type="placedBy", target="Customer"),
+    RemoveRelation(
+        op="remove_relation", source="Order", relation_type="placedBy", target="Customer"
+    ),
+    AddMapping(
+        op="add_mapping",
+        concept="Order",
+        kind="closeMatch",
+        target_iri=AnyUrl("https://schema.org/Order"),
+    ),
+    RemoveMapping(
+        op="remove_mapping",
+        concept="Order",
+        kind="closeMatch",
+        target_iri=AnyUrl("https://schema.org/Order"),
+    ),
+    AddAxiom(op="add_axiom", concept="Order", axiom={"name": "card", "axiomType": "SUBCLASS_OF"}),
+    RemoveAxiom(op="remove_axiom", concept="Order", name="card"),
+    AddSynonym(op="add_synonym", concept_fqn="retail.Order", synonym="Sale"),
+    AddRealization(op="add_realization", concept="Order", asset_fqn="a.b.c.orders", column=None),
+    RemoveRealization(
+        op="remove_realization", concept="Order", asset_fqn="a.b.c.orders", column="id"
+    ),
 ]
 
 
@@ -120,12 +169,14 @@ def test_add_concept_description_on_both_sides() -> None:
 
 
 def test_draft_term_id_is_deterministic() -> None:
-    assert draft_term_id(CUSTOMER) == draft_term_id(AddConcept(name="Customer"))
+    assert draft_term_id(CUSTOMER) == draft_term_id(AddConcept(op="add_concept", name="Customer"))
     assert draft_term_id(CUSTOMER) != draft_term_id(ORDER)
 
 
 def test_update_concept() -> None:
-    op = UpdateConcept(fqn="retail.Order", base_version="0.3", description=text("new"))
+    op = UpdateConcept(
+        op="update_concept", fqn="retail.Order", base_version="0.3", description=text("new")
+    )
     (g,) = to_om(op, CTX).glossary
     assert g == {
         "operationType": "UPDATE_TERM",
@@ -136,12 +187,16 @@ def test_update_concept() -> None:
             "name": "Order",
             "glossary": {"id": "g-1", "type": "glossary"},
             "description": "new",
+            "displayName": "Order X",
+            "iri": BASE + "Order",
+            "parent": {"id": "t-thing", "type": "glossaryTerm"},
+            "synonyms": ["Purchase"],
         },
     }
 
 
 def test_remove_concept() -> None:
-    result = to_om(RemoveConcept(fqn="retail.Order", base_version="0.3"), CTX)
+    result = to_om(RemoveConcept(op="remove_concept", fqn="retail.Order", base_version="0.3"), CTX)
     assert result.glossary == [
         {"operationType": "DELETE_TERM", "targetId": "t-order", "baseVersion": 0.3}
     ]
@@ -152,6 +207,7 @@ def test_remove_concept() -> None:
 
 def test_add_attribute_maps_to_native_property() -> None:
     op = AddAttribute(
+        op="add_attribute",
         concept="retail.Order",
         name="status",
         datatype="xsd:string",
@@ -166,6 +222,7 @@ def test_add_attribute_maps_to_native_property() -> None:
     assert native["operationType"] == "UPSERT_PROPERTY"
     assert prop["kind"] == "DATA"
     assert prop["iri"] == BASE + "Order.status"
+    assert prop["name"] == "Order.status"
     assert prop["domain"] == [BASE + "Order"]
     assert prop["range"] == ["http://www.w3.org/2001/XMLSchema#string"]
     assert prop["isIdentifier"] is False
@@ -176,14 +233,20 @@ def test_add_attribute_maps_to_native_property() -> None:
 
 
 def test_identifier_attribute_without_optionals() -> None:
-    op = AddAttribute(concept="Order", name="order_id", datatype="xsd:decimal", is_identifier=True)
+    op = AddAttribute(
+        op="add_attribute",
+        concept="Order",
+        name="order_id",
+        datatype="xsd:decimal",
+        is_identifier=True,
+    )
     prop = to_om(op, CTX).native[0]["property"]
     assert prop["isIdentifier"] is True
     assert "enumValues" not in prop and "unit" not in prop and "description" not in prop
 
 
 def test_remove_attribute_targets_native_property() -> None:
-    result = to_om(RemoveAttribute(concept="Order", name="order_id", base_version="0.1"), CTX)
+    result = to_om(RemoveAttribute(op="remove_attribute", concept="Order", name="order_id"), CTX)
     assert result.native == [
         {"operationType": "DELETE_PROPERTY", "targetId": "np-1", "baseVersion": 0.1}
     ]
@@ -192,7 +255,8 @@ def test_remove_attribute_targets_native_property() -> None:
 
 def test_add_relation() -> None:
     (g,) = to_om(
-        AddRelation(source="Order", relation_type="placedBy", target="Customer"), CTX
+        AddRelation(op="add_relation", source="Order", relation_type="placedBy", target="Customer"),
+        CTX,
     ).glossary
     assert g["operationType"] == "ADD_RELATIONSHIP"
     assert g["targetId"] == "t-order"
@@ -212,19 +276,30 @@ def test_add_relation() -> None:
 
 def test_add_relation_unknown_type_is_validation_error() -> None:
     with pytest.raises(LakeloomError) as err:
-        to_om(AddRelation(source="Order", relation_type="nope", target="Customer"), CTX)
+        to_om(
+            AddRelation(op="add_relation", source="Order", relation_type="nope", target="Customer"),
+            CTX,
+        )
     assert err.value.code == "validation_error"
 
 
 def test_unknown_term_is_validation_error() -> None:
     with pytest.raises(LakeloomError) as err:
-        to_om(AddRelation(source="Ghost", relation_type="placedBy", target="Customer"), CTX)
+        to_om(
+            AddRelation(
+                op="add_relation", source="Ghost", relation_type="placedBy", target="Customer"
+            ),
+            CTX,
+        )
     assert err.value.code == "validation_error"
 
 
 def test_remove_relation() -> None:
     (g,) = to_om(
-        RemoveRelation(source="Order", relation_type="placedBy", target="Customer"), CTX
+        RemoveRelation(
+            op="remove_relation", source="Order", relation_type="placedBy", target="Customer"
+        ),
+        CTX,
     ).glossary
     assert g == {"operationType": "DELETE_RELATIONSHIP", "targetId": "r-1", "baseVersion": 0.3}
 
@@ -265,6 +340,7 @@ def test_remove_mapping() -> None:
 
 def test_add_axiom_maps_to_native_axiom() -> None:
     op = AddAxiom(
+        op="add_axiom",
         concept="Order",
         axiom={
             "name": "orderHasOneId",
@@ -287,22 +363,26 @@ def test_add_axiom_maps_to_native_axiom() -> None:
 
 def test_axiom_requires_name() -> None:
     with pytest.raises(ValidationError):
-        AddAxiom(concept="Order", axiom={"axiomType": "SUBCLASS_OF"})
+        AddAxiom(op="add_axiom", concept="Order", axiom={"axiomType": "SUBCLASS_OF"})
 
 
 def test_remove_axiom() -> None:
-    result = to_om(RemoveAxiom(concept="Order", name="card", base_version="0.1"), CTX)
+    result = to_om(RemoveAxiom(op="remove_axiom", concept="Order", name="card"), CTX)
     assert result.native == [
         {"operationType": "DELETE_AXIOM", "targetId": "na-1", "baseVersion": 0.1}
     ]
 
 
 def test_add_synonym_extends_existing() -> None:
-    (g,) = to_om(AddSynonym(concept_fqn="retail.Order", synonym="Sale"), CTX).glossary
+    (g,) = to_om(
+        AddSynonym(op="add_synonym", concept_fqn="retail.Order", synonym="Sale"), CTX
+    ).glossary
     assert g["operationType"] == "UPDATE_TERM"
     assert g["term"]["synonyms"] == ["Purchase", "Sale"]
     assert g["baseVersion"] == 0.3
-    again = to_om(AddSynonym(concept_fqn="retail.Order", synonym="purchase"), CTX).glossary[0]
+    again = to_om(
+        AddSynonym(op="add_synonym", concept_fqn="retail.Order", synonym="purchase"), CTX
+    ).glossary[0]
     assert again["term"]["synonyms"] == ["Purchase"]
 
 
@@ -316,20 +396,20 @@ def test_realizations_map_to_nothing() -> None:
 @pytest.mark.parametrize("bad", ["", "1Order", "Or.der", "x" * 129, "Or-der"])
 def test_invalid_concept_names_rejected(bad: str) -> None:
     with pytest.raises(ValidationError):
-        AddConcept(name=bad)
+        AddConcept(op="add_concept", name=bad)
     with pytest.raises(ValidationError):
-        AddAttribute(concept="Order", name=bad, datatype="xsd:string")
+        AddAttribute(op="add_attribute", concept="Order", name=bad, datatype="xsd:string")
 
 
 @pytest.mark.parametrize("bad", ["", "1x", "has space", "a-b"])
 def test_invalid_relation_types_rejected(bad: str) -> None:
     with pytest.raises(ValidationError):
-        AddRelation(source="a", relation_type=bad, target="b")
+        AddRelation(op="add_relation", source="a", relation_type=bad, target="b")
 
 
 def test_invalid_datatype_and_discriminator_rejected() -> None:
     with pytest.raises(ValidationError):
-        AddAttribute(concept="Order", name="x", datatype="string")
+        AddAttribute(op="add_attribute", concept="Order", name="x", datatype="string")
     with pytest.raises(ValidationError):
         ADAPTER.validate_python({"op": "nope"})
 
@@ -341,7 +421,7 @@ def test_ops_are_frozen() -> None:
 
 def test_description_capped_and_flagged() -> None:
     long = "x" * (MAX_DESCRIPTION_CHARS + 500)
-    op = AddConcept(name="Big", description=text(long))
+    op = AddConcept(op="add_concept", name="Big", description=text(long))
     assert op.description is not None
     assert len(op.description.text) == MAX_DESCRIPTION_CHARS
     flags = [e for e in op.evidence if e.truncated]
@@ -349,18 +429,153 @@ def test_description_capped_and_flagged() -> None:
     again = ADAPTER.validate_json(op.model_dump_json())
     assert again == op
     assert len(to_om(op, CTX).glossary[0]["term"]["description"]) == MAX_DESCRIPTION_CHARS
-    short = AddConcept(name="Small", description=text("ok"))
+    short = AddConcept(op="add_concept", name="Small", description=text("ok"))
     assert not any(e.truncated for e in short.evidence)
 
 
 def test_op_key_stable() -> None:
-    assert op_key(AddConcept(name="Order")) == op_key(ORDER) == "concept:Order"
+    assert op_key(AddConcept(op="add_concept", name="Order")) == op_key(ORDER) == "concept:Order"
     assert op_key(ALL_OPS[4]) == "attr:Order.order_id"
     assert (
-        op_key(AddAttribute(concept="retail.Order", name="order_id", datatype="xsd:int"))
+        op_key(
+            AddAttribute(
+                op="add_attribute", concept="retail.Order", name="order_id", datatype="xsd:int"
+            )
+        )
         == "attr:Order.order_id"
     )
     keys = [op_key(o) for o in ALL_OPS]
     assert len(set(keys)) == len(keys)
-    evidence_only = AddConcept(name="Order", rule_ids=["R-1"], rationale=text("why"))
+    evidence_only = AddConcept(
+        op="add_concept", name="Order", rule_ids=["R-1"], rationale=text("why")
+    )
     assert op_key(evidence_only) == op_key(ORDER)
+
+
+def syn(term: str, word: str) -> AddSynonym:
+    return AddSynonym(op="add_synonym", concept_fqn=term, synonym=word)
+
+
+def test_to_om_all_folds_term_updates_into_one_update_term() -> None:
+    ops: list[ProposalOperation] = [
+        syn("retail.Order", "Sale"),
+        UpdateConcept(op="update_concept", fqn="Order", base_version="0.3", display_name="Ord"),
+        syn("Order", "Deal"),
+        syn("Customer", "Buyer"),
+    ]
+    result = to_om_all(ops, CTX)
+    updates = result.glossary
+    assert [g["targetId"] for g in updates] == ["t-order", "t-cust"]
+    order = updates[0]["term"]
+    assert order["synonyms"] == ["Purchase", "Sale", "Deal"]
+    assert order["displayName"] == "Ord"
+    assert order["description"] == "An order" and order["iri"] == BASE + "Order"
+    assert updates[1]["term"]["synonyms"] == ["Buyer"]
+    assert updates[1]["baseVersion"] == 1.2
+
+
+def test_to_om_all_keeps_order_and_other_ops() -> None:
+    rel = AddRelation(
+        op="add_relation", source="Order", relation_type="placedBy", target="Customer"
+    )
+    result = to_om_all([syn("Order", "Sale"), rel, CUSTOMER], CTX)
+    assert [g["operationType"] for g in result.glossary] == [
+        "UPDATE_TERM",
+        "ADD_RELATIONSHIP",
+        "CREATE_TERM",
+    ]
+    assert len(result.native) == 1
+
+
+def test_synonym_on_concept_created_in_batch_is_folded_into_create() -> None:
+    result = to_om_all([CUSTOMER, syn("Customer", "Buyer")], CTX)
+    assert [g["operationType"] for g in result.glossary] == ["CREATE_TERM"]
+    assert result.glossary[0]["term"]["synonyms"] == ["Buyer"]
+    update = UpdateConcept(op="update_concept", fqn="Customer", base_version="0.1")
+    with pytest.raises(LakeloomError):
+        to_om_all([CUSTOMER, update], CTX)
+
+
+def test_term_update_without_snapshot_fails_closed() -> None:
+    with pytest.raises(LakeloomError) as err:
+        to_om(syn("Thing", "x"), CTX)
+    assert err.value.code == "validation_error"
+    ctx = OMContext(**{**CTX.__dict__, "terms": {}})
+    with pytest.raises(LakeloomError):
+        to_om(syn("Order", "x"), ctx)
+
+
+@pytest.mark.parametrize("ref", ["finance.Customer", "other.Order.x"])
+def test_foreign_model_reference_rejected(ref: str) -> None:
+    rel = AddRelation(op="add_relation", source="Order", relation_type="placedBy", target=ref)
+    with pytest.raises(LakeloomError) as err:
+        to_om(rel, CTX)
+    assert err.value.code == "validation_error" and "import" in err.value.hint
+    with pytest.raises(LakeloomError):
+        to_om(AddAttribute(op="add_attribute", concept=ref, name="x", datatype="xsd:int"), CTX)
+    with pytest.raises(LakeloomError):
+        to_om(syn(ref, "x"), CTX)
+
+
+def test_remove_concept_fails_closed_without_native_class() -> None:
+    ctx = OMContext(**{**CTX.__dict__, "native_ids": {}})
+    with pytest.raises(LakeloomError):
+        to_om(RemoveConcept(op="remove_concept", fqn="Order", base_version="0.3"), ctx)
+
+
+def test_native_keys_are_namespaced() -> None:
+    ctx = OMContext(
+        **{
+            **CTX.__dict__,
+            "native_ids": {"axiom:" + BASE + "Order.order_id": "x"},
+            "native_versions": {"axiom:" + BASE + "Order.order_id": 0.1},
+        }
+    )
+    with pytest.raises(LakeloomError):
+        to_om(RemoveAttribute(op="remove_attribute", concept="Order", name="order_id"), ctx)
+
+
+def test_op_is_required_and_in_schema() -> None:
+    with pytest.raises(ValidationError):
+        ADAPTER.validate_python({"name": "Order"})
+    with pytest.raises(ValidationError):
+        AddConcept.model_validate({"name": "Order"})
+    assert "op" in AddConcept.model_json_schema()["required"]
+
+
+def test_field_caps() -> None:
+    too_many = [f"s{i}" for i in range(101)]
+    with pytest.raises(ValidationError):
+        AddConcept(op="add_concept", name="X", synonyms=too_many)
+    with pytest.raises(ValidationError):
+        AddConcept(op="add_concept", name="X", synonyms=["y" * 257])
+    with pytest.raises(ValidationError):
+        AddConcept(op="add_concept", name="X", display_name="d" * 257)
+    with pytest.raises(ValidationError):
+        AddAttribute(
+            op="add_attribute", concept="X", name="y", datatype="xsd:int", allowed_values=too_many
+        )
+    with pytest.raises(ValidationError):
+        AddAttribute(op="add_attribute", concept="X", name="y", datatype="xsd:int", unit="u" * 65)
+    with pytest.raises(ValidationError):
+        Evidence(kind="agent", ref="r" * 2001)
+    with pytest.raises(ValidationError):
+        Evidence(kind="agent", ref="r", detail="d" * 2001)
+
+
+def test_cap_text_robust_to_none() -> None:
+    long = {"text": "x" * 5000, "source": "s"}
+    with pytest.raises(ValidationError):
+        AddConcept.model_validate(
+            {"op": "add_concept", "name": "X", "description": long, "evidence": None}
+        )
+    with pytest.raises(ValidationError):
+        AddConcept.model_validate(
+            {
+                "op": "add_concept",
+                "name": "X",
+                "description": None,
+                "rationale": None,
+                "evidence": None,
+            }
+        )

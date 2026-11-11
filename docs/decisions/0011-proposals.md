@@ -254,21 +254,37 @@ IRI scheme (`OMContext.base_iri` is the model base, e.g. `http://localhost:8000/
 
 - concept / glossary term / native class: `{base_iri}{Name}` (percent-encoded)
 - attribute (native `DATA` property): `{base_iri}{Concept}.{attribute}`; its native `name` is
-  `{Concept}_{attribute}` (property names are ontology-wide, attribute names are not), `displayName`
-  the attribute name. Range is the XSD IRI of the `xsd:` CURIE; `domain` is `[concept IRI]`.
+  `{Concept}.{attribute}` (property names are ontology-wide, attribute names are not; a dotted
+  name was accepted and applied live, 2026-11-11), `displayName` the attribute name. Range is the XSD IRI of the `xsd:` CURIE; `domain` is `[concept IRI]`.
 - axiom: `subjectIri` is the concept IRI; removals address axioms by `{base_iri}{Concept}.{axiom name}`.
+- `OMContext.native_ids`/`native_versions` keys are namespaced `concept:<iri>`, `attr:<iri>`, `axiom:<iri>`.
 
 | Operation | Glossary change set | Native change set |
 |---|---|---|
 | AddConcept | CREATE_TERM (draft id = uuid5 of op key) | UPSERT_CONCEPT (OWL_CLASS, same IRI/name/description) |
-| UpdateConcept | UPDATE_TERM (changed fields only; baseVersion from op) | - |
-| RemoveConcept | DELETE_TERM | DELETE_CONCEPT when the class is known in `native_ids` |
+| UpdateConcept | one UPDATE_TERM per term with the full term built from a `TermSnapshot` plus the changes | - |
+| RemoveConcept | DELETE_TERM | DELETE_CONCEPT (fails closed if the class is not in `native_ids`) |
 | AddAttribute / RemoveAttribute | - | UPSERT_PROPERTY / DELETE_PROPERTY |
 | AddRelation / RemoveRelation | ADD_RELATIONSHIP / DELETE_RELATIONSHIP | - |
 | AddMapping / RemoveMapping | UPSERT_MAPPING / DELETE_MAPPING (`closeMatch` -> `CLOSE_MATCH`, ...) | - |
 | AddAxiom / RemoveAxiom | - | UPSERT_AXIOM / DELETE_AXIOM |
-| AddSynonym | UPDATE_TERM (existing synonyms + new, case-insensitive dedupe) | - |
+| AddSynonym | folded into the term's single UPDATE_TERM (snapshot synonyms + new, case-insensitive dedupe); into the CREATE_TERM if the concept is created in the same batch | - |
 | Add/RemoveRealization | - | - (Lakeloom-side) |
 
 Delete payloads (`DELETE_PROPERTY/AXIOM/CONCEPT/RELATIONSHIP/MAPPING`) follow the generic rule
 (`targetId` + `baseVersion`) and the rc1 operation enum; they were not exercised live.
+
+`to_om_all(ops, ctx)` is the entry point for proposals: it folds every `UpdateConcept` and
+`AddSynonym` of one term into one `UPDATE_TERM` (separate updates would overwrite each other).
+References qualified by another model (`finance.Customer`) are rejected (no cross-model links
+in M2a; imports needed).
+
+### UPDATE_TERM replaces the term (live check, 2026-11-11)
+
+On a throwaway glossary (hard-deleted afterwards) a term with description, displayName,
+synonyms `[a]` and iri was updated by an UPDATE_TERM whose `term` held only id, name, glossary,
+description and synonyms `[a, b]`. After apply: synonyms `[a, b]`, description and displayName
+kept, but **`iri` became null**. So an update must carry the full term (the iri ties the
+glossary term to its native class), and a `term` without `description` is rejected at create
+(400 `query param description must not be null`). Lakeloom builds every UPDATE_TERM from a
+snapshot of the current term and fails closed (`validation_error`) when it is missing.

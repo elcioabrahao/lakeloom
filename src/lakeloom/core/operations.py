@@ -40,10 +40,12 @@ __all__ = [
     "RemoveMapping",
     "RemoveRealization",
     "RemoveRelation",
+    "TermSnapshot",
     "UpdateConcept",
     "draft_term_id",
     "op_key",
     "to_om",
+    "to_om_all",
 ]
 
 MAX_DESCRIPTION_CHARS = 4000
@@ -55,6 +57,8 @@ _NS = uuid.UUID("6f1b3c1e-5a0e-4b0a-9a3e-4c6d2f7a9b10")
 Name = Annotated[str, Field(pattern=_NAME)]
 Ref = Annotated[str, Field(min_length=1, max_length=512)]
 RelationType = Annotated[str, Field(pattern=_RELATION)]
+Short = Annotated[str, Field(min_length=1, max_length=256)]
+ShortList = Annotated[list[Short], Field(max_length=100)]
 Version = Annotated[str, Field(pattern=r"^\d+(\.\d+)?$")]
 MappingKind = Literal["exactMatch", "closeMatch", "broadMatch", "narrowMatch", "relatedMatch"]
 _MAPPING_TYPE: dict[str, str] = {
@@ -72,8 +76,8 @@ class Evidence(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["column", "table", "fk", "pk", "profile", "tag", "comment", "match", "agent"]
-    ref: str
-    detail: str | None = None
+    ref: Annotated[str, Field(max_length=2000)]
+    detail: Annotated[str | None, Field(max_length=2000)] = None
     truncated: bool = False
 
 
@@ -109,58 +113,58 @@ class _Op(BaseModel):
                         truncated=True,
                     )
                 )
-        if flags:
-            out["evidence"] = [*out.get("evidence", []), *flags]
+        existing: Any = out.get("evidence", [])
+        if flags and isinstance(existing, list | tuple):
+            out["evidence"] = [*cast("list[Any]", existing), *flags]
         return out
 
 
 class AddConcept(_Op):
-    op: Literal["add_concept"] = "add_concept"
+    op: Literal["add_concept"]
     name: Name
-    display_name: str | None = None
+    display_name: Annotated[str | None, Field(max_length=256)] = None
     description: UntrustedText | None = None
     parent: Ref | None = None
-    synonyms: list[str] = Field(default_factory=list)
+    synonyms: ShortList = Field(default_factory=list[str])
 
 
 class UpdateConcept(_Op):
     """Changes to an existing concept; ``None`` leaves a field alone."""
 
-    op: Literal["update_concept"] = "update_concept"
+    op: Literal["update_concept"]
     fqn: Ref
     base_version: Version
     description: UntrustedText | None = None
-    display_name: str | None = None
-    synonyms: list[str] | None = None
+    display_name: Annotated[str | None, Field(max_length=256)] = None
+    synonyms: ShortList | None = None
     parent: Ref | None = None
 
 
 class RemoveConcept(_Op):
-    op: Literal["remove_concept"] = "remove_concept"
+    op: Literal["remove_concept"]
     fqn: Ref
     base_version: Version
 
 
 class AddAttribute(_Op):
-    op: Literal["add_attribute"] = "add_attribute"
+    op: Literal["add_attribute"]
     concept: Ref
     name: Name
     datatype: Annotated[str, Field(pattern=r"^xsd:[A-Za-z]+$")]
     is_identifier: bool = False
-    allowed_values: list[str] = Field(default_factory=list)
-    unit: str | None = None
+    allowed_values: ShortList = Field(default_factory=list[str])
+    unit: Annotated[str | None, Field(max_length=64)] = None
     description: UntrustedText | None = None
 
 
 class RemoveAttribute(_Op):
-    op: Literal["remove_attribute"] = "remove_attribute"
+    op: Literal["remove_attribute"]
     concept: Ref
     name: Name
-    base_version: Version
 
 
 class AddRelation(_Op):
-    op: Literal["add_relation"] = "add_relation"
+    op: Literal["add_relation"]
     source: Ref
     relation_type: RelationType
     target: Ref
@@ -168,21 +172,21 @@ class AddRelation(_Op):
 
 
 class RemoveRelation(_Op):
-    op: Literal["remove_relation"] = "remove_relation"
+    op: Literal["remove_relation"]
     source: Ref
     relation_type: RelationType
     target: Ref
 
 
 class AddMapping(_Op):
-    op: Literal["add_mapping"] = "add_mapping"
+    op: Literal["add_mapping"]
     concept: Ref
     kind: MappingKind
     target_iri: AnyUrl
 
 
 class RemoveMapping(_Op):
-    op: Literal["remove_mapping"] = "remove_mapping"
+    op: Literal["remove_mapping"]
     concept: Ref
     kind: MappingKind
     target_iri: AnyUrl
@@ -191,7 +195,7 @@ class RemoveMapping(_Op):
 class AddAxiom(_Op):
     """``axiom`` is an OM ``OntologyAxiom`` body; it needs a ``name`` (validated in OM, Task 6)."""
 
-    op: Literal["add_axiom"] = "add_axiom"
+    op: Literal["add_axiom"]
     concept: Ref
     axiom: dict[str, Any]
 
@@ -203,27 +207,26 @@ class AddAxiom(_Op):
 
 
 class RemoveAxiom(_Op):
-    op: Literal["remove_axiom"] = "remove_axiom"
+    op: Literal["remove_axiom"]
     concept: Ref
-    name: Annotated[str, Field(min_length=1, max_length=256)]
-    base_version: Version
+    name: Short
 
 
 class AddSynonym(_Op):
-    op: Literal["add_synonym"] = "add_synonym"
+    op: Literal["add_synonym"]
     concept_fqn: Ref
-    synonym: Annotated[str, Field(min_length=1, max_length=256)]
+    synonym: Short
 
 
 class AddRealization(_Op):
-    op: Literal["add_realization"] = "add_realization"
+    op: Literal["add_realization"]
     concept: Ref
     asset_fqn: Ref
     column: str | None = None
 
 
 class RemoveRealization(_Op):
-    op: Literal["remove_realization"] = "remove_realization"
+    op: Literal["remove_realization"]
     concept: Ref
     asset_fqn: Ref
     column: str | None = None
@@ -249,14 +252,30 @@ ProposalOperation = Annotated[
 
 
 @dataclass(frozen=True, kw_only=True)
-class OMContext:
-    """Everything :func:`to_om` needs to know about OM, supplied by the caller (no I/O).
+class TermSnapshot:
+    """The current state of an existing glossary term.
 
-    ``term_ids``/``term_versions``/``term_synonyms`` are keyed by term FQN or bare name;
-    terms created in the same proposal are registered by the caller with
-    :func:`draft_term_id`. ``native_ids``/``native_versions`` are keyed by IRI (existing
-    native classes, properties and axioms, needed only for removals);
-    ``relationship_ids`` by :func:`op_key` of the relation op.
+    UPDATE_TERM replaces the term (live check, ADR 0011: an omitted ``iri`` was dropped), so
+    updates are always built from a full snapshot. ``description`` is required by OM.
+    """
+
+    description: str
+    version: float
+    display_name: str | None = None
+    iri: str | None = None
+    parent_id: str | None = None
+    synonyms: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, kw_only=True)
+class OMContext:
+    """Everything :func:`to_om_all` needs to know about OM, supplied by the caller (no I/O).
+
+    Term tables are keyed by term FQN or bare name; terms created in the same proposal are
+    registered by the caller with :func:`draft_term_id`. ``terms`` holds snapshots of
+    existing terms (needed to update them). ``native_ids``/``native_versions`` hold the
+    existing native definitions, keyed ``concept:<iri>``, ``attr:<iri>`` or ``axiom:<iri>``
+    (needed only for removals). ``relationship_ids`` is keyed by the relation's op key.
     """
 
     glossary_name: str
@@ -266,7 +285,7 @@ class OMContext:
     ontology_name: str | None = None
     term_ids: Mapping[str, str] = field(default_factory=dict[str, str])
     term_versions: Mapping[str, float] = field(default_factory=dict[str, float])
-    term_synonyms: Mapping[str, Sequence[str]] = field(default_factory=dict[str, Sequence[str]])
+    terms: Mapping[str, TermSnapshot] = field(default_factory=dict[str, TermSnapshot])
     relationship_type_ids: Mapping[str, str] = field(default_factory=dict[str, str])
     relationship_ids: Mapping[str, str] = field(default_factory=dict[str, str])
     native_ids: Mapping[str, str] = field(default_factory=dict[str, str])
@@ -275,7 +294,7 @@ class OMContext:
 
 @dataclass(frozen=True)
 class OMOps:
-    """OM operations for one proposal operation: glossary change set and native change set."""
+    """OM operations for proposal operations: glossary change set and native change set."""
 
     glossary: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
     native: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
@@ -299,9 +318,9 @@ def op_key(op: ProposalOperation) -> str:
         case RemoveAttribute():
             return f"remove-attr:{_bare(op.concept)}.{op.name}"
         case AddRelation():
-            return f"rel:{_bare(op.source)}|{op.relation_type}|{_bare(op.target)}"
+            return _relation_key(op.source, op.relation_type, op.target)
         case RemoveRelation():
-            return f"remove-rel:{_bare(op.source)}|{op.relation_type}|{_bare(op.target)}"
+            return "remove-" + _relation_key(op.source, op.relation_type, op.target)
         case AddMapping():
             return f"map:{_bare(op.concept)}|{op.kind}|{op.target_iri}"
         case RemoveMapping():
@@ -318,6 +337,10 @@ def op_key(op: ProposalOperation) -> str:
             return f"remove-real:{_bare(op.concept)}|{op.asset_fqn}|{op.column or ''}"
 
 
+def _relation_key(source: str, relation_type: str, target: str) -> str:
+    return f"rel:{_bare(source)}|{relation_type}|{_bare(target)}"
+
+
 def _uid(kind: str, key: str) -> str:
     return str(uuid.uuid5(_NS, f"{kind}:{key}"))
 
@@ -331,8 +354,20 @@ def _fail(message: str, hint: str) -> LakeloomError:
     return LakeloomError("validation_error", message, hint)
 
 
+def _local(ctx: OMContext, ref: str) -> str:
+    """The bare term name of ``ref``; a ref qualified by another model is rejected."""
+    if "." in ref and ref.rsplit(".", 1)[0] != ctx.glossary_name:
+        raise _fail(
+            f"reference {ref!r} points outside model {ctx.glossary_name!r}",
+            "cross-model references need ontology imports, which are not supported yet; "
+            "use a concept of this model",
+        )
+    return _bare(ref)
+
+
 def _find[V](table: Mapping[str, V], ctx: OMContext, ref: str) -> V | None:
-    for candidate in (ref, _bare(ref), f"{ctx.glossary_name}.{_bare(ref)}"):
+    name = _local(ctx, ref)
+    for candidate in (f"{ctx.glossary_name}.{name}", name):
         if candidate in table:
             return table[candidate]
     return None
@@ -350,7 +385,11 @@ def _lookup[V](table: Mapping[str, V], ctx: OMContext, ref: str, what: str) -> V
 
 
 def _concept_iri(ctx: OMContext, ref: str) -> str:
-    return f"{ctx.base_iri}{quote(_bare(ref), safe='')}"
+    return f"{ctx.base_iri}{quote(_local(ctx, ref), safe='')}"
+
+
+def _member_iri(ctx: OMContext, concept: str, member: str) -> str:
+    return f"{_concept_iri(ctx, concept)}.{quote(member, safe='')}"
 
 
 def _term_ref(ctx: OMContext, ref: str) -> dict[str, str]:
@@ -373,20 +412,69 @@ def _text(value: UntrustedText | None) -> str | None:
     return None if value is None else value.text
 
 
+def to_om_all(ops: Sequence[ProposalOperation], ctx: OMContext) -> OMOps:
+    """Map a batch of proposal operations to OM operations; the entry point for callers.
+
+    All changes to one existing term (``UpdateConcept``, ``AddSynonym``) are folded, in
+    order, into a single ``UPDATE_TERM`` built from the term's snapshot: separate updates
+    from the same static context would overwrite each other. A synonym added to a concept
+    created in the same batch is folded into its ``CREATE_TERM``.
+    """
+    created = {op.name: op for op in ops if isinstance(op, AddConcept)}
+    folded: dict[str, list[UpdateConcept | AddSynonym]] = {}
+    extra_synonyms: dict[str, list[str]] = {}
+    for op in ops:
+        if isinstance(op, UpdateConcept | AddSynonym):
+            name = _local(ctx, op.fqn if isinstance(op, UpdateConcept) else op.concept_fqn)
+            if name in created:
+                if isinstance(op, UpdateConcept):
+                    raise _fail(
+                        f"concept {name!r} is created in this proposal and cannot be updated",
+                        "change the AddConcept operation instead",
+                    )
+                extra_synonyms.setdefault(name, []).append(op.synonym)
+            else:
+                folded.setdefault(name, []).append(op)
+    glossary: list[dict[str, Any]] = []
+    native: list[dict[str, Any]] = []
+    done: set[str] = set()
+    for op in ops:
+        if isinstance(op, UpdateConcept | AddSynonym):
+            name = _local(ctx, op.fqn if isinstance(op, UpdateConcept) else op.concept_fqn)
+            if name in created or name in done:
+                continue
+            done.add(name)
+            glossary.append(_update_term(name, folded[name], ctx))
+            continue
+        if isinstance(op, AddConcept) and op.name in extra_synonyms:
+            merged = [*op.synonyms]
+            for synonym in extra_synonyms[op.name]:
+                if synonym.casefold() not in {x.casefold() for x in merged}:
+                    merged.append(synonym)
+            op = op.model_copy(update={"synonyms": merged})
+        out = to_om(op, ctx)
+        glossary.extend(out.glossary)
+        native.extend(out.native)
+    return OMOps(glossary=glossary, native=native)
+
+
 def to_om(op: ProposalOperation, ctx: OMContext) -> OMOps:
-    """Map one proposal operation to OM operations (see ADR 0011 for the payloads)."""
+    """Map one proposal operation to OM operations (see ADR 0011 for the payloads).
+
+    Prefer :func:`to_om_all` for a proposal: it merges the updates of one term.
+    """
     match op:
         case AddConcept():
             return _add_concept(op, ctx)
-        case UpdateConcept():
-            return _update_concept(op, ctx)
+        case UpdateConcept() | AddSynonym():
+            return to_om_all([op], ctx)
         case RemoveConcept():
             return _remove_concept(op, ctx)
         case AddAttribute():
             return _add_attribute(op, ctx)
         case RemoveAttribute():
-            iri = f"{ctx.base_iri}{quote(_bare(op.concept), safe='')}.{quote(op.name, safe='')}"
-            return OMOps(native=[_native_delete("DELETE_PROPERTY", iri, ctx)])
+            iri = _member_iri(ctx, op.concept, op.name)
+            return OMOps(native=[_native_delete("DELETE_PROPERTY", "attr", iri, ctx)])
         case AddRelation():
             return _add_relation(op, ctx)
         case RemoveRelation():
@@ -396,10 +484,8 @@ def to_om(op: ProposalOperation, ctx: OMContext) -> OMOps:
         case AddAxiom():
             return _add_axiom(op, ctx)
         case RemoveAxiom():
-            iri = f"{ctx.base_iri}{quote(_bare(op.concept), safe='')}.{quote(op.name, safe='')}"
-            return OMOps(native=[_native_delete("DELETE_AXIOM", iri, ctx)])
-        case AddSynonym():
-            return _add_synonym(op, ctx)
+            iri = _member_iri(ctx, op.concept, op.name)
+            return OMOps(native=[_native_delete("DELETE_AXIOM", "axiom", iri, ctx)])
         case AddRealization() | RemoveRealization():
             return OMOps()
 
@@ -437,69 +523,93 @@ def _add_concept(op: AddConcept, ctx: OMContext) -> OMOps:
     )
 
 
-def _update_concept(op: UpdateConcept, ctx: OMContext) -> OMOps:
-    term_id = _lookup(ctx.term_ids, ctx, op.fqn, "term id")
+def _update_term(
+    name: str, changes: Sequence[UpdateConcept | AddSynonym], ctx: OMContext
+) -> dict[str, Any]:
+    """One UPDATE_TERM carrying the full desired term (snapshot + folded changes)."""
+    snapshot = _find(ctx.terms, ctx, name)
+    term_id = _find(ctx.term_ids, ctx, name)
+    if snapshot is None or term_id is None:
+        raise _fail(
+            f"no snapshot of term {name!r}",
+            "pass the term's current state in OMContext.terms (and its id in term_ids) "
+            "so the update can carry the full term",
+        )
+    description = snapshot.description
+    display_name = snapshot.display_name
+    parent_id = snapshot.parent_id
+    synonyms = list(snapshot.synonyms)
+    base_version = snapshot.version
+    for change in changes:
+        if isinstance(change, AddSynonym):
+            if change.synonym.casefold() not in {s.casefold() for s in synonyms}:
+                synonyms.append(change.synonym)
+            continue
+        base_version = float(change.base_version)
+        if change.description is not None:
+            description = change.description.text
+        if change.display_name is not None:
+            display_name = change.display_name
+        if change.synonyms is not None:
+            synonyms = list(change.synonyms)
+        if change.parent is not None:
+            parent_id = _term_ref(ctx, change.parent)["id"]
     term: dict[str, Any] = {
         "id": term_id,
-        "name": _bare(op.fqn),
+        "name": name,
         "glossary": _glossary_ref(ctx),
+        "description": description,
+        "synonyms": synonyms,
     }
-    if op.description is not None:
-        term["description"] = op.description.text
-    if op.display_name is not None:
-        term["displayName"] = op.display_name
-    if op.synonyms is not None:
-        term["synonyms"] = list(op.synonyms)
-    if op.parent is not None:
-        term["parent"] = _term_ref(ctx, op.parent)
-    return OMOps(
-        glossary=[
-            {
-                "operationType": "UPDATE_TERM",
-                "targetId": term_id,
-                "baseVersion": float(op.base_version),
-                "term": term,
-            }
-        ]
-    )
+    if display_name is not None:
+        term["displayName"] = display_name
+    if snapshot.iri is not None:
+        term["iri"] = snapshot.iri
+    if parent_id is not None:
+        term["parent"] = {"id": parent_id, "type": "glossaryTerm"}
+    return {
+        "operationType": "UPDATE_TERM",
+        "targetId": term_id,
+        "baseVersion": base_version,
+        "term": term,
+    }
 
 
-def _native_delete(kind: str, iri: str, ctx: OMContext) -> dict[str, Any]:
-    if iri not in ctx.native_ids or iri not in ctx.native_versions:
+def _native_delete(kind: str, prefix: str, iri: str, ctx: OMContext) -> dict[str, Any]:
+    key = f"{prefix}:{iri}"
+    if key not in ctx.native_ids or key not in ctx.native_versions:
         raise _fail(
             f"native definition {iri} is not known",
-            "pass its id and version in OMContext.native_ids/native_versions",
+            f"pass its id and version in OMContext.native_ids/native_versions under {key!r}",
         )
     return {
         "operationType": kind,
-        "targetId": ctx.native_ids[iri],
-        "baseVersion": ctx.native_versions[iri],
+        "targetId": ctx.native_ids[key],
+        "baseVersion": ctx.native_versions[key],
     }
 
 
 def _remove_concept(op: RemoveConcept, ctx: OMContext) -> OMOps:
     iri = _concept_iri(ctx, op.fqn)
-    glossary = [
-        {
-            "operationType": "DELETE_TERM",
-            "targetId": _lookup(ctx.term_ids, ctx, op.fqn, "term id"),
-            "baseVersion": float(op.base_version),
-        }
-    ]
-    native = [_native_delete("DELETE_CONCEPT", iri, ctx)] if iri in ctx.native_ids else []
-    return OMOps(glossary=glossary, native=native)
+    glossary = {
+        "operationType": "DELETE_TERM",
+        "targetId": _lookup(ctx.term_ids, ctx, op.fqn, "term id"),
+        "baseVersion": float(op.base_version),
+    }
+    return OMOps(
+        glossary=[glossary], native=[_native_delete("DELETE_CONCEPT", "concept", iri, ctx)]
+    )
 
 
 def _add_attribute(op: AddAttribute, ctx: OMContext) -> OMOps:
     domain = _concept_iri(ctx, op.concept)
-    iri = f"{domain}.{quote(op.name, safe='')}"
-    name = f"{_bare(op.concept)}_{op.name}"
+    name = f"{_bare(op.concept)}.{op.name}"
     prop: dict[str, Any] = {
         "id": _uid("property", op_key(op)),
         "name": name,
         "displayName": op.name,
         "fullyQualifiedName": f"{_ontology_name(ctx)}.{name}",
-        "iri": iri,
+        "iri": _member_iri(ctx, op.concept, op.name),
         "kind": "DATA",
         "domain": [domain],
         "range": [XSD + op.datatype.removeprefix("xsd:")],
@@ -551,7 +661,7 @@ def _add_relation(op: AddRelation, ctx: OMContext) -> OMOps:
 
 
 def _remove_relation(op: RemoveRelation, ctx: OMContext) -> OMOps:
-    key = op_key(AddRelation(**op.model_dump(exclude={"op"})))
+    key = _relation_key(op.source, op.relation_type, op.target)
     if key not in ctx.relationship_ids:
         raise _fail(
             f"relationship {key} is not known",
@@ -569,14 +679,12 @@ def _remove_relation(op: RemoveRelation, ctx: OMContext) -> OMOps:
 
 
 def _mapping(op: AddMapping | RemoveMapping, ctx: OMContext) -> OMOps:
-    term_id = _lookup(ctx.term_ids, ctx, op.concept, "term id")
+    kind = "UPSERT_MAPPING" if isinstance(op, AddMapping) else "DELETE_MAPPING"
     return OMOps(
         glossary=[
             {
-                "operationType": "UPSERT_MAPPING"
-                if isinstance(op, AddMapping)
-                else "DELETE_MAPPING",
-                "targetId": term_id,
+                "operationType": kind,
+                "targetId": _lookup(ctx.term_ids, ctx, op.concept, "term id"),
                 "baseVersion": _lookup(ctx.term_versions, ctx, op.concept, "term version"),
                 "mapping": {
                     "conceptIri": str(op.target_iri),
@@ -598,25 +706,3 @@ def _add_axiom(op: AddAxiom, ctx: OMContext) -> OMOps:
         "ontology": _ontology_ref(ctx),
     }
     return OMOps(native=[{"operationType": "UPSERT_AXIOM", "axiom": axiom}])
-
-
-def _add_synonym(op: AddSynonym, ctx: OMContext) -> OMOps:
-    term_id = _lookup(ctx.term_ids, ctx, op.concept_fqn, "term id")
-    existing = list(_find(ctx.term_synonyms, ctx, op.concept_fqn) or [])
-    if op.synonym.casefold() not in {s.casefold() for s in existing}:
-        existing.append(op.synonym)
-    return OMOps(
-        glossary=[
-            {
-                "operationType": "UPDATE_TERM",
-                "targetId": term_id,
-                "baseVersion": _lookup(ctx.term_versions, ctx, op.concept_fqn, "term version"),
-                "term": {
-                    "id": term_id,
-                    "name": _bare(op.concept_fqn),
-                    "glossary": _glossary_ref(ctx),
-                    "synonyms": existing,
-                },
-            }
-        ]
-    )
