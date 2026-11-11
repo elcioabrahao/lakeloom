@@ -396,7 +396,8 @@ is applied.
 - **Axioms** added with `propose_change` are validated with `POST /v1/ontologyAxioms/validate`;
   `UNDECLARED_CLASS` / `UNDECLARED_PROPERTY` are excused only for IRIs the same proposal
   declares (validation sees applied declarations only).
-- **Discard** is confirm-token protected (tool `discard_proposal`, args `{proposal_id}`); the
+- **Discard** is confirm-token protected (tool `discard_proposal`, args `{proposal_id,
+  principal}` since the final fix wave); the
   state digest covers the proposal's status and update time and every change set's OM
   version and state, so a used token fails as `conflict`.
 
@@ -424,3 +425,55 @@ is applied.
 - **Audit.** MCP tools pass `audit=None` to the service and use `guarded(audited=True)`, which
   writes exactly one row per write. The dry runs of `create_model` and `discard_proposal` count
   as calls.
+
+## Appendix: final fix wave (M2a, 2026-11-11)
+
+- **Ownership (owner ruling).** Only the proposal's creator (`provenance.principal_subject`)
+  or a caller holding `lakeloom:admin` may `propose_change`, `propose_realization` into an
+  existing proposal, `submit_proposal` or `discard_proposal`. Anyone else gets `forbidden`
+  "proposal belongs to another principal" (audited as `forbidden`). The rule is deliberately
+  restrictive and easy to relax: agents that share proposals need admin. The CLI operator acts
+  as `lakeloom:admin` (it already holds the state store and the OM bot credentials). The
+  caller's subject is bound into the confirm-token arguments of `discard_proposal`
+  (`{proposal_id, principal}`) and `create_model` (`{name, display_name, description,
+  pair_existing, principal}`), so a token only confirms the preview its own caller saw.
+- **Native class declaration for existing concepts (controller ruling).** A model paired with
+  `pair_existing=true` starts with an empty native ontology, and rc1 rejects at apply a
+  property or axiom whose domain/subject class the ontology lacks (`UNDECLARED_CLASS`; drafts
+  are accepted). `to_om_all` therefore precedes a native operation on an *existing* concept
+  whose class is missing with `UPSERT_CONCEPT` (`conceptType: OWL_CLASS`, name, FQN
+  `<model>.<name>`, IRI = the term's own IRI from `TermSnapshot.iri`, the term's description),
+  once per change set; appends skip classes the change set already declares. An existing
+  concept's class IRI (`_concept_iri`) is the term's IRI, falling back to `{base}{name}` when
+  the term has none; member IRIs follow as `<class IRI>.<member>`. The proposal context reads
+  term snapshots for every natively referenced concept and the ontology's declared classes
+  (`OMContext.native_classes`; `None` = unknown, nothing declared). Live check (contract test
+  `test_attribute_on_existing_term_applies_to_a_pair_existing_ontology`, test-only apply on a
+  throwaway model): with the declaration the native change set applies and `explain_concept`
+  shows the attribute; without it apply returns 400.
+- **R-AGENT stamping.** Operations an agent passes to `propose_change` or `propose_realization`
+  carry exactly `rule_ids: ["R-AGENT"]`; agent-supplied rule ids are replaced, never trusted
+  (FR-PRO-03 provenance is the server's statement). Rule ids match `^R-[A-Z0-9-]{1,32}$`, at
+  most 10 per operation; evidence at most 20 per operation (the mapper keeps 18, leaving room
+  for truncation flags); `AddRealization.column` at most 256 characters; `AddAxiom.axiom` at
+  most 16 KB of JSON. Summaries render rule ids as code spans and escape `[`, `]`, `!` in
+  single-line untrusted text.
+- **Pending endpoints (FR-PRO-02).** An operation whose concept is neither in the model nor
+  proposed in the same proposal but pending in another open proposal is dropped with "<op key>
+  depends on <Name> pending in proposal <id>; propose again after it is applied" (OM has no
+  term to point at until that proposal is applied). `propose_change` applies the exact
+  FR-PRO-02 checks to agent operations: an op key pending in another proposal ("already
+  proposed in <id>") and a concept or attribute name the model already has (match with
+  confidence 1.0, action `dropped`) are dropped; nothing left is `NothingToPropose`.
+- **Realization scope.** A realization's concept must belong to the target model or a model it
+  imports (`owl:imports` of its base IRI); plain resolution, no asset reads. `add_realization`
+  in `propose_change` goes through the same resolution and already-realized check (dropped with
+  a warning there; `propose_realization` refuses).
+- **Glossary links.** Two relations between the same terms that map to the same glossary
+  relationship type (the `relatedTo` fallback) give one `ADD_RELATIONSHIP`; their native
+  object properties stay distinct. `CREATE_TERM`s are ordered parent before child.
+- **Audit.** Tool names in audit rows are the MCP names in the CLI too (`submit_proposal`,
+  `discard_proposal`); a partial result is audited as `error` with its code
+  (`AuditContext.error_code`); NUL is stripped from audit strings.
+- **create_model** re-reads the ontology by name after an ambiguous failure (timeout, 5xx)
+  before compensating; when it exists, the glossary is kept and the call succeeds.

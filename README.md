@@ -278,8 +278,8 @@ base IRI, `{LAKELOOM_PUBLIC_URL}/ontology/{slug}/` (ADR 0011).
 | --- | --- | --- |
 | `create_model` | `lakeloom:admin` | Creates the glossary and its paired ontology in OpenMetadata, after a dry run and a confirm token. `pair_existing=true` creates only the missing ontology of an existing glossary. |
 | `propose_from_scan` | `lakeloom:propose` | Maps a scan to concepts, attributes, keys and relations. Skips what already exists or is pending. Writes Draft change sets (at most 50 operations per part, split by table). |
-| `propose_change` | `lakeloom:propose` | Appends typed operations (selected by `op`) to a draft proposal. |
-| `propose_realization` | `lakeloom:propose` | Records that a table or column realizes a concept. The tag is applied in OpenMetadata only on approval. |
+| `propose_change` | `lakeloom:propose` | Appends typed operations (selected by `op`) to a draft proposal. Skips operations pending in another proposal and concepts or attributes the model already has. |
+| `propose_realization` | `lakeloom:propose` | Records that a table or column realizes a concept of the model (or of a model it imports). The tag is applied in OpenMetadata only on approval. |
 | `get_proposal`, `diff_proposal` | `lakeloom:read` | None. They show the summary, the parts and their OpenMetadata states, and the entity-level changes. |
 | `submit_proposal` | `lakeloom:propose` | Moves every change set from Draft to Submitted. |
 | `discard_proposal` | `lakeloom:propose` | Discards every change set, after a dry run and a confirm token. Destructive. |
@@ -296,15 +296,23 @@ agent through:
 
 A second prompt, `explain_table(asset)`, explains a table in plain language using
 `get_asset_context` and `explain_concept`. Running a scan again proposes nothing twice: concepts
-that already exist or are pending show up as matches or as "already proposed" warnings.
+that already exist or are pending show up as matches or as "already proposed" warnings. A scan
+that extends an open proposal (first `customers`, then `customers` and `orders`) proposes the new
+concepts; relations to a concept that is still pending are dropped with the warning "depends on
+Customer pending in proposal …; propose again after it is applied".
+
+**Ownership.** Only the principal that created a proposal, or a caller with `lakeloom:admin`, can
+change it (`propose_change`, `propose_realization` with `proposal_id`), submit it or discard it.
+Anyone else gets `forbidden`. The CLI operator counts as `lakeloom:admin`.
 
 **Confirm tokens (FR-AGT-03).** `create_model` and `discard_proposal` are catalog-changing:
 - A call without `confirm_token` is a dry run. It writes nothing and returns a preview and a
   token.
 - The token is an HMAC over the tool, the arguments and a digest of the previewed state, and it
   expires after `LAKELOOM_CONFIRM_TTL_SECONDS` (default 600).
-- The second call must pass the token with the same arguments.
-- A token issued for other arguments or another tool fails with `validation_error`.
+- The second call must pass the token with the same arguments, from the same principal.
+- A token issued for other arguments, another tool or another principal fails with
+  `validation_error`.
 - If the state has changed since the preview, or the token is replayed after use, the call fails
   with `conflict`.
 - Production must set `LAKELOOM_CONFIRM_SECRET` (or `_FILE`). Development falls back to a random
@@ -314,14 +322,16 @@ that already exist or are pending show up as matches or as "already proposed" wa
 `lakeloom-provenance` JSON block with:
 - the scan and proposal ids;
 - the source tables and their versions;
-- the rule ids behind each operation;
+- the rule ids behind each operation (`R-AGENT` for operations an agent passed; rule ids an
+  agent supplies are replaced);
 - the calling principal, the client and the time.
 
 The same data is kept in Lakeloom's state store, which stays authoritative. Lake comments become
 descriptions verbatim, capped at 4,000 characters, and are always shown quoted as untrusted.
 
 **Audit (NFR-SEC-12).** Every write and every dry run writes one audit record: principal,
-principal type, client, tool, model, proposal and change set ids, and the result. Records go to
+principal type, client, tool, model, proposal and change set ids, and the result. A partial
+result (a proposal part that could not be created) is audited as an error. Records go to
 the `lakeloom.audit` JSON log on stdout and to the `audit_log` table. Arguments are never
 recorded.
 

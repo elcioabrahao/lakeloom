@@ -58,8 +58,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `propose_from_scan`, `propose_change`, `propose_realization`, `get_proposal`,
     `diff_proposal`, `submit_proposal` and `discard_proposal`. Proposals are OpenMetadata
     Draft change sets, and nothing is applied.
-  - Confirm tokens for `create_model` and `discard_proposal`.
-  - One audit record per write.
+  - Confirm tokens for `create_model` and `discard_proposal`, bound to the calling principal.
+  - Only a proposal's creator or a `lakeloom:admin` caller may change, submit or discard it.
+  - Incremental scans: operations on a concept still pending in another open proposal are
+    dropped with a warning instead of failing; `propose_change` skips operations pending
+    elsewhere and concepts or attributes the model already has.
+  - Realizations are limited to concepts of the model and the models it imports.
+  - Attributes, axioms and relations on existing concepts of a model paired with
+    `pair_existing=true` declare the concept's native class first.
+  - Rule ids of agent edits are always `R-AGENT`; operation provenance is size-limited.
+  - One audit record per write (partial results are audited as errors); MCP prompts need
+    `lakeloom:read`.
   - MCP prompts `bootstrap_data_product` and `explain_table`.
   - CLI commands `lakeloom propose`, `lakeloom proposal` and `lakeloom submit`.
   - Dev realm client `lakeloom-admin-agent`.
