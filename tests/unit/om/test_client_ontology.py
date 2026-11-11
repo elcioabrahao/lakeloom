@@ -1,6 +1,6 @@
 """OMClient native-ontology endpoints, conflict kinds and lease shielding (FR-OM-02, ADR 0011).
 
-Bodies follow the live 2.1.0-rc1 server (ADR 0011, "Reading a native ontology").
+Bodies follow the live 2.1.0-rc1 server (ADR 0011, "Appendix: the paired native ontology").
 """
 
 import asyncio
@@ -11,13 +11,12 @@ import httpx
 import pytest
 import respx
 from pydantic import SecretStr
-from rdflib import RDF, RDFS, Graph, Literal, URIRef
+from rdflib import RDF, RDFS, Literal, URIRef
 from rdflib.collection import Collection
 from rdflib.namespace import OWL, XSD
 
-from lakeloom.om.client import OMClient, OMConflict
-from lakeloom.om.native_rdf import QUDT_UNIT
-from lakeloom.rdf.canonical import parse_rdf
+from lakeloom.om.client import OMClient, OMConflict, OMError
+from lakeloom.om.native_rdf import QUDT_UNIT, build_graph
 
 BASE = "http://om.test:8585"
 API = f"{BASE}/api/v1"
@@ -158,7 +157,8 @@ async def test_export_native_ontology_builds_rdf_from_working_members(client: OM
     export = await client.export_native_ontology("pair")
     assert export is not None and export.working_revision == 3
     assert routes[0].calls[0].request.url.params["ontology"] == "pair"
-    g: Graph = parse_rdf(export.turtle, "turtle")
+    g = export.graph
+    assert g is not None
     widget, weight = URIRef(f"{IRI}Widget"), URIRef(f"{IRI}Widget.weight")
     assert (widget, RDF.type, OWL.Class) in g
     assert (widget, RDFS.label, Literal("Widget")) in g
@@ -211,7 +211,8 @@ async def test_export_native_ontology_pages_members(client: OMClient) -> None:
     respx.get(f"{API}/ontologyAxioms").respond(200, json={"data": [], "paging": {"total": 0}})
     export = await client.export_native_ontology("pair")
     assert export is not None
-    g = parse_rdf(export.turtle, "turtle")
+    g = export.graph
+    assert g is not None
     assert {str(s) for s in g.subjects(RDF.type, OWL.Class)} == {f"{IRI}Widget", f"{IRI}Gadget"}
 
 
@@ -246,26 +247,101 @@ async def test_conflict_kind(client: OMClient, status: int, message: str, kind: 
 
 
 @respx.mock
-async def test_cancelled_command_still_releases_the_lease(client: OMClient) -> None:
-    lock = {
-        "resourceType": "ontologyChangeSet",
-        "resourceId": CSID,
-        "sessionId": "s",
-        "version": 1,
-    }
+async def test_double_cancel_still_completes_the_release(client: OMClient) -> None:
+    lock = {"resourceType": "ontologyChangeSet", "resourceId": CSID, "sessionId": "s", "version": 1}
     respx.post(f"{API}/ontologyEditLocks/acquire").respond(200, json=lock)
-    release = respx.delete(f"{API}/ontologyEditLocks/ontologyChangeSet/{CSID}").respond(204)
     started = asyncio.Event()
+    release_started = asyncio.Event()
+    release_done = asyncio.Event()
 
     async def slow(_request: httpx.Request) -> httpx.Response:
         started.set()
         await asyncio.sleep(30)
         return httpx.Response(200)
 
+    async def release(_request: httpx.Request) -> httpx.Response:
+        release_started.set()
+        await asyncio.sleep(0.05)
+        release_done.set()
+        return httpx.Response(204)
+
+    respx.delete(f"{API}/ontologyEditLocks/ontologyChangeSet/{CSID}").mock(side_effect=release)
     respx.post(f"{API}/ontologyChangeSets/{CSID}/submit").mock(side_effect=slow)
     task = asyncio.create_task(client.submit_change_set(CSID))
     await started.wait()
     task.cancel()
+    await release_started.wait()
+    task.cancel()  # a second cancel while the release is in flight
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert release.called
+    assert release_done.is_set()
+
+
+def test_malformed_members_are_skipped_with_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    bad_iri = "http://bad iri/with space>"
+    concepts = [CONCEPT, {**CONCEPT, "id": "bad-1", "iri": bad_iri}]
+    props = [PROPERTY, {**PROPERTY, "id": "bad-2", "iri": "no-scheme"}]
+    props.append({**PROPERTY, "id": "bad-3", "iri": f"{IRI}p3", "domain": [bad_iri]})
+    axioms = [
+        {**AXIOM, "expressions": ["junk", None, {"kind": "RESTRICTION"}, *AXIOM["expressions"]]}
+    ]
+    axioms.append({**AXIOM, "id": "bad-4", "subjectIri": bad_iri})
+    with caplog.at_level("WARNING"):
+        g = build_graph(concepts, props, axioms)
+    g.serialize(format="turtle")  # must not raise
+    assert {str(s) for s in g.subjects(RDF.type, OWL.Class)} == {f"{IRI}Widget"}
+    assert len(list(g.subjects(RDF.type, OWL.DatatypeProperty))) == 1
+    assert len(list(g.objects(URIRef(f"{IRI}Widget"), RDFS.subClassOf))) == 1
+    text = caplog.text
+    assert "bad-1" in text and "bad-2" in text and "bad-3" in text and "bad-4" in text
+    assert "with space" not in text and "no-scheme" not in text
+
+
+def test_cardinality_ignores_bool() -> None:
+    expr = {
+        "kind": "RESTRICTION",
+        "restrictionKind": "EXACT",
+        "propertyIri": f"{IRI}p",
+        "cardinality": True,
+    }
+    g = build_graph([], [], [{**AXIOM, "expressions": [expr]}])
+    assert not list(g.objects(URIRef(f"{IRI}Widget"), RDFS.subClassOf))
+
+
+@respx.mock
+async def test_build_failure_is_om_error(client: OMClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    respx.get(f"{API}/ontologies/name/pair").respond(200, json=ONTOLOGY)
+    respx.get(f"{API}/ontologies/{OID}/state").respond(200, json=state(1))
+    mock_members([CONCEPT], [], [])
+
+    def boom(*_a: object) -> None:
+        raise RuntimeError("x")
+
+    monkeypatch.setattr("lakeloom.om.client.build_graph", boom)
+    with pytest.raises(OMError):
+        await client.export_native_ontology("pair")
+
+
+@respx.mock
+async def test_repeated_paging_cursor_is_om_error(client: OMClient) -> None:
+    respx.get(f"{API}/ontologies/name/pair").respond(200, json=ONTOLOGY)
+    respx.get(f"{API}/ontologies/{OID}/state").respond(200, json=state(1))
+    respx.get(f"{API}/ontologyConcepts").respond(
+        200, json={"data": [CONCEPT], "paging": {"after": "same"}}
+    )
+    respx.get(f"{API}/ontologyProperties").respond(200, json={"data": [], "paging": {}})
+    respx.get(f"{API}/ontologyAxioms").respond(200, json={"data": [], "paging": {}})
+    with pytest.raises(OMError):
+        await client.export_native_ontology("pair")
+
+
+@respx.mock
+async def test_exhausted_retries_label_with_before_revision(client: OMClient) -> None:
+    respx.get(f"{API}/ontologies/name/pair").respond(200, json=ONTOLOGY)
+    n = iter(range(1, 100))
+    respx.get(f"{API}/ontologies/{OID}/state").mock(
+        side_effect=lambda _r: httpx.Response(200, json=state(next(n)))
+    )
+    mock_members([CONCEPT], [], [])
+    export = await client.export_native_ontology("pair")
+    assert export is not None and export.working_revision == 5  # 3rd attempt: before=5, after=6

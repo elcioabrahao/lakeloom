@@ -260,6 +260,7 @@ def seed_native_ontology(http: httpx.Client) -> int:
             "POST ontology",
         )
     ontology = _check(response, "GET ontology").json()
+    # One page: the retail ontology has 10 classes, far below OM's page limit.
     members = _check(
         http.get("/v1/ontologyConcepts", params={"ontology": GLOSSARY, "limit": "1000"}),
         "GET ontology concepts",

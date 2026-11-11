@@ -194,7 +194,8 @@ async def test_seed_pairs_retail_with_native_ontology_idempotently(
         second = await client.export_native_ontology("retail")
         assert second is not None
         assert second.working_revision == first.working_revision  # re-run changed nothing
-        g = Graph().parse(data=first.turtle, format="turtle")
+        g = first.graph
+        assert g is not None
         classes = {str(s) for s in g.subjects(RDF.type, OWL.Class)}
         assert classes == {f"{BASE_IRI}{n}" for n in TERM_NAMES}
         assert not list(g.subjects(RDF.type, OWL.DatatypeProperty))  # no attributes yet

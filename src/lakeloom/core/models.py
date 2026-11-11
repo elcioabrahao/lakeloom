@@ -18,7 +18,8 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 from pydantic import BaseModel
-from rdflib import Graph
+from rdflib import RDF, RDFS, Graph
+from rdflib.namespace import SKOS
 
 from lakeloom.config import Settings
 from lakeloom.errors import LakeloomError
@@ -54,6 +55,17 @@ class _Entry:
     loaded_wall: datetime
     version: str = ""  # changes when the glossary or the paired native ontology changes
     derived: dict[str, Any] = field(default_factory=dict[str, Any])  # e.g. the concept index
+
+
+def _without_term_annotations(native: Graph, glossary: Graph) -> Graph:
+    """The native triples minus rdfs:label/comment of classes that are glossary terms:
+    the glossary's prefLabel and definition stay authoritative (ADR 0009)."""
+    out = Graph()
+    for s, p, o in native:
+        if p in (RDFS.label, RDFS.comment) and (s, RDF.type, SKOS.Concept) in glossary:
+            continue
+        out.add((s, p, o))
+    return out
 
 
 def _upstream(exc: OMError) -> LakeloomError:
@@ -233,7 +245,10 @@ class ModelService:
             try:
                 graph = await asyncio.to_thread(parse_rdf, text, "turtle")  # CPU-bound
                 if native is not None:
-                    graph += await asyncio.to_thread(parse_rdf, native.turtle, "turtle")
+                    native_graph = native.graph
+                    if native_graph is None:
+                        native_graph = await asyncio.to_thread(parse_rdf, native.turtle, "turtle")
+                    graph += _without_term_annotations(native_graph, graph)
             except LakeloomError as exc:
                 raise LakeloomError(
                     "upstream_unavailable",

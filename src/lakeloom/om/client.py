@@ -76,6 +76,7 @@ _DETAIL_MAX = 500
 ConflictKind = Literal["stale_base", "lease", "exists", "stale_revision"]
 _MEMBER_PAGE = 100
 _EXPORT_ATTEMPTS = 3
+_MAX_MEMBER_PAGES = 100
 
 
 class OMError(Exception):
@@ -537,7 +538,8 @@ class OMClient:
     async def _members(self, name: str, ontology: str) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         after: str | None = None
-        while True:
+        seen: set[str] = set()
+        for _ in range(_MAX_MEMBER_PAGES):
             params = {"ontology": ontology, "limit": str(_MEMBER_PAGE), "fields": "*"}
             if after:
                 params["after"] = after
@@ -545,20 +547,32 @@ class OMClient:
             if not isinstance(body, dict):
                 raise OMError("OpenMetadata returned an unexpected ontology member page")
             page = cast("dict[str, Any]", body)
-            out += [m for m in page.get("data", []) if isinstance(m, dict)]
+            data = page.get("data")
+            out += (
+                [m for m in cast("list[object]", data) if isinstance(m, dict)]
+                if isinstance(data, list)
+                else []
+            )
             paging = page.get("paging")
-            after = (
+            cursor = (
                 cast("dict[str, Any]", paging).get("after") if isinstance(paging, dict) else None
             )
-            if not after:
+            if not isinstance(cursor, str) or not cursor:
                 return out
+            if cursor in seen:
+                raise OMError("OpenMetadata repeated a paging cursor for ontology members")
+            seen.add(cursor)
+            after = cursor
+        raise OMError("OpenMetadata returned too many ontology member pages")
 
     async def export_native_ontology(self, name: str) -> OMNativeExport | None:
-        """RDF (turtle) of the native ontology called ``name``, or ``None`` when no pair exists.
+        """The native ontology called ``name`` as an RDF graph, or ``None`` without a pair.
 
         rc1 only exports sealed releases (sealing is a write), so the working members are
-        read and turned into RDF (``om.native_rdf``). The ``workingRevision`` is read before
-        and after; when it moved, the read is repeated (up to three times).
+        read and turned into RDF (``om.native_rdf``) off the event loop. The
+        ``workingRevision`` is read before and after; when it moved, the read is repeated
+        (3 attempts; the last one is labelled with the ``before`` revision). Malformed
+        members are skipped; any other failure while building raises ``OMError``.
         """
         ontology = await self.get_ontology_by_name(name)
         if ontology is None:
@@ -567,14 +581,21 @@ class OMClient:
         while True:
             attempt += 1
             before = (await self.get_ontology_state(ontology.id)).working_revision
-            concepts = await self._members("list_ontology_concepts", name)
-            properties = await self._members("list_ontology_properties", name)
-            axioms = await self._members("list_ontology_axioms", name)
+            concepts, properties, axioms = await asyncio.gather(
+                self._members("list_ontology_concepts", name),
+                self._members("list_ontology_properties", name),
+                self._members("list_ontology_axioms", name),
+            )
             after = (await self.get_ontology_state(ontology.id)).working_revision
             if before == after or attempt >= _EXPORT_ATTEMPTS:
-                graph = build_graph(concepts, properties, axioms)
-                turtle = graph.serialize(format="turtle")
-                return OMNativeExport(working_revision=after, turtle=turtle)
+                break
+        try:
+            graph = await asyncio.to_thread(build_graph, concepts, properties, axioms)
+        except Exception as exc:
+            raise OMError(
+                f"cannot express native ontology {name!r} as RDF ({type(exc).__name__})"
+            ) from None
+        return OMNativeExport(working_revision=before, graph=graph)
 
     async def get_capabilities(self) -> OMCapabilities:
         """Probe version and RDF status; never raises (FR-OM-06)."""

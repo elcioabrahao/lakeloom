@@ -402,3 +402,30 @@ async def test_invalidate_reloads_native_side() -> None:
     assert not list((await svc.graph("retail")).subjects(RDF.type, OWL.DatatypeProperty))  # cached
     svc.invalidate("retail")
     assert list((await svc.graph("retail")).subjects(RDF.type, OWL.DatatypeProperty))
+
+
+async def test_native_build_failure_is_upstream_unavailable() -> None:
+    svc, om, _ = make()
+
+    async def boom(name: str):
+        raise OMError("cannot express native ontology")
+
+    om.export_native_ontology = boom  # type: ignore[method-assign]
+    with pytest.raises(LakeloomError) as info:
+        await svc.graph("retail")
+    assert info.value.code == "upstream_unavailable"
+
+
+async def test_native_class_of_a_glossary_term_adds_no_label_or_comment() -> None:
+    svc, om, _ = make()
+    turtle = NATIVE.replace(
+        'rdfs:label "Order" .', 'rdfs:label "Native Order" ; rdfs:comment "native text" .'
+    )
+    om.native = OMNativeExport(working_revision=1, turtle=turtle)
+    g = await svc.graph("retail")
+    order = URIRef("http://x/ontology/retail/Order")
+    assert (order, RDFS.label, None) not in g
+    assert (order, RDFS.comment, None) not in g
+    assert (order, RDF.type, OWL.Class) in g
+    prop = URIRef("http://x/ontology/retail/Order.total")
+    assert (prop, RDFS.label, None) in g  # properties keep theirs

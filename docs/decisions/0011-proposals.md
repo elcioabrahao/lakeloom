@@ -328,3 +328,15 @@ Verified live against 2.1.0-rc1 on 2026-11-11 (throwaway ontologies, bot JWT).
   runs shielded from cancellation.
 - Applying is test/dev only (seed, contract test): the bot token can apply its own drafts, so
   M2b must enforce human-only apply in Lakeloom (FR-REV-01/02).
+- **Dev-stack leftover: `llprobe5b`.** While researching this appendix a throwaway ontology
+  `llprobe5b` was given a sealed release. rc1 refuses to hard-delete an ontology with
+  retained releases, so it was soft-deleted (archived): `GET /v1/ontologies/name/llprobe5b`
+  is 404, it is absent from `GET /v1/ontologies`, and it shows only with `include=all`
+  (`deleted: true`). Its name stays reserved. Ignore it; never reuse the name. Tests must
+  not seal releases for the same reason.
+- **Malformed native members** (an IRI that is not absolute or holds spaces/`<>`, a wrong
+  shape) are skipped with a WARNING naming only the member kind and OM id; any other failure
+  while building the RDF raises `OMError`, which the model read path reports as
+  `upstream_unavailable`. Native classes that are glossary terms contribute no
+  `rdfs:label`/`rdfs:comment` (the glossary's prefLabel and definition stay authoritative,
+  ADR 0009); properties keep theirs. Member paging stops at 100 pages or a repeated cursor.

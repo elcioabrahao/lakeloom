@@ -8,6 +8,7 @@ modelled from the live 2.1.0-rc1 response and tolerates extra fields.
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from rdflib import Graph
 
 
 class OMVersion(BaseModel):
@@ -370,7 +371,11 @@ class OMOntologyState(BaseModel):
 
 
 class OMNativeExport(BaseModel):
-    """RDF (turtle) of a native ontology's working state, at one ``working_revision``."""
+    """A native ontology's working state at one ``working_revision``, as an rdflib ``graph``
+    (what the client builds) or as ``turtle`` text (parsed by the reader when no graph)."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     working_revision: int
-    turtle: str
+    turtle: str = ""
+    graph: Graph | None = None

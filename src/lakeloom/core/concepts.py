@@ -31,6 +31,7 @@ from lakeloom.core.tokens import truncate_markdown
 from lakeloom.errors import LakeloomError
 from lakeloom.om.client import OMClient, OMError, OMUnavailable
 from lakeloom.om.models import OMEntityRef, OMTable
+from lakeloom.om.native_rdf import QUDT_UNIT
 from lakeloom.sources.models import Page
 from lakeloom.untrusted import UntrustedText, code_span, quote_untrusted
 
@@ -60,7 +61,6 @@ __all__ = [
 ]
 
 OM_FQN = URIRef("https://open-metadata.org/ontology/fullyQualifiedName")
-QUDT_UNIT = URIRef("http://qudt.org/schema/qudt/unit")
 _MATCH_PREDICATES = (
     SKOS.exactMatch,
     SKOS.closeMatch,
