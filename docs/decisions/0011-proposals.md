@@ -244,3 +244,31 @@ messages.
   attribute/axiom output has no single OM target.
 - M2b's apply path must handle leases, 400/412 conflicts, id remapping of created entities
   (`applicationResult.results[].entity.id`), and must not rely on OM reviewer gating.
+
+## Appendix: typed operations and IRI scheme (M2a Task 2)
+
+`lakeloom.core.operations` holds the typed proposal operations and the pure
+`to_om(op, OMContext) -> OMOps(glossary, native)` (hybrid model, Amendment A).
+
+IRI scheme (`OMContext.base_iri` is the model base, e.g. `http://localhost:8000/ontology/retail/`):
+
+- concept / glossary term / native class: `{base_iri}{Name}` (percent-encoded)
+- attribute (native `DATA` property): `{base_iri}{Concept}.{attribute}`; its native `name` is
+  `{Concept}_{attribute}` (property names are ontology-wide, attribute names are not), `displayName`
+  the attribute name. Range is the XSD IRI of the `xsd:` CURIE; `domain` is `[concept IRI]`.
+- axiom: `subjectIri` is the concept IRI; removals address axioms by `{base_iri}{Concept}.{axiom name}`.
+
+| Operation | Glossary change set | Native change set |
+|---|---|---|
+| AddConcept | CREATE_TERM (draft id = uuid5 of op key) | UPSERT_CONCEPT (OWL_CLASS, same IRI/name/description) |
+| UpdateConcept | UPDATE_TERM (changed fields only; baseVersion from op) | - |
+| RemoveConcept | DELETE_TERM | DELETE_CONCEPT when the class is known in `native_ids` |
+| AddAttribute / RemoveAttribute | - | UPSERT_PROPERTY / DELETE_PROPERTY |
+| AddRelation / RemoveRelation | ADD_RELATIONSHIP / DELETE_RELATIONSHIP | - |
+| AddMapping / RemoveMapping | UPSERT_MAPPING / DELETE_MAPPING (`closeMatch` -> `CLOSE_MATCH`, ...) | - |
+| AddAxiom / RemoveAxiom | - | UPSERT_AXIOM / DELETE_AXIOM |
+| AddSynonym | UPDATE_TERM (existing synonyms + new, case-insensitive dedupe) | - |
+| Add/RemoveRealization | - | - (Lakeloom-side) |
+
+Delete payloads (`DELETE_PROPERTY/AXIOM/CONCEPT/RELATIONSHIP/MAPPING`) follow the generic rule
+(`targetId` + `baseVersion`) and the rc1 operation enum; they were not exercised live.
