@@ -20,6 +20,7 @@ from pydantic import (
 )
 
 from lakeloom.config import ConfigError
+from lakeloom.core.model_policy import ModelPolicyEntry
 
 __all__ = [
     "DeltaSourceConfig",
@@ -137,6 +138,14 @@ SourceConfig = Annotated[
 
 class SourcesConfig(BaseModel):
     sources: list[SourceConfig] = []
+    models: list[ModelPolicyEntry] = []  # per-model mapping policy (FR-PRO-01)
+
+    @model_validator(mode="after")
+    def _unique_model_names(self) -> "SourcesConfig":
+        names = [m.name for m in self.models]
+        if len(names) != len(set(names)):
+            raise ValueError("duplicate model name in models")
+        return self
 
     @model_validator(mode="after")
     def _unique_names(self) -> "SourcesConfig":
@@ -186,4 +195,4 @@ def _resolve_relative(config: SourcesConfig, base: Path) -> SourcesConfig:
                 update["token_file"] = base / source.token_file
             source = source.model_copy(update=update)
         resolved.append(source)
-    return SourcesConfig(sources=resolved)
+    return config.model_copy(update={"sources": resolved})

@@ -705,4 +705,22 @@ def _add_axiom(op: AddAxiom, ctx: OMContext) -> OMOps:
         "subjectIri": _concept_iri(ctx, op.concept),
         "ontology": _ontology_ref(ctx),
     }
+    expressions = axiom.get("expressions")
+    if isinstance(expressions, list):
+        axiom["expressions"] = [
+            _resolve_property(cast("dict[str, Any]", e), op.concept, ctx)
+            if isinstance(e, dict)
+            else e
+            for e in cast("list[Any]", expressions)
+        ]
     return OMOps(native=[{"operationType": "UPSERT_AXIOM", "axiom": axiom}])
+
+
+def _resolve_property(expr: dict[str, Any], concept: str, ctx: OMContext) -> dict[str, Any]:
+    """Turn a ``propertyName`` (an attribute of ``concept``) into the OM ``propertyIri``."""
+    name = expr.get("propertyName")
+    if not isinstance(name, str):
+        return expr
+    resolved = {k: v for k, v in expr.items() if k != "propertyName"}
+    resolved.setdefault("propertyIri", _member_iri(ctx, concept, name))
+    return resolved
