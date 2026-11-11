@@ -35,7 +35,9 @@ from lakeloom.core.confirm import (
     confirm_tokens_from_settings,
     require_confirm_secret,
 )
+from lakeloom.core.model_policy import ModelPolicyEntry
 from lakeloom.core.models import ModelService
+from lakeloom.core.proposals import ProposalService
 from lakeloom.core.scans import ScanService
 from lakeloom.core.sources import close_sources, start_sources
 from lakeloom.errors import LakeloomError
@@ -62,10 +64,11 @@ from lakeloom.server.http_api import (
     request_validation_handler,
 )
 from lakeloom.sources.base import LakeSource
-from lakeloom.sources.config import load_sources_config
+from lakeloom.sources.config import SourcesConfig, load_sources_config
 from lakeloom.sources.registry import build_sources
 from lakeloom.state.audit import AuditRepository
 from lakeloom.state.db import create_engine, upgrade
+from lakeloom.state.proposals import ProposalRepository
 from lakeloom.state.scans import ScanRepository
 from lakeloom.telemetry import configure_telemetry, is_active, start_span
 
@@ -93,16 +96,32 @@ class AppDeps:
     idp_http: httpx.AsyncClient | None = None
     # Operator-configured lake sources (NFR-SEC-13); started and closed by the lifespan.
     sources: dict[str, LakeSource] = field(default_factory=dict[str, LakeSource])
+    # Per-model mapping policies (``models:`` in LAKELOOM_CONFIG_FILE, FR-PRO-01).
+    policies: list[ModelPolicyEntry] = field(default_factory=list[ModelPolicyEntry])
     scans: ScanService = field(init=False)
     models: ModelService = field(init=False)
     confirm: ConfirmTokens = field(init=False)
     audit: AuditRepository = field(init=False)
+    proposals: ProposalService = field(init=False)
 
     def __post_init__(self) -> None:
         self.confirm = confirm_tokens_from_settings(self.settings)
         self.audit = AuditRepository(self.engine)
         self.models = ModelService(self.om, self.settings)
-        self.scans = ScanService(self.sources, ScanRepository(self.engine), self.om, self.settings)
+        scan_repo = ScanRepository(self.engine)
+        self.scans = ScanService(self.sources, scan_repo, self.om, self.settings)
+        # audit=None: MCP tools audit through guarded() (one row per write; see proposals.py).
+        self.proposals = ProposalService(
+            self.om,
+            self.models,
+            scan_repo,
+            ProposalRepository(self.engine),
+            None,
+            self.settings,
+            confirm=self.confirm,
+            sources=self.sources,
+            policies=self.policies,
+        )
 
 
 def build_deps(settings: Settings, *, http_auth: bool = True) -> AppDeps:
@@ -121,7 +140,8 @@ def build_deps(settings: Settings, *, http_auth: bool = True) -> AppDeps:
     if missing or settings.om_url is None or (http_auth and settings.oidc_issuer is None):
         raise ConfigError(f"missing required configuration: set {', '.join(missing)}")
     require_confirm_secret(settings)  # fail fast in production without the secret
-    sources = load_lake_sources(settings)
+    config = load_config(settings)
+    sources = build_sources(config, settings)
     engine = _create_engine_or_config_error(settings.db_url)
     idp_http = httpx.AsyncClient(timeout=_IDP_TIMEOUT)
     validator = TokenValidator(
@@ -140,15 +160,21 @@ def build_deps(settings: Settings, *, http_auth: bool = True) -> AppDeps:
         validator=validator,
         idp_http=idp_http,
         sources=sources,
+        policies=list(config.models),
     )
+
+
+def load_config(settings: Settings) -> SourcesConfig:
+    """``LAKELOOM_CONFIG_FILE`` (sources and model policies; empty when unset)."""
+    path = settings.config_file
+    if path is not None and not path.is_file():
+        raise ConfigError(f"LAKELOOM_CONFIG_FILE {path} does not exist or is not a file")
+    return load_sources_config(path)
 
 
 def load_lake_sources(settings: Settings) -> dict[str, LakeSource]:
     """Build the sources in ``LAKELOOM_CONFIG_FILE`` (none when unset); bad config fails fast."""
-    path = settings.config_file
-    if path is not None and not path.is_file():
-        raise ConfigError(f"LAKELOOM_CONFIG_FILE {path} does not exist or is not a file")
-    return build_sources(load_sources_config(path), settings)
+    return build_sources(load_config(settings), settings)
 
 
 def _create_engine_or_config_error(db_url: str) -> AsyncEngine:

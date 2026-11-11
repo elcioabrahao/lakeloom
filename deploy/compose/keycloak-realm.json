@@ -314,6 +314,46 @@
       ]
     },
     {
+      "clientId": "lakeloom-admin-agent",
+      "name": "lakeloom-admin-agent",
+      "description": "DEV ONLY: admin agent (client credentials; read + propose + admin, e.g. create_model)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "dev-admin-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": [
+        "basic",
+        "service_account",
+        "lakeloom:read",
+        "lakeloom:propose",
+        "lakeloom:admin"
+      ],
+      "optionalClientScopes": [
+        "lakeloom:review",
+        "lakeloom:publish"
+      ],
+      "protocolMappers": [
+        {
+          "name": "audience-lakeloom",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "lakeloom",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
       "clientId": "lakeloom-dev-cli",
       "name": "lakeloom-dev-cli",
       "description": "DEV ONLY: public PKCE client; direct access grants on for contract tests",

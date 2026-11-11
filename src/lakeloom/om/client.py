@@ -137,6 +137,7 @@ class OMClient:
         # M2a writes (FR-OM-02, ADR 0011)
         "create_glossary": ("POST", "/v1/glossaries"),
         "get_glossary_by_id": ("GET", "/v1/glossaries/{id}"),
+        "delete_glossary": ("DELETE", "/v1/glossaries/{id}"),  # create_model compensation
         "create_change_set": ("POST", "/v1/ontologyChangeSets"),
         "get_change_set": ("GET", "/v1/ontologyChangeSets/{id}"),
         "replace_operations": ("PUT", "/v1/ontologyChangeSets/{id}/operations"),
@@ -391,6 +392,15 @@ class OMClient:
             payload["displayName"] = display_name
         response = await self._request("create_glossary", json=payload)
         return OMGlossary.model_validate(_json(response))
+
+    async def delete_glossary(self, id: str) -> None:
+        """Hard-delete a glossary, never recursively (terms are never taken with it).
+
+        Used only to undo a glossary ``create_model`` has just created when its paired
+        ontology could not be created (M2a Task 7).
+        """
+        params = {"hardDelete": "true", "recursive": "false"}
+        await self._request("delete_glossary", path_args={"id": id}, params=params)
 
     async def _glossary_name(self, glossary: str) -> str:
         """rc1 change sets reference glossaries by name; resolve an id to its FQN."""

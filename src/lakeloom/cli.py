@@ -5,8 +5,10 @@
 sources in ``LAKELOOM_CONFIG_FILE`` directly, as the operator (FR-AGT-07, FR-SRC-10).
 Configuration errors are printed to stderr and exit with code 2, without a traceback;
 ``lakeloom models``, ``concept``, ``context`` and ``export`` read the semantic models in
-OpenMetadata (FR-CTX-01..04, FR-IO-01). Typed errors (``not_found``,
-``upstream_unavailable``, ...) exit with code 1.
+OpenMetadata (FR-CTX-01..04, FR-IO-01). ``lakeloom propose SCAN_ID --model M``,
+``lakeloom proposal ID`` and ``lakeloom submit ID`` are the proposal tools for the operator
+(drafts and submissions only; nothing is applied); they write their own audit rows. Typed
+errors (``not_found``, ``upstream_unavailable``, ...) exit with code 1.
 """
 
 import asyncio
@@ -29,6 +31,7 @@ from lakeloom.untrusted import single_line
 
 if TYPE_CHECKING:
     from lakeloom.core.models import ModelService
+    from lakeloom.core.proposals import Actor, ProposalService
     from lakeloom.om.client import OMClient
     from lakeloom.sources.base import LakeSource
 
@@ -435,6 +438,109 @@ def export_cmd(
             except OSError as exc:
                 typer.echo(f"cannot write {out} ({type(exc).__name__})", err=True)
                 raise typer.Exit(code=1) from None
+
+    _run(_go())
+
+
+# --- proposals (operator side; the same operations as the MCP proposal tools) --------------
+
+
+@asynccontextmanager
+async def _open_proposals(settings: Settings) -> AsyncGenerator["ProposalService"]:
+    """A proposal service that writes its own audit rows (CLI mode, see core/proposals.py)."""
+    import secrets
+
+    from lakeloom.core.confirm import MIN_SECRET_BYTES, ConfirmTokens
+    from lakeloom.core.proposals import ProposalService
+    from lakeloom.server.http_app import load_config
+    from lakeloom.sources.registry import build_sources
+    from lakeloom.state.audit import AuditRepository
+    from lakeloom.state.db import create_engine, upgrade
+    from lakeloom.state.proposals import ProposalRepository
+    from lakeloom.state.scans import ScanRepository
+
+    # The CLI never confirms a destructive call, so an ephemeral key is enough without one.
+    secret = settings.confirm_secret
+    key = (
+        secret.get_secret_value().encode("utf-8")
+        if secret is not None
+        else secrets.token_bytes(MIN_SECRET_BYTES)
+    )
+    config = load_config(settings)
+    sources = build_sources(config, settings)
+    engine = create_engine(settings.db_url)
+    try:
+        await upgrade(engine)
+        async with _open_semantic(settings) as (om, models, _s):
+            yield ProposalService(
+                om,
+                models,
+                ScanRepository(engine),
+                ProposalRepository(engine),
+                AuditRepository(engine),
+                settings,
+                confirm=ConfirmTokens(key, settings.confirm_ttl_seconds),
+                sources=sources,
+                policies=config.models,
+            )
+    finally:
+        await engine.dispose()
+
+
+def _actor() -> "Actor":
+    from lakeloom.core.proposals import Actor
+    from lakeloom.server.auth import PrincipalType
+
+    return Actor(subject=_operator(), type=PrincipalType.HUMAN.value)
+
+
+@app.command("propose")
+def propose_cmd(
+    scan_id: Annotated[str, typer.Argument(help="Scan id (see `lakeloom scan`).")],
+    model: Annotated[str, typer.Option("--model", help="Target model slug.")],
+    table: Annotated[
+        list[str] | None, typer.Option("--table", help="Only this table (repeatable).")
+    ] = None,
+) -> None:
+    """Propose concepts from a scan as OpenMetadata draft change sets; print the summary."""
+    settings = _cli_settings()
+
+    async def _go() -> None:
+        async with _open_proposals(settings) as service:
+            p = await service.propose_from_scan(
+                scan_id, model, principal=_actor(), client=CLI_CLIENT, tables=table
+            )
+            typer.echo(service.summary_markdown(p), nl=False)
+
+    _run(_go())
+
+
+@app.command("proposal")
+def proposal_cmd(
+    proposal_id: Annotated[str, typer.Argument(help="Proposal id (prop_...).")],
+) -> None:
+    """Print a proposal's summary, with its change-set states refreshed from OpenMetadata."""
+    settings = _cli_settings()
+
+    async def _go() -> None:
+        async with _open_proposals(settings) as service:
+            p = await service.get_proposal(proposal_id)
+            typer.echo(service.summary_markdown(p), nl=False)
+
+    _run(_go())
+
+
+@app.command("submit")
+def submit_cmd(
+    proposal_id: Annotated[str, typer.Argument(help="Proposal id (prop_...).")],
+) -> None:
+    """Submit a draft proposal for review (nothing is applied) and print its summary."""
+    settings = _cli_settings()
+
+    async def _go() -> None:
+        async with _open_proposals(settings) as service:
+            p = await service.submit(proposal_id, principal=_actor(), client=CLI_CLIENT)
+            typer.echo(service.summary_markdown(p), nl=False)
 
     _run(_go())
 

@@ -399,3 +399,28 @@ is applied.
 - **Discard** is confirm-token protected (tool `discard_proposal`, args `{proposal_id}`); the
   state digest covers the proposal's status and update time and every change set's OM
   version and state, so a used token fails as `conflict`.
+
+## Appendix: MCP tools and create_model (M2a Task 7)
+
+- **Declaration order (live check, 2026-11-11).** rc1 rejects an operation that refers to a
+  term created later in the same change set: `400 … a referenced term must be created by an
+  earlier operation`. This came up for a single-part proposal of the fixture lake. Tables are
+  sorted by name, so `Invoice hasOrder Order` came before Order's `CREATE_TERM`. The earlier
+  contract run used parts of 20 operations, which put Order in an earlier part and hid the
+  problem. Fix: `to_om_all` now emits the declarations first on each side (`CREATE_TERM` on the
+  glossary side, `UPSERT_CONCEPT` on the native side) and keeps every other operation in batch
+  order.
+- **create_model.** It creates the glossary and then the paired ontology. The ontology's
+  `namespace` is the absolute base IRI, because rc1 rejects a slug; this overrides "namespace =
+  slug" in Amendment A. If the ontology cannot be created, the glossary that was just created is
+  hard-deleted again, and never recursively. That delete goes through the new `OMClient.PATHS`
+  entry `delete_glossary` (`DELETE /v1/glossaries/{id}`). The confirm-token state digest covers:
+  - whether the glossary exists, with its id and `updatedAt`;
+  - whether the ontology exists, with its id;
+  - the base IRI.
+
+  So once the model exists, a replayed token fails with `conflict`. The slug rule is
+  `^[a-z][a-z0-9_-]{0,63}$`.
+- **Audit.** MCP tools pass `audit=None` to the service and use `guarded(audited=True)`, which
+  writes exactly one row per write. The dry runs of `create_model` and `discard_proposal` count
+  as calls.

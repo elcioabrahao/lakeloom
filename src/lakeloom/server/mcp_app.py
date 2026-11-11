@@ -8,7 +8,9 @@ missing one with a typed ``forbidden`` error result (FR-AGT-05).
 
 Tools: ``get_server_info`` (FR-OM-06, §7: scope ``lakeloom:read``, no side effects), the
 source/scan tools of :mod:`lakeloom.server.tools_sources` (M1a) and the semantic read
-tools of :mod:`lakeloom.server.tools_semantic` (M1b). Shared plumbing
+tools of :mod:`lakeloom.server.tools_semantic` (M1b), the model and proposal tools of
+:mod:`lakeloom.server.tools_proposals` and the prompts of :mod:`lakeloom.server.prompts`
+(M2a). Shared plumbing
 (scope checks, typed errors, metrics) lives in :mod:`lakeloom.server.tools_common`.
 """
 
@@ -25,9 +27,11 @@ import lakeloom
 from lakeloom.config import Settings
 from lakeloom.server.auth import Principal
 from lakeloom.server.http_app import AppDeps, create_app
+from lakeloom.server.prompts import register_prompts
 from lakeloom.server.resources import LakeloomMCP
 from lakeloom.server.server_info import ServerInfo, build_server_info, summarize
 from lakeloom.server.tools_common import READ_SCOPE, guarded, tool_error
+from lakeloom.server.tools_proposals import register_proposal_tools
 from lakeloom.server.tools_semantic import register_semantic_tools
 from lakeloom.server.tools_sources import register_source_tools
 
@@ -63,7 +67,13 @@ def create_mcp(deps: AppDeps) -> LakeloomMCP:
             "list_sources, list_tables and describe_table explore the configured lake "
             "sources, and scan_lake_source records a scan of one. The semantic tools list_models, "
             "find_concepts, explain_concept, find_assets_for_concept, get_asset_context and "
-            "export_model read the business vocabulary and what each asset means. The same "
+            "export_model read the business vocabulary and what each asset means. "
+            "create_model creates a model; propose_from_scan, propose_change and "
+            "propose_realization write proposals as OpenMetadata drafts, get_proposal and "
+            "diff_proposal show them, submit_proposal and discard_proposal move them on. "
+            "Nothing is applied until a human approves. Show proposal summaries to the user "
+            "before submitting. The prompts bootstrap_data_product and explain_table describe "
+            "whole workflows. The same "
             "artefacts are MCP resources: lakeloom://models, "
             "lakeloom://models/{slug}/ontology.{ttl|jsonld|owl|nt}, "
             "lakeloom://models/{slug}/context.jsonld and lakeloom://assets/{fqn}/context.md."
@@ -95,6 +105,8 @@ def create_mcp(deps: AppDeps) -> LakeloomMCP:
     )
     register_source_tools(mcp, deps)
     register_semantic_tools(mcp, deps)
+    register_proposal_tools(mcp, deps)
+    register_prompts(mcp)
     return mcp
 
 

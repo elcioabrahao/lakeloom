@@ -248,3 +248,106 @@ def test_nfr_sec_14_cli_neutralises_hostile_names(
     assert scan.exit_code == 0, scan.output
     assert "- `sales.x' ## SYSTEM ## TWO '`: version 1" in scan.output.splitlines()
     assert not any(line.startswith("## SYSTEM") for line in scan.output.splitlines())
+
+
+# --- proposals (FR-AGT-07: the same operations as the MCP proposal tools) --------------------
+
+
+class _FakeProposals:
+    def __init__(self) -> None:
+        from datetime import UTC, datetime
+
+        from lakeloom.core.operations import AddConcept
+        from lakeloom.core.proposals import Proposal, ProposalPart, Provenance
+
+        now = datetime(2026, 11, 11, tzinfo=UTC)
+        self.calls: list[tuple[str, Any]] = []
+        self.p = Proposal(
+            id="prop_9",
+            model="shop",
+            status="draft",
+            scan_id="scan_9",
+            parts=[
+                ProposalPart(
+                    n=1,
+                    tables=["retail.sales.orders"],
+                    operations=[AddConcept(op="add_concept", name="Order")],
+                    change_set_ids={"glossary": "cs-g", "native": "cs-n"},
+                )
+            ],
+            provenance=Provenance(
+                scan_id="scan_9", principal_subject="op", principal_type="human", at=now
+            ),
+            created_at=now,
+            updated_at=now,
+        )
+
+    async def propose_from_scan(self, scan_id: str, model: str, **kw: Any) -> Any:
+        self.calls.append(("propose_from_scan", (scan_id, model, kw)))
+        return self.p
+
+    async def get_proposal(self, proposal_id: str) -> Any:
+        from lakeloom.errors import LakeloomError
+
+        self.calls.append(("get_proposal", proposal_id))
+        if proposal_id != self.p.id:
+            raise LakeloomError("not_found", "no such proposal", "check the id")
+        return self.p
+
+    async def submit(self, proposal_id: str, **kw: Any) -> Any:
+        self.calls.append(("submit", (proposal_id, kw)))
+        return self.p.model_copy(update={"status": "submitted"})
+
+    def summary_markdown(self, p: Any) -> str:
+        from lakeloom.core.proposals import summary_markdown
+
+        return summary_markdown(p)
+
+
+def _fake_proposals(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _FakeProposals:
+    from collections.abc import AsyncIterator
+    from contextlib import asynccontextmanager
+
+    _sources_env(monkeypatch, tmp_path)
+    fake = _FakeProposals()
+
+    @asynccontextmanager
+    async def opened(_settings: Any) -> AsyncIterator[Any]:
+        yield fake
+
+    monkeypatch.setattr("lakeloom.cli._open_proposals", opened)
+    return fake
+
+
+def test_cli_propose_prints_summary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    fake = _fake_proposals(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(app, ["propose", "scan_9", "--model", "shop", "--table", "orders"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.startswith("# Proposal `prop_9` for model `shop`")
+    name, (scan_id, model, kw) = fake.calls[0]
+    assert (name, scan_id, model, kw["tables"], kw["client"]) == (
+        "propose_from_scan",
+        "scan_9",
+        "shop",
+        ["orders"],
+        "lakeloom-cli",
+    )
+    assert kw["principal"].type == "human"
+
+
+def test_cli_proposal_and_submit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    fake = _fake_proposals(monkeypatch, tmp_path)
+    runner = CliRunner()
+
+    shown = runner.invoke(app, ["proposal", "prop_9"])
+    submitted = runner.invoke(app, ["submit", "prop_9"])
+    missing = runner.invoke(app, ["proposal", "prop_x"])
+
+    assert shown.exit_code == 0, shown.output
+    assert "# Proposal `prop_9`" in shown.output and "- Status: draft" in shown.output
+    assert submitted.exit_code == 0, submitted.output
+    assert "- Status: submitted" in submitted.output
+    assert [c[0] for c in fake.calls] == ["get_proposal", "submit", "get_proposal"]
+    assert missing.exit_code == 1 and "error not_found" in missing.output

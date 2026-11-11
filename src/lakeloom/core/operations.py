@@ -431,7 +431,9 @@ def to_om_all(
     created in the same batch is folded into its ``CREATE_TERM``. Relations and mappings on a
     term created in the same batch carry no ``baseVersion`` (rc1 rejects one, ADR 0011);
     ``in_change_set`` names concepts created earlier in the change set the batch is appended
-    to, which are treated the same way.
+    to, which are treated the same way. Declarations come first on each side (``CREATE_TERM``,
+    ``UPSERT_CONCEPT``; otherwise in batch order): rc1 rejects an operation that references a
+    term created by a later one, e.g. ``Invoice hasOrder Order`` when invoices sort first.
     """
     created = {op.name: op for op in ops if isinstance(op, AddConcept)}
     unversioned = set(created) | set(in_change_set)
@@ -476,7 +478,16 @@ def to_om_all(
             )
         glossary.extend(out.glossary)
         native.extend(out.native)
-    return OMOps(glossary=glossary, native=native)
+    return OMOps(
+        glossary=_declarations_first(glossary, "CREATE_TERM"),
+        native=_declarations_first(native, "UPSERT_CONCEPT"),
+    )
+
+
+def _declarations_first(ops: list[dict[str, Any]], declaration: str) -> list[dict[str, Any]]:
+    """Stable partition: the ``declaration`` operations, then the rest (each in order)."""
+    first = [o for o in ops if o.get("operationType") == declaration]
+    return first + [o for o in ops if o.get("operationType") != declaration]
 
 
 def _anchor(op: ProposalOperation) -> str | None:

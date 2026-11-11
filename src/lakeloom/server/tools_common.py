@@ -26,6 +26,7 @@ from lakeloom.state.audit import AuditRepository
 from lakeloom.telemetry import record_tool_call, start_span
 
 __all__ = [
+    "ADMIN_SCOPE",
     "PROPOSE_SCOPE",
     "READ_SCOPE",
     "client_name",
@@ -37,6 +38,7 @@ __all__ = [
 
 READ_SCOPE = "lakeloom:read"
 PROPOSE_SCOPE = "lakeloom:propose"
+ADMIN_SCOPE = "lakeloom:admin"
 
 _log = logging.getLogger("lakeloom.mcp")
 
@@ -45,12 +47,15 @@ _log = logging.getLogger("lakeloom.mcp")
 local_principal: ContextVar[Principal | None] = ContextVar("lakeloom_local_principal", default=None)
 
 
-def tool_error(code: ErrorCode, message: str, hint: str) -> CallToolResult:
-    """A typed tool error (FR-AGT-05): ``{"error": {"code", "message", "hint"}}``."""
+def tool_error(
+    code: ErrorCode, message: str, hint: str, details: dict[str, Any] | None = None
+) -> CallToolResult:
+    """A typed tool error (FR-AGT-05): ``{"error": {"code", "message", "hint"}}``, plus the
+    error's ``details`` (such as the matches of a scan with nothing new) beside it."""
     error = LakeloomError(code, message, hint)
     return CallToolResult(
         content=[TextContent(type="text", text=f"Error `{code}`: {message}. Hint: {hint}.")],
-        structured_content=error.to_dict(),
+        structured_content={**(details or {}), **error.to_dict()},
         is_error=True,
     )
 
@@ -148,7 +153,7 @@ async def _run(
     try:
         return await body(principal), "ok"
     except LakeloomError as exc:
-        return tool_error(exc.code, exc.message, exc.hint), "error"
+        return tool_error(exc.code, exc.message, exc.hint, exc.details()), "error"
     except Exception as exc:
         # Only the type: the text may carry upstream detail or a connection URL (NFR-SEC-11).
         _log.error("tool %s failed unexpectedly (%s)", tool, type(exc).__name__)

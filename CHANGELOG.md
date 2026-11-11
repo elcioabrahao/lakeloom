@@ -53,3 +53,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is set.
 - Concept name resolution ranks exact name, then synonym, then local name.
 - M1 acceptance contract test across MCP tools, MCP resources and HTTP.
+- M2a proposals:
+  - MCP tools `create_model` (scope `lakeloom:admin`; glossary plus paired native ontology),
+    `propose_from_scan`, `propose_change`, `propose_realization`, `get_proposal`,
+    `diff_proposal`, `submit_proposal` and `discard_proposal`. Proposals are OpenMetadata
+    Draft change sets, and nothing is applied.
+  - Confirm tokens for `create_model` and `discard_proposal`.
+  - One audit record per write.
+  - MCP prompts `bootstrap_data_product` and `explain_table`.
+  - CLI commands `lakeloom propose`, `lakeloom proposal` and `lakeloom submit`.
+  - Dev realm client `lakeloom-admin-agent`.
+  - M2a acceptance contract test.

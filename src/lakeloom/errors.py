@@ -4,7 +4,7 @@ Every failure an agent can see has a stable ``code``, a human ``message`` and a 
 telling the caller what to do next.
 """
 
-from typing import Literal
+from typing import Any, Literal
 
 __all__ = ["ErrorCode", "LakeloomError"]
 
@@ -26,6 +26,10 @@ class LakeloomError(Exception):
         self.code: ErrorCode = code
         self.message = message
         self.hint = hint
+
+    def details(self) -> dict[str, Any]:
+        """Extra structured fields returned next to ``error`` (JSON values); none by default."""
+        return {}
 
     def to_dict(self) -> dict[str, dict[str, str]]:
         """The structured-content shape returned to MCP clients."""

@@ -276,6 +276,12 @@ class NothingToPropose(LakeloomError):
         self.matches = matches
         self.warnings = warnings
 
+    def details(self) -> dict[str, Any]:
+        return {
+            "matches": [m.model_dump(mode="json") for m in self.matches],
+            "warnings": list(self.warnings),
+        }
+
 
 # --- pure helpers ---------------------------------------------------------------------------
 

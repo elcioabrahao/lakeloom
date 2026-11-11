@@ -354,3 +354,29 @@ async def test_list_native_members_returns_three_kinds(client: OMClient) -> None
     assert [c["id"] for c in concepts] == [CONCEPT["id"]]
     assert [p["id"] for p in properties] == [PROPERTY["id"]]
     assert [a["id"] for a in axioms] == [AXIOM["id"]]
+
+
+# --- create_model compensation (M2a Task 7) ---------------------------------------------------
+
+GID = "0b6f1f9e-6c39-4e57-9d5e-0f7b2b4bd2a1"
+
+
+def test_delete_glossary_path_registered() -> None:
+    assert OMClient.PATHS["delete_glossary"] == ("DELETE", "/v1/glossaries/{id}")
+
+
+@respx.mock
+async def test_delete_glossary_is_hard_and_not_recursive(client: OMClient) -> None:
+    route = respx.delete(f"{API}/glossaries/{GID}").respond(200, json={"id": GID})
+    await client.delete_glossary(GID)
+    params = route.calls[0].request.url.params
+    assert params["hardDelete"] == "true"
+    assert params["recursive"] == "false"  # never take terms with it
+
+
+@respx.mock
+async def test_delete_glossary_missing_is_om_error(client: OMClient) -> None:
+    respx.delete(f"{API}/glossaries/{GID}").respond(404, json={"code": 404, "message": "x"})
+    with pytest.raises(OMError) as info:
+        await client.delete_glossary(GID)
+    assert info.value.status == 404

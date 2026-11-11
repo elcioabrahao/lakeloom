@@ -476,17 +476,17 @@ def test_to_om_all_folds_term_updates_into_one_update_term() -> None:
     assert updates[1]["baseVersion"] == 1.2
 
 
-def test_to_om_all_keeps_order_and_other_ops() -> None:
+def test_to_om_all_declares_first_then_keeps_order_of_other_ops() -> None:
     rel = AddRelation(
         op="add_relation", source="Order", relation_type="placedBy", target="Customer"
     )
     result = to_om_all([syn("Order", "Sale"), rel, CUSTOMER], CTX)
     assert [g["operationType"] for g in result.glossary] == [
+        "CREATE_TERM",
         "UPDATE_TERM",
         "ADD_RELATIONSHIP",
-        "CREATE_TERM",
     ]
-    assert [n["operationType"] for n in result.native] == ["UPSERT_PROPERTY", "UPSERT_CONCEPT"]
+    assert [n["operationType"] for n in result.native] == ["UPSERT_CONCEPT", "UPSERT_PROPERTY"]
 
 
 def test_synonym_on_concept_created_in_batch_is_folded_into_create() -> None:
@@ -659,3 +659,36 @@ def test_append_to_change_set_with_draft_term_strips_base_version() -> None:
     assert to_om_all([rel], ctx).glossary[0]["baseVersion"] == 0.1
     (g,) = to_om_all([rel], ctx, in_change_set={"Widget"}).glossary
     assert "baseVersion" not in g
+
+
+def test_terms_and_classes_are_declared_before_operations_that_reference_them() -> None:
+    """Live rc1 (M2a Task 7): "a referenced term must be created by an earlier operation".
+
+    One part can hold a relation whose target table sorts before it (``Invoice hasOrder
+    Order``): every CREATE_TERM / UPSERT_CONCEPT goes first, in proposal order.
+    """
+    invoice = AddConcept(op="add_concept", name="Invoice", description=text("i"))
+    widget = AddConcept(op="add_concept", name="Widget", description=text("w"))
+    ctx = replace(
+        CTX,
+        term_ids={
+            **CTX.term_ids,
+            "Invoice": draft_term_id(invoice),
+            "Widget": draft_term_id(widget),
+        },
+        term_versions={**CTX.term_versions, "Invoice": 0.1, "Widget": 0.1},
+    )
+    early = AddRelation(
+        op="add_relation", source="Invoice", relation_type="placedBy", target="Widget"
+    )
+    attr = AddAttribute(op="add_attribute", concept="Widget", name="size", datatype="xsd:int")
+    out = to_om_all([invoice, early, widget, attr], ctx)
+    assert [o["operationType"] for o in out.glossary] == [
+        "CREATE_TERM",
+        "CREATE_TERM",
+        "ADD_RELATIONSHIP",
+    ]
+    assert [o["term"]["name"] for o in out.glossary[:2]] == ["Invoice", "Widget"]
+    kinds = [o["operationType"] for o in out.native]
+    assert kinds[:2] == ["UPSERT_CONCEPT", "UPSERT_CONCEPT"]
+    assert sorted(kinds[2:]) == ["UPSERT_PROPERTY", "UPSERT_PROPERTY"]

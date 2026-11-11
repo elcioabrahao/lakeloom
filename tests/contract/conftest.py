@@ -46,6 +46,18 @@ def agent_token() -> str:
     )
 
 
+@pytest.fixture(scope="session")
+def admin_agent_token() -> str:
+    """DEV ONLY client with lakeloom:admin (create_model), besides read and propose."""
+    return _token(
+        {
+            "grant_type": "client_credentials",
+            "client_id": "lakeloom-admin-agent",
+            "client_secret": "dev-admin-secret",
+        }
+    )
+
+
 def _human_token(username: str) -> str:
     # Deliberately no lakeloom:review / :propose: those must come from the group map.
     return _token(

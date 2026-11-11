@@ -266,6 +266,76 @@ lakeloom context lakeloom_fixture.retail.sales.orders --format md --max-tokens 2
 lakeloom export retail --format turtle --out retail.ttl
 ```
 
+### Proposals
+
+Agents never change the catalog directly: they write **proposals**, which are OpenMetadata
+change sets in Draft state that a human reviews. Nothing is applied in this release; approval
+and apply arrive in M2b. A model is an OpenMetadata glossary plus a **paired native ontology**
+of the same name. The ontology holds the classes, attributes and axioms; both sides share one
+base IRI, `{LAKELOOM_PUBLIC_URL}/ontology/{slug}/` (ADR 0011).
+
+| Tool | Scope | Side effect |
+| --- | --- | --- |
+| `create_model` | `lakeloom:admin` | Creates the glossary and its paired ontology in OpenMetadata, after a dry run and a confirm token. `pair_existing=true` creates only the missing ontology of an existing glossary. |
+| `propose_from_scan` | `lakeloom:propose` | Maps a scan to concepts, attributes, keys and relations. Skips what already exists or is pending. Writes Draft change sets (at most 50 operations per part, split by table). |
+| `propose_change` | `lakeloom:propose` | Appends typed operations (selected by `op`) to a draft proposal. |
+| `propose_realization` | `lakeloom:propose` | Records that a table or column realizes a concept. The tag is applied in OpenMetadata only on approval. |
+| `get_proposal`, `diff_proposal` | `lakeloom:read` | None. They show the summary, the parts and their OpenMetadata states, and the entity-level changes. |
+| `submit_proposal` | `lakeloom:propose` | Moves every change set from Draft to Submitted. |
+| `discard_proposal` | `lakeloom:propose` | Discards every change set, after a dry run and a confirm token. Destructive. |
+
+The typical flow, which the MCP prompt `bootstrap_data_product(source, model, tables?)` walks an
+agent through:
+
+1. `scan_lake_source`.
+2. `create_model` if the model is missing.
+3. `propose_from_scan`.
+4. Show the summary to the user.
+5. `propose_change` to add definitions, synonyms and mappings.
+6. `submit_proposal`.
+
+A second prompt, `explain_table(asset)`, explains a table in plain language using
+`get_asset_context` and `explain_concept`. Running a scan again proposes nothing twice: concepts
+that already exist or are pending show up as matches or as "already proposed" warnings.
+
+**Confirm tokens (FR-AGT-03).** `create_model` and `discard_proposal` are catalog-changing:
+- A call without `confirm_token` is a dry run. It writes nothing and returns a preview and a
+  token.
+- The token is an HMAC over the tool, the arguments and a digest of the previewed state, and it
+  expires after `LAKELOOM_CONFIRM_TTL_SECONDS` (default 600).
+- The second call must pass the token with the same arguments.
+- A token issued for other arguments or another tool fails with `validation_error`.
+- If the state has changed since the preview, or the token is replayed after use, the call fails
+  with `conflict`.
+- Production must set `LAKELOOM_CONFIRM_SECRET` (or `_FILE`). Development falls back to a random
+  per-process key.
+
+**Provenance (FR-PRO-03).** Each change set description holds a Markdown summary and a fenced
+`lakeloom-provenance` JSON block with:
+- the scan and proposal ids;
+- the source tables and their versions;
+- the rule ids behind each operation;
+- the calling principal, the client and the time.
+
+The same data is kept in Lakeloom's state store, which stays authoritative. Lake comments become
+descriptions verbatim, capped at 4,000 characters, and are always shown quoted as untrusted.
+
+**Audit (NFR-SEC-12).** Every write and every dry run writes one audit record: principal,
+principal type, client, tool, model, proposal and change set ids, and the result. Records go to
+the `lakeloom.audit` JSON log on stdout and to the `audit_log` table. Arguments are never
+recorded.
+
+In the dev realm, the client `lakeloom-admin-agent` (secret `dev-admin-secret`, dev only)
+receives `lakeloom:read`, `lakeloom:propose` and `lakeloom:admin`. Use it for `create_model`.
+Operators have the same operations on the command line. These commands write their own audit
+records:
+
+```bash
+lakeloom propose scan_01J... --model retail_auto [--table orders]   # prints the summary
+lakeloom proposal prop_01J...                                        # refreshed from OpenMetadata
+lakeloom submit prop_01J...
+```
+
 ### Surfaces overview
 
 | Capability | MCP tool | MCP resource | HTTP route |
