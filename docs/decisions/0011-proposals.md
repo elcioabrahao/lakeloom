@@ -340,3 +340,44 @@ Verified live against 2.1.0-rc1 on 2026-11-11 (throwaway ontologies, bot JWT).
   `upstream_unavailable`. Native classes that are glossary terms contribute no
   `rdfs:label`/`rdfs:comment` (the glossary's prefLabel and definition stay authoritative,
   ADR 0009); properties keep theirs. Member paging stops at 100 pages or a repeated cursor.
+
+## Appendix: proposals (M2a Task 6)
+
+`lakeloom.core.proposals.ProposalService` turns scans and agent edits into OM drafts; nothing
+is applied.
+
+- **Parts.** A proposal holds parts of at most `LAKELOOM_MAX_PROPOSAL_OPS` (default 50)
+  *proposal* operations. Operations are grouped by source table (full-name order, then mapper
+  order); whole tables are packed into a part while they fit, and a table larger than the limit
+  gets consecutive parts with a warning. Each part has up to two change sets, created, submitted
+  and discarded together: `lakeloom-<proposal id>-<n>` (glossary, `glossaries: [<model>]`) and
+  `lakeloom-<proposal id>-<n>-native` (`ontology: <model>`, `baseWorkingRevision` = the
+  ontology's current `workingRevision`). A part of realizations only has none.
+- **Provenance block.** Every change-set description ends with a fenced
+  ` ```lakeloom-provenance ` JSON object: `proposal_id`, `part`, `model`, `scan_id`,
+  `tables [{fqn, om_fqn, version}]`, `rule_ids`, `principal_subject`, `principal_type`,
+  `client`, `at`, `ai_generated` and `operations [{key, rule_ids, truncated}]`. Backticks in
+  values are written as ```, so untrusted text cannot close the fence. Descriptions are not
+  rewritten when `propose_change` appends to an existing change set (rc1 has no description
+  update on the change-set API Lakeloom uses); the state store is authoritative.
+- **Live finding (rc1, 2026-11-11):** an `ADD_RELATIONSHIP` (and `UPSERT_MAPPING`) whose
+  target term is created *in the same change set* must not carry `baseVersion`: 400
+  `Ontology operation '<id>' is invalid: baseVersion must be absent for a term created in this
+  change set`. `to_om_all` drops it for such terms. A relation whose endpoint is created in
+  *another* part's change set still carries the draft id and version 0.1; applying parts in
+  order and remapping draft ids is M2b's job.
+- **Relationship types** are looked up by name (`GET /v1/relationshipTypes`). The mapper's
+  `has<Target>` types usually do not exist; `propose_from_scan` drops such relations with a
+  warning, `propose_change` fails closed (`validation_error`). Creating relationship types is
+  not done by Lakeloom in M2a.
+- **Consistency.** All OM payloads are built (failing closed) before the first write; each
+  part is stored right after its change sets exist; when the second side of a part fails, the
+  first is undone (`OMClient.remove_operations`) or, if it was just created, discarded and
+  listed in `Proposal.abandoned_change_sets`. Submit/discard store per-side progress, so a
+  retry continues where it stopped. Store updates are compare-and-set on a revision counter.
+- **Axioms** added with `propose_change` are validated with `POST /v1/ontologyAxioms/validate`;
+  `UNDECLARED_CLASS` / `UNDECLARED_PROPERTY` are excused only for IRIs the same proposal
+  declares (validation sees applied declarations only).
+- **Discard** is confirm-token protected (tool `discard_proposal`, args `{proposal_id}`); the
+  state digest covers the proposal's status and update time and every change set's OM
+  version and state, so a used token fails as `conflict`.

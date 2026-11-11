@@ -36,6 +36,7 @@ from lakeloom.om.models import (
     OMOntology,
     OMOntologyState,
     OMPage,
+    OMRelationshipType,
     OMTable,
     OMVersion,
     RdfStatus,
@@ -151,6 +152,8 @@ class OMClient:
         "list_ontology_concepts": ("GET", "/v1/ontologyConcepts"),
         "list_ontology_properties": ("GET", "/v1/ontologyProperties"),
         "list_ontology_axioms": ("GET", "/v1/ontologyAxioms"),
+        # Proposals (M2a Task 6): relationship type ids for ADD_RELATIONSHIP
+        "list_relationship_types": ("GET", "/v1/relationshipTypes"),
     }
 
     def __init__(
@@ -494,6 +497,28 @@ class OMClient:
             )
         return OMChangeSet.model_validate(_json(response))
 
+    async def remove_operations(
+        self, change_set_id: str, operation_ids: Sequence[str]
+    ) -> OMChangeSet:
+        """Drop the active operations with these ids from a Draft (undo of an
+        :meth:`add_operations` whose companion write failed). Same replace-under-lease
+        mechanics as :meth:`add_operations`; unknown ids are ignored."""
+        drop = set(operation_ids)
+        async with self._lease(change_set_id) as lease:
+            response = await self._request("get_change_set", path_args={"id": change_set_id})
+            current = OMChangeSet.model_validate(_json(response))
+            cursor = len(current.operations) if current.undo_cursor is None else current.undo_cursor
+            kept = [
+                op.model_dump(by_alias=True, exclude_none=True)
+                for op in current.operations[:cursor]
+                if op.id not in drop
+            ]
+            payload = {"lease": lease.token(), "operations": kept, "undoCursor": len(kept)}
+            response = await self._request(
+                "replace_operations", path_args={"id": change_set_id}, json=payload
+            )
+        return OMChangeSet.model_validate(_json(response))
+
     async def _command(self, name: str, change_set_id: str) -> OMChangeSet:
         async with self._lease(change_set_id) as lease:
             response = await self._request(
@@ -564,6 +589,39 @@ class OMClient:
             seen.add(cursor)
             after = cursor
         raise OMError("OpenMetadata returned too many ontology member pages")
+
+    async def list_native_members(
+        self, name: str
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        """The working concepts, properties and axioms of the native ontology ``name``
+        (raw OM JSON: ``id``, ``iri``, ``version``, ...)."""
+        concepts, properties, axioms = await asyncio.gather(
+            self._members("list_ontology_concepts", name),
+            self._members("list_ontology_properties", name),
+            self._members("list_ontology_axioms", name),
+        )
+        return concepts, properties, axioms
+
+    async def list_relationship_types(self) -> dict[str, str]:
+        """Relationship type name -> id (the custom types plus OM's CORE/OWL_SKOS ones)."""
+        out: dict[str, str] = {}
+        after: str | None = None
+        seen: set[str] = set()
+        for _ in range(_MAX_MEMBER_PAGES):
+            params = {"limit": str(_MEMBER_PAGE)}
+            if after:
+                params["after"] = after
+            page = OMPage[OMRelationshipType].model_validate(
+                _json(await self._request("list_relationship_types", params=params))
+            )
+            out.update({t.name: t.id for t in page.data})
+            if not page.after:
+                return out
+            if page.after in seen:
+                raise OMError("OpenMetadata repeated a paging cursor for relationship types")
+            seen.add(page.after)
+            after = page.after
+        raise OMError("OpenMetadata returned too many relationship type pages")
 
     async def export_native_ontology(self, name: str) -> OMNativeExport | None:
         """The native ontology called ``name`` as an RDF graph, or ``None`` without a pair.

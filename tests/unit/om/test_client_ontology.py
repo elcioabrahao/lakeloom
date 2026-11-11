@@ -345,3 +345,12 @@ async def test_exhausted_retries_label_with_before_revision(client: OMClient) ->
     mock_members([CONCEPT], [], [])
     export = await client.export_native_ontology("pair")
     assert export is not None and export.working_revision == 5  # 3rd attempt: before=5, after=6
+
+
+@respx.mock
+async def test_list_native_members_returns_three_kinds(client: OMClient) -> None:
+    mock_members([CONCEPT], [PROPERTY], [AXIOM])
+    concepts, properties, axioms = await client.list_native_members("pair")
+    assert [c["id"] for c in concepts] == [CONCEPT["id"]]
+    assert [p["id"] for p in properties] == [PROPERTY["id"]]
+    assert [a["id"] for a in axioms] == [AXIOM["id"]]

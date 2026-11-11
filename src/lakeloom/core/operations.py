@@ -419,7 +419,8 @@ def to_om_all(ops: Sequence[ProposalOperation], ctx: OMContext) -> OMOps:
     All changes to one existing term (``UpdateConcept``, ``AddSynonym``) are folded, in
     order, into a single ``UPDATE_TERM`` built from the term's snapshot: separate updates
     from the same static context would overwrite each other. A synonym added to a concept
-    created in the same batch is folded into its ``CREATE_TERM``.
+    created in the same batch is folded into its ``CREATE_TERM``. Relations and mappings on a
+    term created in the same batch carry no ``baseVersion`` (rc1 rejects one, ADR 0011).
     """
     created = {op.name: op for op in ops if isinstance(op, AddConcept)}
     folded: dict[str, list[UpdateConcept | AddSynonym]] = {}
@@ -454,9 +455,25 @@ def to_om_all(ops: Sequence[ProposalOperation], ctx: OMContext) -> OMOps:
                     merged.append(synonym)
             op = op.model_copy(update={"synonyms": merged})
         out = to_om(op, ctx)
+        anchor = _anchor(op)
+        if anchor is not None and _local(ctx, anchor) in created:
+            # rc1: "baseVersion must be absent for a term created in this change set"
+            out = OMOps(
+                glossary=[{k: v for k, v in o.items() if k != "baseVersion"} for o in out.glossary],
+                native=out.native,
+            )
         glossary.extend(out.glossary)
         native.extend(out.native)
     return OMOps(glossary=glossary, native=native)
+
+
+def _anchor(op: ProposalOperation) -> str | None:
+    """The term whose id is an operation's ``targetId`` (relations: the source)."""
+    if isinstance(op, AddRelation | RemoveRelation):
+        return op.source
+    if isinstance(op, AddMapping | RemoveMapping):
+        return op.concept
+    return None
 
 
 def to_om(op: ProposalOperation, ctx: OMContext) -> OMOps:

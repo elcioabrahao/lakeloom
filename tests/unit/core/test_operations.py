@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 from pydantic import AnyUrl, TypeAdapter, ValidationError
 
@@ -579,3 +581,28 @@ def test_cap_text_robust_to_none() -> None:
                 "evidence": None,
             }
         )
+
+
+def test_relation_and_mapping_from_a_term_created_in_the_batch_have_no_base_version() -> None:
+    """Live rc1 (ADR 0011): "baseVersion must be absent for a term created in this change set"."""
+    widget = AddConcept(op="add_concept", name="Widget", description=text("w"))
+    ctx = replace(
+        CTX,
+        term_ids={**CTX.term_ids, "Widget": draft_term_id(widget)},
+        term_versions={**CTX.term_versions, "Widget": 0.1},
+    )
+    relation = AddRelation(
+        op="add_relation", source="Widget", relation_type="placedBy", target="Customer"
+    )
+    mapping = AddMapping(
+        op="add_mapping", concept="Widget", kind="closeMatch", target_iri=AnyUrl("https://s.org/W")
+    )
+    existing = AddRelation(
+        op="add_relation", source="Order", relation_type="placedBy", target="Widget"
+    )
+    out = to_om_all([widget, relation, mapping, existing], ctx).glossary
+    by_type = {o["operationType"]: o for o in out if o["operationType"] != "ADD_RELATIONSHIP"}
+    rels = [o for o in out if o["operationType"] == "ADD_RELATIONSHIP"]
+    assert "baseVersion" not in rels[0] and rels[0]["targetId"] == draft_term_id(widget)
+    assert "baseVersion" not in by_type["UPSERT_MAPPING"]
+    assert rels[1]["baseVersion"] == 0.3  # from an existing term: still versioned

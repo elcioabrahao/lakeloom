@@ -177,6 +177,7 @@ class OMGlossaryTerm(BaseModel):
     glossary: OMEntityRef
     tags: list[OMTagLabel] = []
     owners: list[OMEntityRef] = []
+    version: float | None = None  # the baseVersion of operations on this term
 
 
 class OMLineageEdge(BaseModel):
@@ -379,3 +380,13 @@ class OMNativeExport(BaseModel):
     working_revision: int
     turtle: str = ""
     graph: Graph | None = None
+
+
+class OMRelationshipType(BaseModel):
+    """A ``RelationshipType`` (``GET /v1/relationshipTypes``): referenced by id in
+    ``ADD_RELATIONSHIP`` (ADR 0011)."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    id: str
+    name: str

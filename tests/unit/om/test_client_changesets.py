@@ -517,3 +517,34 @@ async def test_fr_om_02_writes_send_json_and_bearer(client: OMClient) -> None:
     request = route.calls[0].request
     assert request.headers["Authorization"] == "Bearer t"
     assert request.headers["Content-Type"] == "application/json"
+
+
+@respx.mock
+async def test_fr_om_02_remove_operations_drops_ids_under_a_lease(client: OMClient) -> None:
+    _, release = mock_lease()
+    respx.get(f"{API}/ontologyChangeSets/{CSID}").respond(
+        200, json=change_set(operations=[CREATE_TERM_OP, UPDATE_TERM_OP])
+    )
+    put = respx.put(f"{API}/ontologyChangeSets/{CSID}/operations").respond(200, json=change_set())
+    await client.remove_operations(CSID, [str(UPDATE_TERM_OP["id"]), "unknown"])
+    sent = body(put)
+    assert [o["id"] for o in sent["operations"]] == [OPID]
+    assert sent["undoCursor"] == 1
+    assert "lease" in sent and release.called
+
+
+def test_relationship_types_path_registered() -> None:
+    assert OMClient.PATHS["list_relationship_types"] == ("GET", "/v1/relationshipTypes")
+
+
+@respx.mock
+async def test_list_relationship_types_pages(client: OMClient) -> None:
+    def page(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("after") == "c1":
+            return httpx.Response(200, json={"data": [{"id": "r2", "name": "billsFor"}]})
+        return httpx.Response(
+            200, json={"data": [{"id": "r1", "name": "placedBy"}], "paging": {"after": "c1"}}
+        )
+
+    respx.get(f"{API}/relationshipTypes").mock(side_effect=page)
+    assert await client.list_relationship_types() == {"placedBy": "r1", "billsFor": "r2"}
