@@ -28,6 +28,7 @@ from typing import Any
 
 from lakeloom.core.model_policy import MappingPolicy
 from lakeloom.core.operations import (
+    MAX_EVIDENCE,
     AddAttribute,
     AddAxiom,
     AddConcept,
@@ -45,6 +46,8 @@ _SPLIT = re.compile(r"[^A-Za-z0-9]+")
 _STRING_TYPES = {"string", "varchar", "char"}
 _MAX_NAME = 128
 _SOURCE = "lakeloom:mapper"
+# Room for the truncation flags the operation validator may append (description, rationale).
+_EVIDENCE_CAP = MAX_EVIDENCE - 2
 
 
 @dataclass
@@ -148,6 +151,11 @@ def _tag_evidence(tags: list[str], ref: str) -> list[Evidence]:
     return [Evidence(kind="tag", ref=ref, detail=tag) for tag in tags]
 
 
+def _capped(evidence: list[Evidence]) -> list[Evidence]:
+    """At most ``_EVIDENCE_CAP`` items; the first (the table/column itself) always stays."""
+    return evidence[:_EVIDENCE_CAP]
+
+
 def map_scan(record: ScanRecord, policy: MappingPolicy) -> MappingResult:
     """Map every described table in ``record`` to proposal operations."""
     warnings: list[str] = []
@@ -203,7 +211,7 @@ def _map_table(
             name=concept,
             description=description,
             rule_ids=rules,
-            evidence=evidence,
+            evidence=_capped(evidence),
         )
     )
 
@@ -281,7 +289,7 @@ def _attribute(
         allowed_values=allowed,
         description=comment,
         rule_ids=rules,
-        evidence=evidence,
+        evidence=_capped(evidence),
     )
 
 
@@ -413,10 +421,12 @@ def _relations(
                 relation_type=rtype,
                 target=target_concept,
                 rule_ids=["R-FK"],
-                evidence=[
-                    Evidence(kind="fk", ref=f"{full}.{c}", detail=f"references {to}")
-                    for c in constraint.columns
-                ],
+                evidence=_capped(
+                    [
+                        Evidence(kind="fk", ref=f"{full}.{c}", detail=f"references {to}")
+                        for c in constraint.columns
+                    ]
+                ),
             )
         )
     return out
@@ -447,5 +457,5 @@ def _pk_axiom(
             "expressions": expressions,
         },
         rule_ids=["R-PK"],
-        evidence=[Evidence(kind="pk", ref=f"{full}.{c}") for c in pk_columns],
+        evidence=_capped([Evidence(kind="pk", ref=f"{full}.{c}") for c in pk_columns]),
     )

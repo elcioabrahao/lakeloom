@@ -75,6 +75,12 @@ def _scope(scope: str) -> str:
     return f"Requires scope `{scope}`; without it the call fails with error code `forbidden`."
 
 
+_OWNER_NOTE = (
+    "Only the proposal's creator or a `lakeloom:admin` caller may do this; anyone else gets "
+    "`forbidden` (proposal belongs to another principal)."
+)
+
+
 CREATE_MODEL_DESCRIPTION = f"""\
 Create a new semantic model: an OpenMetadata glossary named `name` (a slug: lower-case letter, \
 then lower-case letters, digits, `_` or `-`; at most 64) plus its paired native ontology of \
@@ -82,7 +88,7 @@ the same name, with base IRI `{{public URL}}/ontology/{{name}}/`. Proposals need
 
 Two steps (FR-AGT-03). Without `confirm_token` this is a dry run: nothing is written, and the \
 result lists what will be created plus a `confirm_token` (valid 10 minutes by default, \
-bound to these arguments and to the current OpenMetadata state). Show the preview to the \
+bound to these arguments, to you and to the current OpenMetadata state). Show the preview to the \
 user, then call again with the same arguments and `confirm_token`.
 
 Side effect on confirmation: creates the glossary and the ontology in OpenMetadata directly \
@@ -118,12 +124,15 @@ Add operations to a draft proposal: concepts, attributes, relations, mappings, a
 synonyms, concept updates or removals, and realizations. Each item of `operations` is one \
 typed operation selected by its `op` field (see the input schema). Use it to enrich a \
 proposal from propose_from_scan with definitions, synonyms and mappings. Operations that \
-are already in the proposal are skipped; axioms are validated by OpenMetadata first.
+are already in the proposal are skipped, and so are operations already pending in another \
+open proposal and concepts or attributes the model already has (reported as warnings and \
+`matches`); axioms are validated by OpenMetadata first. Rule ids you pass are replaced by \
+`R-AGENT` (provenance is stated by the server).
 
 Side effect: appends the operations to the proposal's OpenMetadata change sets (still Draft; \
 a new part is added when the last one is full) and updates the proposal record. \
 {_DRAFT_NOTE} Not idempotent. Only `draft` proposals can change (`validation_error` \
-otherwise); a stale base version → `conflict`.
+otherwise); a stale base version → `conflict`. {_OWNER_NOTE}
 
 {_RESULT_NOTE} {_UNTRUSTED_NOTE}
 
@@ -132,7 +141,8 @@ otherwise); a stale base version → `conflict`.
 PROPOSE_REALIZATION_DESCRIPTION = f"""\
 Propose that a data asset realizes a concept (FR-CTX-05): the table, or one of its columns, \
 gets tagged with the concept's glossary term once the proposal is approved. `concept` is a \
-name, FQN or IRI; `asset` is an OpenMetadata FQN, Unity Catalog name or storage URI \
+name, FQN or IRI of a concept of the model or a model it imports; `asset` is an \
+OpenMetadata FQN, Unity Catalog name or storage URI \
 (`column` may name the column separately). Pass `proposal_id` to add it to a draft proposal, \
 or `model` to start a new proposal.
 
@@ -169,7 +179,7 @@ seen the proposal summary and agreed.
 Side effect: changes the state of the change sets in OpenMetadata and of the proposal in \
 Lakeloom. {_DRAFT_NOTE} Not idempotent: only `draft` proposals can be submitted \
 (`validation_error` otherwise). A failure part-way keeps the progress; calling again \
-continues.
+continues. {_OWNER_NOTE}
 
 {_scope(PROPOSE_SCOPE)}"""
 
@@ -179,9 +189,9 @@ discarded and the proposal becomes `discarded`. This cannot be undone.
 
 Two steps (FR-AGT-03). Without `confirm_token` this is a dry run that changes nothing and \
 returns what would be discarded plus a `confirm_token` (valid 10 minutes by default, \
-bound to this proposal's current state). Show it to the user, then call again with \
-`confirm_token`. A token for another proposal → `validation_error`; after the proposal \
-changed, or replayed after use → `conflict`.
+bound to this proposal's current state and to you). Show it to the user, then call again \
+with `confirm_token`. A token for another proposal or caller → `validation_error`; after \
+the proposal changed, or replayed after use → `conflict`. {_OWNER_NOTE}
 
 Side effect on confirmation: discards the change sets in OpenMetadata (nothing was applied, \
 so the catalog itself is unchanged) and marks the proposal discarded.
@@ -291,7 +301,7 @@ def register_proposal_tools(mcp: MCPServer, deps: AppDeps) -> None:
             Field(description="Token from the dry run; omit it to preview without writing."),
         ] = None,
     ) -> Annotated[CallToolResult, CreateModelResult]:
-        async def body(_: Principal) -> CallToolResult:
+        async def body(principal: Principal) -> CallToolResult:
             validate_slug(name)
             current_audit().model = name  # validated: the audit never records raw input
             out = await create_model(
@@ -300,6 +310,7 @@ def register_proposal_tools(mcp: MCPServer, deps: AppDeps) -> None:
                 deps.confirm,
                 deps.settings,
                 name,
+                principal=principal.subject,
                 display_name=display_name,
                 description=description,
                 pair_existing=pair_existing,

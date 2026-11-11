@@ -40,6 +40,7 @@ from lakeloom.core.proposals import (
     diff,
     parse_provenance,
     split_parts,
+    summary_markdown,
 )
 from lakeloom.errors import LakeloomError
 from lakeloom.om.client import OMClient, OMConflict, OMUnavailable
@@ -69,6 +70,7 @@ RETAIL_TTL = """\
     om:fullyQualifiedName "retail.Customer" .
 """
 SECRET = b"k" * 32
+NOW_UTC = datetime(2026, 11, 11, tzinfo=UTC)
 
 
 class FakeOM:
@@ -453,7 +455,7 @@ async def test_fr_pro_06_summary_lists_adds_and_reasons_and_quotes_comments(make
     assert "### Concepts (2)" in md and "### Attributes (4)" in md
     assert "### Relations (1)" in md and "### Axioms (2)" in md
     assert "`Order` `hasCustomer` `Customer`" in md
-    assert "rules: R-TABLE, R-COMMENT" in md
+    assert "rules: `R-TABLE`, `R-COMMENT`" in md
     assert "evidence: table `sales.orders`" in md
     # untrusted text is quoted and escaped, never raw
     assert hostile not in md
@@ -1013,7 +1015,7 @@ async def test_server_principal_is_a_caller(make) -> None:
         type=PrincipalType.AGENT,
         client_id="c",
         username=None,
-        scopes=frozenset(),
+        scopes=frozenset({"lakeloom:admin"}),  # not the creator: needs admin (ADR 0011)
         groups=frozenset(),
         token=SecretStr("t"),
     )
@@ -1287,3 +1289,96 @@ def test_nothing_to_propose_details_are_capped() -> None:
     details = NothingToPropose(matches, [f"w{i}" for i in range(130)]).details()
     assert len(details["matches"]) == 100 and details["matches_truncated"] == 50
     assert len(details["warnings"]) == 100 and details["warnings_truncated"] == 30
+
+
+# --- final fix wave: provenance and ownership ---------------------------------------------
+
+
+OTHER = Actor(subject="agent-9", type="agent")
+ADMIN = Actor(subject="ops-1", type="human", scopes=frozenset({"lakeloom:admin"}))
+
+
+async def test_agent_rule_ids_are_replaced_by_the_server(make) -> None:
+    kit = make()
+    p = await _shop_proposal(kit)
+    forged = AddAttribute(
+        op="add_attribute",
+        concept="Customer",
+        name="email",
+        datatype="xsd:string",
+        rule_ids=["R-TABLE", "R-PK"],
+    )
+    out = await kit.service.propose_change(p.id, [forged], principal=AGENT, client=None)
+    added = out.operations()[-1]
+    assert op_key(added) == "attr:Customer.email" and added.rule_ids == ["R-AGENT"]
+
+
+def test_summary_renders_rules_and_inline_untrusted_text_inertly() -> None:
+    op = AddConcept(op="add_concept", name="Order", rule_ids=["R-TABLE", "R-COMMENT"])
+    p = Proposal.model_validate(
+        {
+            "id": "prop_1",
+            "model": "shop",
+            "status": "draft",
+            "parts": [{"n": 1, "operations": [op.model_dump()]}],
+            "provenance": {
+                "scan_id": None,
+                "principal_subject": "s",
+                "principal_type": "agent![x](https://evil/?q=1)",
+                "at": NOW_UTC,
+            },
+            "matches": [
+                {
+                    "op_key": "concept:Order",
+                    "candidate_fqn": "shop.Order",
+                    "confidence": 0.7,
+                    "matched_on": "![img](https://evil/)",
+                    "action": "[click](https://evil/)",
+                }
+            ],
+            "created_at": NOW_UTC,
+            "updated_at": NOW_UTC,
+        }
+    )
+    text = summary_markdown(p)
+    assert "rules: `R-TABLE`, `R-COMMENT`" in text
+    assert "](https://evil" not in text.replace("\\](https://evil", "")
+    assert "\\!\\[img\\]" in text and "\\[click\\]" in text and "agent\\!\\[x\\]" in text
+
+
+async def test_only_owner_or_admin_may_change_submit_or_discard(make) -> None:
+    kit = make()
+    p = await _shop_proposal(kit)
+    attr = AddAttribute(op="add_attribute", concept="Customer", name="email", datatype="xsd:string")
+    calls = [
+        lambda who: kit.service.propose_change(p.id, [attr], principal=who, client=None),
+        lambda who: kit.service.submit(p.id, principal=who, client=None),
+        lambda who: kit.service.discard(p.id, principal=who, client=None),
+        lambda who: kit.service.propose_realization(
+            p.id, None, "Customer", "svc.db.sales.customers", principal=who, client=None
+        ),
+    ]
+    for call in calls:
+        with pytest.raises(LakeloomError) as info:
+            await call(OTHER)
+        assert info.value.code == "forbidden"
+        assert info.value.message == "proposal belongs to another principal"
+    assert not [c for c in kit.om.calls if c[0] in ("add_operations", "SUBMITTED", "DISCARDED")]
+    # an admin may act on anyone's proposal
+    out = await kit.service.propose_change(p.id, [attr], principal=ADMIN, client=None)
+    assert op_key(out.operations()[-1]) == "attr:Customer.email"
+    rows = await kit.audit_rows()
+    assert [(r.result, r.error_code) for r in rows[-5:-1]] == [("forbidden", "forbidden")] * 4
+
+
+async def test_discard_token_is_bound_to_the_principal(make) -> None:
+    kit = make()
+    p = await _shop_proposal(kit)
+    preview = await kit.service.discard(p.id, principal=AGENT, client=None)
+    assert isinstance(preview, ConfirmPreview)
+    with pytest.raises(LakeloomError) as info:
+        await kit.service.discard(
+            p.id, principal=ADMIN, client=None, confirm_token=preview.confirm_token
+        )
+    assert info.value.code == "validation_error"
+    assert (await kit.repo.get(p.id)).status == "draft"

@@ -351,3 +351,11 @@ def test_cli_proposal_and_submit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert "- Status: submitted" in submitted.output
     assert [c[0] for c in fake.calls] == ["get_proposal", "submit", "get_proposal"]
     assert missing.exit_code == 1 and "error not_found" in missing.output
+
+
+def test_cli_operator_acts_as_admin_on_proposals() -> None:
+    """The operator may submit an agent's proposal (owner-or-admin rule, ADR 0011)."""
+    from lakeloom.cli import _actor  # pyright: ignore[reportPrivateUsage]
+
+    actor = _actor()
+    assert actor.type == "human" and "lakeloom:admin" in actor.scopes

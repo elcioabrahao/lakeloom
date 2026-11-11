@@ -498,3 +498,11 @@ def test_every_default_spark_type_maps_without_warning(spark: str) -> None:
     assert isinstance(attr, AddAttribute)
     assert attr.datatype == DEFAULT_DATATYPES[spark]
     assert result.warnings == []
+
+
+def test_evidence_is_capped_for_heavily_tagged_columns() -> None:
+    tags = [f"Tier.T{i}" for i in range(40)]
+    tbl = table("t", [col("c", "string", 0, "comment", tags=tags)], comment="x", tags=tags)
+    concept, attr = map_scan(record(tbl), POLICY).operations
+    assert 0 < len(concept.evidence) <= 18 and 0 < len(attr.evidence) <= 18
+    assert attr.evidence[0].kind == "column"  # the column itself is never cut

@@ -156,3 +156,17 @@ def test_unbindable_args_are_validation_error(bad: object) -> None:
     with pytest.raises(LakeloomError) as exc:
         _tokens(Clock()).issue("t", {"x": bad}, "d")
     assert exc.value.code == "validation_error"
+
+
+def test_hints_name_the_real_dry_run() -> None:
+    """The tools have no dry_run flag: a dry run is a call without confirm_token."""
+    clock = Clock()
+    tokens = _tokens(clock)
+    token, _ = tokens.issue("t", ARGS, "d1")
+    errors = [_fail(tokens, "junk"), _fail(tokens, token, tool="other")]
+    clock.now += 601
+    errors.append(_fail(tokens, token))
+    errors.append(_fail(_tokens(Clock()), token, state_digest="d2"))
+    for err in errors:
+        assert "dry_run" not in err.hint
+        assert "without confirm_token" in err.hint

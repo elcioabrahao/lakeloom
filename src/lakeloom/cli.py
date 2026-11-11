@@ -491,7 +491,12 @@ def _actor() -> "Actor":
     from lakeloom.core.proposals import Actor
     from lakeloom.server.auth import PrincipalType
 
-    return Actor(subject=_operator(), type=PrincipalType.HUMAN.value)
+    # The operator holds the state store and the OM bot credentials: lakeloom:admin (ADR 0011).
+    return Actor(
+        subject=_operator(),
+        type=PrincipalType.HUMAN.value,
+        scopes=frozenset({"lakeloom:admin"}),
+    )
 
 
 @app.command("propose")

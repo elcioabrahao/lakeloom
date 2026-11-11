@@ -34,6 +34,15 @@ Relations (hybrid model): each ``AddRelation`` is a glossary link plus a native 
 property named after the relation; when OM lacks the relationship type the glossary link
 uses ``relatedTo`` (with a warning). An unpaired model gets the glossary link only.
 
+Ownership (owner ruling, ADR 0011): only the proposal's creator (``provenance.principal_subject``)
+or a caller holding ``lakeloom:admin`` may change (``propose_change``, ``propose_realization``
+into it), submit or discard a proposal; anyone else gets ``forbidden`` "proposal belongs to
+another principal". The discard confirm token is bound to the caller as well.
+
+Provenance of agent edits (FR-PRO-03): operations an agent passes to ``propose_change`` or
+``propose_realization`` carry the rule id ``R-AGENT`` only; rule ids an agent supplies are
+replaced, never trusted.
+
 Concurrency: a per-proposal lock serialises edits, a per-model lock serialises
 ``propose_from_scan`` (dedupe reads the model's open proposals), and the store is
 compare-and-set. The locks are in-process: with several replicas, two scans of one model at
@@ -130,6 +139,8 @@ _NATIVE_OPS = (AddConcept, RemoveConcept, AddAttribute, RemoveAttribute, AddAxio
 _MAX_HINT_ITEMS = 20
 _MAX_DETAIL_ITEMS = 100  # per list in NothingToPropose.details()
 AGENT_RULE = "R-AGENT"  # the only rule id of an operation an agent passed (not trusted)
+ADMIN_SCOPE = "lakeloom:admin"
+NOT_OWNER = "proposal belongs to another principal"
 _log = logging.getLogger(__name__)
 _OM_READS = 8  # concurrent change-set reads
 
@@ -149,10 +160,11 @@ class Caller(Protocol):
 
 @dataclass(frozen=True)
 class Actor:
-    """A caller outside MCP (CLI, tests)."""
+    """A caller outside MCP (CLI, tests); ``scopes`` as a token would grant them."""
 
     subject: str
     type: str = "agent"
+    scopes: frozenset[str] = frozenset()
 
 
 def _sides() -> dict[str, str | None]:
@@ -267,7 +279,7 @@ class NothingToPropose(LakeloomError):
         shown = [f"{m.op_key} -> {m.candidate_fqn} ({m.confidence:.2f})" for m in matches]
         shown += warnings
         more = len(shown) - _MAX_HINT_ITEMS
-        hint = "; ".join(single_line(s) for s in shown[:_MAX_HINT_ITEMS])
+        hint = "; ".join(_inline(s) for s in shown[:_MAX_HINT_ITEMS])
         if more > 0:
             hint += f"; and {more} more"
         super().__init__(
@@ -412,6 +424,15 @@ def _truncated(op: ProposalOperation) -> bool:
     return any(e.truncated for e in op.evidence)
 
 
+def _inline(text: str) -> str:
+    """Untrusted text on one Markdown line, inert: no line breaks, and ``\\``, ``[``, ``]``
+    and ``!`` escaped so no link or image can render."""
+    out = single_line(text).replace("\\", "\\\\")
+    for ch in "[]!":
+        out = out.replace(ch, "\\" + ch)
+    return out
+
+
 def _json_block(data: Mapping[str, Any]) -> str:
     """Compact JSON that cannot close its Markdown fence (backticks as ``\\u0060``)."""
     text = json.dumps(data, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
@@ -530,8 +551,8 @@ def _op_line(op: ProposalOperation) -> str:
             head = f"{code_span(op.concept)} by {code_span(op.asset_fqn)}{column}"
         case _:
             head = code_span(op_key(op))
-    rules = ", ".join(op.rule_ids) or "none"
-    return f"- {head} — rules: {single_line(rules)}"
+    rules = ", ".join(code_span(r) for r in op.rule_ids) or "none"
+    return f"- {head} — rules: {rules}"
 
 
 def _evidence_lines(op: ProposalOperation) -> list[str]:
@@ -562,7 +583,7 @@ def summary_markdown(p: Proposal) -> str:
         f"- Status: {p.status}",
         f"- Operations: {len(ops)} in {len(p.parts)} part(s)",
         f"- Scan: {code_span(p.scan_id) if p.scan_id else 'none'}",
-        f"- Requested by: {single_line(prov.principal_type)} "
+        f"- Requested by: {_inline(prov.principal_type)} "
         f"{code_span(prov.principal_subject)}{client} at {prov.at.isoformat()}",
         "",
         "## Parts",
@@ -594,8 +615,8 @@ def summary_markdown(p: Proposal) -> str:
         for m in p.matches:
             lines.append(
                 f"- {code_span(m.op_key)} -> {code_span(m.candidate_fqn)} "
-                f"(confidence {m.confidence:.2f}, matched on {single_line(m.matched_on)}; "
-                f"{single_line(m.action)})"
+                f"(confidence {m.confidence:.2f}, matched on {_inline(m.matched_on)}; "
+                f"{_inline(m.action)})"
             )
     if p.warnings:
         lines += ["", "## Warnings"]
@@ -829,7 +850,7 @@ class ProposalService:
             model=trail.model,
             proposal_id=trail.proposal_id,
             change_set_id=trail.change_set_id,
-            result="ok" if ok else "error",
+            result="ok" if ok else "forbidden" if code == "forbidden" else "error",
             error_code=code,
         )
         await record(self._audit, rec)
@@ -1324,13 +1345,15 @@ class ProposalService:
         principal: Caller,
         client: str | None,
     ) -> Proposal:
-        stamped = list(operations)
+        # Provenance of agent edits is the server's to state (FR-PRO-03): rule ids are replaced.
+        stamped = [op.model_copy(update={"rule_ids": [AGENT_RULE]}) for op in operations]
 
         async def run(trail: AuditContext) -> tuple[Proposal, str | None]:
             trail.proposal_id = proposal_id
             async with self._lock(proposal_id):
                 p = await self._repo.get(proposal_id)
                 trail.model = p.model
+                self._require_owner(p, principal)
                 self._require_draft(p, "changed")
                 ops: list[ProposalOperation] = []
                 realized: list[str] = []
@@ -1358,6 +1381,21 @@ class ProposalService:
         if isinstance(resolved, str):
             return resolved
         return resolved.model_copy(update={"evidence": [*resolved.evidence, *op.evidence][:20]})
+
+    @staticmethod
+    def _require_owner(p: Proposal, caller: Caller) -> None:
+        """Owner ruling (ADR 0011): the creator or a ``lakeloom:admin`` caller."""
+        if caller.subject == p.provenance.principal_subject:
+            return
+        scopes: object = getattr(caller, "scopes", frozenset[str]())
+        if isinstance(scopes, frozenset | set) and ADMIN_SCOPE in scopes:
+            return
+        raise LakeloomError(
+            "forbidden",
+            NOT_OWNER,
+            "only its creator or a lakeloom:admin principal can change, submit or discard "
+            "it; start your own proposal (propose_from_scan or propose_realization)",
+        )
 
     @staticmethod
     def _require_draft(p: Proposal, action: str) -> None:
@@ -1557,6 +1595,7 @@ class ProposalService:
                             "omit model or pass the proposal's model",
                         )
                     trail.model = p.model
+                    self._require_owner(p, principal)
                     self._require_draft(p, "changed")
                     op = cast(
                         "AddRealization", await self._realization(p.model, concept, asset, column)
@@ -1689,6 +1728,7 @@ class ProposalService:
             async with self._lock(proposal_id):
                 p = await self._repo.get(proposal_id)
                 trail.model = p.model
+                self._require_owner(p, principal)
                 self._require_draft(p, "submitted")
                 await self._transition(trail, p, "SUBMITTED", self._om.submit_change_set)
                 p.status = "submitted"
@@ -1749,10 +1789,11 @@ class ProposalService:
 
         async def run(trail: AuditContext) -> tuple[Proposal | ConfirmPreview, str | None]:
             trail.proposal_id = proposal_id
-            args = {"proposal_id": proposal_id}
+            args = {"proposal_id": proposal_id, "principal": principal.subject}
             async with self._lock(proposal_id):
                 p = await self._repo.get(proposal_id)
                 trail.model = p.model
+                self._require_owner(p, principal)
                 digest, states = await self._digest(p)
                 if confirm_token is None:
                     self._require_open(p)

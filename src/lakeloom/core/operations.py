@@ -10,6 +10,7 @@ ontology whose classes reuse the glossary terms' IRIs. Realizations are Lakeloom
 ``id`` and ``state`` of each operation are filled later by ``OMClient``.
 """
 
+import json
 import uuid
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -23,7 +24,11 @@ from lakeloom.errors import LakeloomError
 from lakeloom.untrusted import UntrustedText
 
 __all__ = [
+    "MAX_AXIOM_BYTES",
     "MAX_DESCRIPTION_CHARS",
+    "MAX_EVIDENCE",
+    "MAX_RULE_IDS",
+    "RULE_ID_PATTERN",
     "AddAttribute",
     "AddAxiom",
     "AddConcept",
@@ -50,6 +55,10 @@ __all__ = [
 ]
 
 MAX_DESCRIPTION_CHARS = 4000
+MAX_RULE_IDS = 10
+MAX_EVIDENCE = 20
+MAX_AXIOM_BYTES = 16 * 1024
+RULE_ID_PATTERN = r"^R-[A-Z0-9-]{1,32}$"
 XSD = "http://www.w3.org/2001/XMLSchema#"
 _NAME = r"^[A-Za-z][A-Za-z0-9_ ]{0,127}$"
 _RELATION = r"^[a-zA-Z][a-zA-Z0-9]*$"
@@ -59,6 +68,7 @@ Name = Annotated[str, Field(pattern=_NAME)]
 Ref = Annotated[str, Field(min_length=1, max_length=512)]
 RelationType = Annotated[str, Field(pattern=_RELATION)]
 Short = Annotated[str, Field(min_length=1, max_length=256)]
+RuleId = Annotated[str, Field(pattern=RULE_ID_PATTERN)]
 ShortList = Annotated[list[Short], Field(max_length=100)]
 Version = Annotated[str, Field(pattern=r"^\d+(\.\d+)?$")]
 MappingKind = Literal["exactMatch", "closeMatch", "broadMatch", "narrowMatch", "relatedMatch"]
@@ -85,8 +95,12 @@ class Evidence(BaseModel):
 class _Op(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    rule_ids: list[str] = Field(default_factory=list[str])
-    evidence: list[Evidence] = Field(default_factory=list[Evidence])
+    rule_ids: Annotated[list[RuleId], Field(max_length=MAX_RULE_IDS)] = Field(
+        default_factory=list[str]
+    )
+    evidence: Annotated[list[Evidence], Field(max_length=MAX_EVIDENCE)] = Field(
+        default_factory=list[Evidence]
+    )
     rationale: UntrustedText | None = None
 
     @model_validator(mode="before")
@@ -204,6 +218,12 @@ class AddAxiom(_Op):
     def _named(self) -> "AddAxiom":
         if not isinstance(self.axiom.get("name"), str) or not self.axiom["name"]:
             raise ValueError("axiom needs a non-empty string 'name'")
+        try:
+            size = len(json.dumps(self.axiom, separators=(",", ":")).encode("utf-8"))
+        except (TypeError, ValueError):
+            raise ValueError("axiom must be plain JSON") from None
+        if size > MAX_AXIOM_BYTES:
+            raise ValueError(f"axiom is {size} bytes of JSON; at most {MAX_AXIOM_BYTES}")
         return self
 
 
@@ -223,14 +243,14 @@ class AddRealization(_Op):
     op: Literal["add_realization"]
     concept: Ref
     asset_fqn: Ref
-    column: str | None = None
+    column: Short | None = None
 
 
 class RemoveRealization(_Op):
     op: Literal["remove_realization"]
     concept: Ref
     asset_fqn: Ref
-    column: str | None = None
+    column: Short | None = None
 
 
 ProposalOperation = Annotated[

@@ -64,7 +64,8 @@ def _invalid() -> LakeloomError:
     return LakeloomError(
         "validation_error",
         "confirm token invalid",
-        "Call the tool with dry_run=true to get a fresh confirm_token and pass it unchanged.",
+        "Pass the token unchanged, or call the tool again without confirm_token to get a "
+        "fresh preview and token.",
     )
 
 
@@ -102,23 +103,24 @@ class ConfirmTokens:
             raise LakeloomError(
                 "validation_error",
                 "confirm token does not match this call",
-                "The token is bound to one tool and one set of arguments; "
-                "run dry_run=true again with the arguments you intend to apply.",
+                "The token is bound to one tool, one caller and one set of arguments; "
+                "call the tool again without confirm_token, with the arguments you intend to "
+                "apply, to get a fresh preview and token.",
             )
         expires = payload.get("e")
         if not isinstance(expires, int) or self._clock() >= expires:
             raise LakeloomError(
                 "validation_error",
                 "confirm token expired",
-                "Run the dry run again to get a fresh confirm_token (tokens last "
-                f"{self._ttl} seconds).",
+                "Tokens last {self._ttl} seconds; "
+                "call the tool again without confirm_token to get a fresh preview and token.",
             )
         if payload.get("s") != state_digest:
             raise LakeloomError(
                 "conflict",
                 "previewed state changed since the confirm token was issued",
-                "The target changed or the action already ran; "
-                "review it and run the dry run again for a new confirm_token.",
+                "The target changed or the action already ran; review it, then "
+                "call the tool again without confirm_token to get a fresh preview and token.",
             )
 
     def _parse(self, token: str) -> dict[str, Any]:

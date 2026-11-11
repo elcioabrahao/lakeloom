@@ -700,3 +700,28 @@ def test_nested_fqn_of_own_model_is_local() -> None:
     attr = AddAttribute(op="add_attribute", concept=nested, name="code", datatype="xsd:string")
     (item,) = to_om(attr, CTX).native
     assert item["property"]["domain"] == [BASE + "OrderStatus"]
+
+
+@pytest.mark.parametrize("rule", ["R-agent", "X-TABLE", "R-", "R-" + "A" * 33, "R-A B", "R-\n"])
+def test_rule_ids_have_a_strict_pattern(rule: str) -> None:
+    with pytest.raises(ValidationError):
+        AddConcept(op="add_concept", name="X", rule_ids=[rule])
+
+
+def test_provenance_lists_are_bounded() -> None:
+    AddConcept(op="add_concept", name="X", rule_ids=[f"R-{i}" for i in range(10)])
+    with pytest.raises(ValidationError):
+        AddConcept(op="add_concept", name="X", rule_ids=[f"R-{i}" for i in range(11)])
+    evidence = [Evidence(kind="agent", ref=f"r{i}") for i in range(21)]
+    AddConcept(op="add_concept", name="X", evidence=evidence[:20])
+    with pytest.raises(ValidationError):
+        AddConcept(op="add_concept", name="X", evidence=evidence)
+
+
+def test_realization_column_and_axiom_size_are_capped() -> None:
+    with pytest.raises(ValidationError):
+        AddRealization(op="add_realization", concept="X", asset_fqn="a.b", column="c" * 257)
+    big = {"name": "Big", "description": "d" * 17_000}
+    with pytest.raises(ValidationError):
+        AddAxiom(op="add_axiom", concept="X", axiom=big)
+    AddAxiom(op="add_axiom", concept="X", axiom={"name": "Ok", "description": "d" * 15_000})

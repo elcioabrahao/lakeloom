@@ -49,6 +49,7 @@ class Env:
         self.models.on_invalidate(self.invalidated.append)
 
     async def call(self, name: str = "shop", **kw: Any) -> CreatedModel | ModelPreview:
+        kw.setdefault("principal", "admin-1")
         return await create_model(self.om, self.models, self.confirm, self.settings, name, **kw)
 
 
@@ -272,3 +273,16 @@ async def test_no_public_url_is_validation_error() -> None:
         assert info.value.code == "validation_error"
     finally:
         await e.om.aclose()
+
+
+@respx.mock
+async def test_token_bound_to_the_principal(env: Env) -> None:
+    missing("glossaries/name/shop")
+    missing("ontologies/name/shop")
+    post = respx.post(f"{API}/glossaries").respond(201, json=glossary())
+    preview = await env.call(description="a")
+    assert isinstance(preview, ModelPreview)
+    with pytest.raises(LakeloomError) as info:
+        await env.call(description="a", principal="admin-2", confirm_token=preview.confirm_token)
+    assert info.value.code == "validation_error"
+    assert not post.called

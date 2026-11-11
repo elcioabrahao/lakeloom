@@ -7,11 +7,11 @@ kinds. The base IRI follows the M1b rule ``{public_base_url}/ontology/{slug}/``;
 requires the ontology ``namespace`` to be an absolute IRI, so it is the base IRI too.
 
 Catalog-changing, so FR-AGT-03 applies: a call without ``confirm_token`` is a dry run that
-writes nothing and returns a :class:`ModelPreview` with a token bound to the arguments and to
-the previewed OM state (whether the glossary and the ontology exist, the glossary's id and
-update time). Once the model exists that state is gone, so a replayed token fails as
-``conflict``. ``pair_existing=True`` creates only the missing ontology of an existing glossary
-(models created before the hybrid model, e.g. the seeded ``retail``).
+writes nothing and returns a :class:`ModelPreview` with a token bound to the arguments, to the
+calling principal and to the previewed OM state (whether the glossary and the ontology exist,
+the glossary's id and update time). Once the model exists that state is gone, so a replayed
+token fails as ``conflict``. ``pair_existing=True`` creates only the missing ontology of an
+existing glossary (models created before the hybrid model, e.g. the seeded ``retail``).
 
 If the ontology cannot be created after the glossary was, the new glossary is hard-deleted
 again (never recursively) and the error is reported; if even that fails, the hint names the
@@ -207,12 +207,16 @@ async def create_model(
     settings: Settings,
     name: str,
     *,
+    principal: str,
     display_name: str | None = None,
     description: str | None = None,
     pair_existing: bool = False,
     confirm_token: str | None = None,
 ) -> ModelPreview | CreatedModel:
-    """Preview (no token) or create (with the preview's token) a model; see the module doc."""
+    """Preview (no token) or create (with the preview's token) a model; see the module doc.
+
+    ``principal`` (the caller's subject) is bound into the token: only the caller who saw the
+    preview can confirm it."""
     validate_slug(name)
     if display_name is not None and len(display_name) > MAX_DISPLAY_NAME:
         raise LakeloomError(
@@ -238,6 +242,7 @@ async def create_model(
         "display_name": display_name,
         "description": description,
         "pair_existing": pair_existing,
+        "principal": principal,
     }
     g, o = await asyncio.gather(
         _om(f"looking up glossary {name!r}", om.get_glossary_by_name(name)),

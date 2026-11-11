@@ -531,3 +531,17 @@ async def test_create_model_rejects_bad_slug(make_deps: DepsFactory, kit: AuthKi
         result = await s.call_tool("create_model", {"name": "Retail Auto"})
     assert structured(result)["error"]["code"] == "validation_error"
     assert om.posts == []
+
+
+async def test_create_model_token_is_bound_to_the_caller(
+    make_deps: DepsFactory, kit: AuthKit
+) -> None:
+    om = FakeOMModels()
+    deps, _ = build(make_deps, om)
+    await upgrade(deps.engine)
+    async with mcp_session(create_server_app(deps), kit.token(scope=ADMIN, sub="admin-a")) as s:
+        token = structured(await s.call_tool("create_model", {"name": "shop"}))["confirm_token"]
+    async with mcp_session(create_server_app(deps), kit.token(scope=ADMIN, sub="admin-b")) as s:
+        other = await s.call_tool("create_model", {"name": "shop", "confirm_token": token})
+    assert structured(other)["error"]["code"] == "validation_error"
+    assert om.posts == []
