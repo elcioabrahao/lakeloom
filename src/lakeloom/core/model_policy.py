@@ -18,7 +18,7 @@ A model without an entry gets the defaults. Unknown keys are rejected.
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 __all__ = ["DEFAULT_DATATYPES", "MappingPolicy", "ModelPolicyEntry", "policy_for"]
 
@@ -46,7 +46,7 @@ DEFAULT_DATATYPES: dict[str, str] = {
     "binary": "xsd:base64Binary",
 }
 
-_XSD = r"^xsd:[A-Za-z]+$"
+_XSD = r"xsd:[A-Za-z][A-Za-z0-9]*"
 
 
 class _Strict(BaseModel):
@@ -61,6 +61,14 @@ class MappingPolicy(_Strict):
     attribute_naming: Literal["as_is", "camel"] = "as_is"
     datatype_map: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_DATATYPES))
 
+    @field_validator("datatype_map")
+    @classmethod
+    def _xsd_values(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, mapped in value.items():
+            if not _is_xsd(mapped):
+                raise ValueError(f"datatype_map[{key!r}] must look like 'xsd:name', got {mapped!r}")
+        return value
+
 
 class _MappingSettings(_Strict):
     low_cardinality: int = Field(default=20, ge=1, le=100)
@@ -68,6 +76,14 @@ class _MappingSettings(_Strict):
     concept_naming: Literal["singular_pascal", "pascal", "as_is"] = "singular_pascal"
     attribute_naming: Literal["as_is", "camel"] = "as_is"
     datatype_map: dict[str, str] = {}
+
+    @field_validator("datatype_map")
+    @classmethod
+    def _xsd_values(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, mapped in value.items():
+            if not _is_xsd(mapped):
+                raise ValueError(f"datatype_map[{key!r}] must look like 'xsd:name', got {mapped!r}")
+        return value
 
 
 class ModelPolicyEntry(_Strict):
@@ -80,15 +96,13 @@ class ModelPolicyEntry(_Strict):
         settings = self.mapping.model_dump()
         merged = dict(DEFAULT_DATATYPES)
         for key, value in self.mapping.datatype_map.items():
-            if not _is_xsd(value):
-                raise ValueError(f"datatype_map[{key!r}] must look like 'xsd:name', got {value!r}")
             merged[key.strip().lower()] = value
         settings["datatype_map"] = merged
         return MappingPolicy(model=self.name, **settings)
 
 
 def _is_xsd(value: str) -> bool:
-    return re.match(_XSD, value) is not None
+    return re.fullmatch(_XSD, value) is not None
 
 
 def policy_for(entries: list[ModelPolicyEntry], model: str) -> MappingPolicy:

@@ -232,7 +232,9 @@ def test_enum_not_applied_above_threshold() -> None:
         o for o in result.operations if isinstance(o, AddAttribute) and o.name == "status"
     )
     assert status.allowed_values == []
-    assert result.warnings == [w for w in result.warnings if "FK target" in w]
+    assert result.warnings == [
+        "FK target sales.customers not in scan; relation assumes concept Customer"
+    ]
 
 
 def test_enum_as_children_policy() -> None:
@@ -322,21 +324,54 @@ def test_fk_target_not_in_scan_warns() -> None:
     ]
 
 
-def test_two_fks_to_same_target_collapse_with_warning() -> None:
+def test_two_fks_to_same_target_yield_two_relations() -> None:
     fk = TableRef(schema="sales", name="customers")
     tbl = table(
         "shipments",
-        [col("a", "int", 0), col("b", "int", 1)],
+        [col("billed_to_customer_id", "int", 0), col("shipped_to_customer_id", "int", 1)],
         constraints=[
-            Constraint(kind="foreign_key", columns=["a"], ref_table=fk, ref_columns=["id"]),
-            Constraint(kind="foreign_key", columns=["b"], ref_table=fk, ref_columns=["id"]),
+            Constraint(
+                kind="foreign_key",
+                columns=["billed_to_customer_id"],
+                ref_table=fk,
+                ref_columns=["id"],
+            ),
+            Constraint(
+                kind="foreign_key",
+                columns=["shipped_to_customer_id"],
+                ref_table=fk,
+                ref_columns=["id"],
+            ),
         ],
     )
     result = map_scan(record(customers(), tbl), POLICY)
     rels = [o for o in result.operations if isinstance(o, AddRelation)]
-    assert len(rels) == 1
+    assert [(r.relation_type, r.target) for r in rels] == [
+        ("hasBilledToCustomer", "Customer"),
+        ("hasShippedToCustomer", "Customer"),
+    ]
     assert len({op_key(o) for o in result.operations}) == len(result.operations)
-    assert any("several foreign keys" in w for w in result.warnings)
+    assert result.warnings == []
+
+
+def test_composite_fk_and_residual_collision() -> None:
+    fk = TableRef(schema="sales", name="customers")
+    cons = [
+        Constraint(kind="foreign_key", columns=["a_id", "b_key"], ref_table=fk, ref_columns=[]),
+        Constraint(kind="foreign_key", columns=["A_ID", "B_KEY"], ref_table=fk, ref_columns=[]),
+    ]
+    tbl = table("t", [col("a_id", "int", 0)], constraints=cons)
+    result = map_scan(record(customers(), tbl), POLICY)
+    rels = [o for o in result.operations if isinstance(o, AddRelation)]
+    assert [r.relation_type for r in rels] == ["hasAB", "hasAB2"]
+    assert result.warnings == ["name collision: FK from sales.t to sales.customers -> 'hasAB2'"]
+
+
+def test_datatype_map_validated_on_model() -> None:
+    with pytest.raises(ValueError, match="xsd"):
+        MappingPolicy(model="m", datatype_map={"money": "decimal"})
+    with pytest.raises(ValueError, match="xsd"):
+        MappingPolicy(model="m", datatype_map={"money": "xsd:decimal\n"})
 
 
 def test_deterministic_output() -> None:
@@ -434,3 +469,10 @@ def test_policy_sources_only_config_still_loads(tmp_path: Path) -> None:
     cfg = tmp_path / "c.yaml"
     cfg.write_text("sources: []\n")
     assert load_sources_config(cfg).models == []
+
+
+def test_policy_bad_datatype_is_config_error(tmp_path: Path) -> None:
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("models:\n  - name: m\n    mapping: {datatype_map: {money: decimal}}\n")
+    with pytest.raises(ConfigError):
+        load_sources_config(cfg)

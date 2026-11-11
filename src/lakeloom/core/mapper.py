@@ -239,21 +239,7 @@ def _map_table(
             children += _enum_children(full, concept, column, values, names, warnings)
     out.extend(children)
 
-    seen_relations: set[str] = set()
-    for constraint in desc.constraints:
-        if constraint.kind == "foreign_key":
-            rel = _relation(
-                full,
-                concept,
-                constraint,
-                concept_of,
-                by_schema_name,
-                policy,
-                seen_relations,
-                warnings,
-            )
-            if rel is not None:
-                out.append(rel)
+    out.extend(_relations(full, concept, desc, concept_of, by_schema_name, policy, warnings))
 
     if pk_columns:
         out.append(_pk_axiom(full, concept, pk_columns, attr_names))
@@ -361,45 +347,79 @@ def _enum_children(
     return out
 
 
-def _relation(
+_KEY_SUFFIX = re.compile(r"(_id|_key)$", re.IGNORECASE)
+
+
+def _fk_relation_type(columns: list[str]) -> str:
+    """``has`` + the FK column name(s) minus a trailing ``_id``/``_key``, PascalCased."""
+    stripped = [_KEY_SUFFIX.sub("", c) for c in columns]
+    words = [w for c in stripped for w in _words(c)]
+    return "has" + (_pascal(words) or "Target")
+
+
+def _relations(
     full: str,
     concept: str,
-    constraint: Constraint,
+    desc: TableDescription,
     concept_of: dict[str, str],
     by_schema_name: dict[str, str],
     policy: MappingPolicy,
-    seen: set[str],
     warnings: list[str],
-) -> AddRelation | None:
-    target = constraint.ref_table
-    if target is None:
-        return None
-    target_full = target.full_name
-    target_concept = concept_of.get(target_full) or by_schema_name.get(
-        f"{target.schema_}.{target.name}"
-    )
-    if target_concept is None:
-        target_concept = _concept_name(target.name, policy)
-        warnings.append(
-            f"FK target {target_full} not in scan; relation assumes concept {target_concept}"
+) -> list[ProposalOperation]:
+    """One relation per declared FK (R-FK).
+
+    ``has<Target>`` when it is the table's only FK to that target, otherwise named after
+    the FK column(s); residual collisions get a numeric suffix and a warning.
+    """
+    resolved: list[tuple[Constraint, str, str]] = []
+    for constraint in desc.constraints:
+        target = constraint.ref_table
+        if constraint.kind != "foreign_key" or target is None:
+            continue
+        target_full = target.full_name
+        target_concept = concept_of.get(target_full) or by_schema_name.get(
+            f"{target.schema_}.{target.name}"
         )
-    rtype = _relation_type(target_concept)
-    refs = [f"{full}.{c}" for c in constraint.columns]
-    if rtype in seen:
-        warnings.append(
-            f"several foreign keys from {full} to {target_full}; only one relation {rtype} kept"
+        if target_concept is None:
+            target_concept = _concept_name(target.name, policy)
+            warnings.append(
+                f"FK target {target_full} not in scan; relation assumes concept {target_concept}"
+            )
+        resolved.append((constraint, target_full, target_concept))
+    per_target: dict[str, int] = {}
+    for _, _, target_concept in resolved:
+        per_target[target_concept] = per_target.get(target_concept, 0) + 1
+
+    used: set[str] = set()
+    out: list[ProposalOperation] = []
+    for constraint, target_full, target_concept in resolved:
+        wanted = (
+            _relation_type(target_concept)
+            if per_target[target_concept] == 1
+            else _fk_relation_type(constraint.columns)
         )
-        return None
-    seen.add(rtype)
-    to = f"{target_full}({', '.join(constraint.ref_columns)})"
-    return AddRelation(
-        op="add_relation",
-        source=concept,
-        relation_type=rtype,
-        target=target_concept,
-        rule_ids=["R-FK"],
-        evidence=[Evidence(kind="fk", ref=ref, detail=f"references {to}") for ref in refs],
-    )
+        rtype, n = wanted, 1
+        while rtype in used:
+            n += 1
+            rtype = f"{wanted}{n}"
+        if n > 1:
+            warnings.append(f"name collision: FK from {full} to {target_full} -> {rtype!r}")
+        used.add(rtype)
+        to = f"{target_full}({', '.join(constraint.ref_columns)})"
+        out.append(
+            AddRelation(
+                op="add_relation",
+                source=concept,
+                relation_type=rtype,
+                target=target_concept,
+                rule_ids=["R-FK"],
+                evidence=[
+                    Evidence(kind="fk", ref=f"{full}.{c}", detail=f"references {to}")
+                    for c in constraint.columns
+                ],
+            )
+        )
+    return out
 
 
 def _pk_axiom(
