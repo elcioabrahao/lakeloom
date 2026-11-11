@@ -5,7 +5,7 @@ spec. The spec declares ``/v1/rdf/status`` with an untyped body, so ``RdfStatus`
 modelled from the live 2.1.0-rc1 response and tolerates extra fields.
 """
 
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -224,3 +224,119 @@ class OMLineage(BaseModel):
         for key in ("upstreamEdges", "downstreamEdges"):
             out[key] = _as_list(out.get(key))
         return out
+
+
+# --- Change sets (M2a, FR-OM-02; ADR 0011) -------------------------------------------------
+
+ChangeSetState = Literal["DRAFT", "SUBMITTED", "APPLIED", "APPLY_FAILED", "DISCARDED"]
+"""``OntologyChangeSet.state`` as rc1 sends it (the docs write "Draft", "Apply Failed", ...)."""
+
+
+class OMChangeOperation(BaseModel):
+    """An ``OntologyChangeOperation``. Payload objects are kept as raw JSON (ADR 0011)."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    id: str
+    operation_type: str = Field(alias="operationType")
+    state: str | None = None  # ACTIVE | UNDONE
+    base_version: float | None = Field(default=None, alias="baseVersion")
+    target_id: str | None = Field(default=None, alias="targetId")
+    term: dict[str, Any] | None = None
+    concept: dict[str, Any] | None = None
+    property: dict[str, Any] | None = None
+    relationship: dict[str, Any] | None = None
+    mapping: dict[str, Any] | None = None
+    axiom: dict[str, Any] | None = None
+    glossary: dict[str, Any] | None = None
+    rationale: str | None = None
+    confidence: float | None = None
+
+
+class OMChangeOperationResult(BaseModel):
+    """One ``OntologyChangeOperationResult`` of an apply."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    operation_id: str = Field(alias="operationId")
+    status: str
+    entity: OMEntityRef | None = None
+    entity_version: float | None = Field(default=None, alias="entityVersion")
+    message: str | None = None
+
+
+class OMChangeApplicationResult(BaseModel):
+    """``OntologyChangeApplicationResult``: what an apply did."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    applied_at: int | None = Field(default=None, alias="appliedAt")
+    applied_by: str | None = Field(default=None, alias="appliedBy")
+    operations_processed: int | None = Field(default=None, alias="operationsProcessed")
+    operations_applied: int | None = Field(default=None, alias="operationsApplied")
+    operations_failed: int | None = Field(default=None, alias="operationsFailed")
+    results: list[OMChangeOperationResult] = []
+
+
+class OMChangeSet(BaseModel):
+    """An ``OntologyChangeSet`` (Draft -> Submitted -> Applied / Apply failed / Discarded)."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    id: str
+    name: str
+    fully_qualified_name: str | None = Field(default=None, alias="fullyQualifiedName")
+    display_name: str | None = Field(default=None, alias="displayName")
+    description: str | None = None
+    state: ChangeSetState | str
+    operations: list[OMChangeOperation] = []
+    undo_cursor: int | None = Field(default=None, alias="undoCursor")
+    glossaries: list[OMEntityRef] = []
+    ontology: OMEntityRef | None = None
+    base_working_revision: int | None = Field(default=None, alias="baseWorkingRevision")
+    application_result: OMChangeApplicationResult | None = Field(
+        default=None, alias="applicationResult"
+    )
+    version: float | None = None
+    updated_at: int | None = Field(default=None, alias="updatedAt")  # epoch milliseconds
+
+
+class OMEditLease(BaseModel):
+    """An ``OntologyEditLock``: the authoring lease submit/discard/operations require."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    resource_type: str = Field(alias="resourceType")
+    resource_id: str = Field(alias="resourceId")
+    session_id: str = Field(alias="sessionId")
+    version: int
+    expires_at: int | None = Field(default=None, alias="expiresAt")
+
+    def token(self) -> dict[str, object]:
+        """The ``OntologyEditLeaseToken`` to send with a command."""
+        return {"sessionId": self.session_id, "version": self.version}
+
+
+class OMAxiomViolation(BaseModel):
+    """An ``OntologyProfileViolation``."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    severity: str
+    code: str
+    path: str | None = None
+    message: str
+
+
+class OMAxiomValidation(BaseModel):
+    """``OntologyProfileReport`` of ``POST /v1/ontologyAxioms/validate``."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    valid: bool
+    violations: list[OMAxiomViolation] = []
+
+    @property
+    def errors(self) -> list[str]:
+        """Messages of the ERROR-severity violations."""
+        return [v.message for v in self.violations if v.severity == "ERROR"]
