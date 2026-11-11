@@ -15,8 +15,11 @@ from lakeloom.core.operations import (
     AddConcept,
     AddRealization,
     AddRelation,
+    OMContext,
     ProposalOperation,
+    draft_term_id,
     op_key,
+    to_om_all,
 )
 from lakeloom.om.client import OMClient
 from lakeloom.om.models import OMGlossary, OMPage, OMTable
@@ -41,9 +44,6 @@ r:Customer a skos:Concept ; skos:prefLabel "Customer" ; skos:altLabel "Client", 
 r:OrderStatus a skos:Concept ; skos:prefLabel "OrderStatus" ;
     om:fullyQualifiedName "retail.Order.OrderStatus" .
 r:placedBy a owl:ObjectProperty ; rdfs:label "placed by" .
-r:totalAmount a owl:DatatypeProperty ; rdfs:label "total amount" ; rdfs:domain r:Order ;
-    rdfs:range xsd:decimal .
-r:orderId a owl:DatatypeProperty ; rdfs:domain r:Order ; rdfs:range xsd:long .
 """
 )
 SALES = (
@@ -52,16 +52,52 @@ SALES = (
 <http://x/ontology/sales/> a owl:Ontology ; owl:imports <http://x/ontology/retail/> .
 """
 )
-# retail after a first scan of customers was applied: attributes, key axiom and realization.
-APPLIED = (
-    RETAIL
-    + """\
-r:customerId a owl:DatatypeProperty ; rdfs:domain r:Customer ; rdfs:range xsd:long .
-r:name a owl:DatatypeProperty ; rdfs:domain r:Customer ; rdfs:range xsd:string .
-r:Customer rdfs:subClassOf [ a owl:Restriction ; owl:onProperty r:customerId ;
-    owl:cardinality "1"^^xsd:nonNegativeInteger ] .
-"""
+CTX = OMContext(glossary_name="retail", glossary_id="g", base_iri=B, ontology_id="o")
+
+
+def native_ttl(ops: list[ProposalOperation], only: set[str] | None = None) -> str:
+    """Turtle for what the native ontology holds once ``ops`` are applied.
+
+    Built from ``to_om_all`` (the same IRI helpers the real write path uses), so the shapes
+    of attribute IRIs (``{base}{Concept}.{name}``, no labels) and key restrictions cannot
+    drift from what a real export of an applied proposal contains.
+    """
+    wanted = [
+        o for o in ops if isinstance(o, AddAttribute | AddAxiom) and (only is None or _in(o, only))
+    ]
+    out: list[str] = []
+    for item in to_om_all(wanted, CTX).native:
+        if item["operationType"] == "UPSERT_PROPERTY":
+            prop = item["property"]
+            out.append(
+                f"<{prop['iri']}> a owl:DatatypeProperty ; rdfs:domain <{prop['domain'][0]}> ;"
+                f" rdfs:range <{prop['range'][0]}> ."
+            )
+        else:
+            axiom = item["axiom"]
+            for expr in axiom["expressions"]:
+                out.append(
+                    f"<{axiom['subjectIri']}> rdfs:subClassOf [ a owl:Restriction ;"
+                    f" owl:onProperty <{expr['propertyIri']}> ;"
+                    ' owl:cardinality "1"^^xsd:nonNegativeInteger ] .'
+                )
+    return "\n".join(out) + "\n"
+
+
+def _in(op: ProposalOperation, only: set[str]) -> bool:
+    return op_key(op) in only
+
+
+def mapped(*tables: ScannedTable) -> list[ProposalOperation]:
+    return map_scan(record(*tables), POLICY).operations
+
+
+SOME_ATTRS = RETAIL + native_ttl(
+    mapped(orders()), only={"attr:Order.total_amount", "attr:Order.order_id"}
 )
+RELATION = "r:hasCustomer a owl:ObjectProperty .\nr:Order r:hasCustomer r:Customer .\n"
+# retail after scans of customers and orders were applied: attributes, key axioms, relation.
+APPLIED = RETAIL + native_ttl(mapped(orders(), customers())) + RELATION
 
 
 def om_table(fqn: str, tags: list[str], columns: Mapping[str, list[str]] | None = None) -> OMTable:
@@ -216,10 +252,9 @@ async def test_pending_proposal_suppresses_duplicate() -> None:
 
 
 async def test_existing_attribute_dropped() -> None:
-    res = await run([orders()])
+    res = await run([orders()], turtles={"retail": SOME_ATTRS})
     names = {a.name for a in of(res, AddAttribute)}
-    assert "totalAmount" not in names  # matched by label "total amount"
-    assert "orderId" not in names  # matched by local name
+    assert "total_amount" not in names and "order_id" not in names  # IRI Order.<name>
     assert {"customer_id", "order_date", "status"} <= names
 
 
@@ -229,7 +264,7 @@ async def test_existing_attribute_column_gets_realization_unless_realized() -> N
             "lake.sales.orders", ["retail.Order"], {"order_id": ["retail.Order"]}
         )
     }
-    res = await run([orders()], om_tables=tables)
+    res = await run([orders()], turtles={"retail": SOME_ATTRS}, om_tables=tables)
     real = {(o.concept, o.asset_fqn, o.column) for o in of(res, AddRealization)}
     assert ("retail.Order", "lake.sales.orders", "total_amount") in real
     assert ("retail.Order", "lake.sales.orders", "order_id") not in real  # already tagged
@@ -261,11 +296,96 @@ async def test_rescan_proposes_nothing_new() -> None:
             "lake.sales.customers",
             ["retail.Customer"],
             {"customer_id": ["retail.Customer"], "name": ["retail.Customer"]},
-        )
+        ),
+        "lake.sales.orders": om_table(
+            "lake.sales.orders",
+            ["retail.Order"],
+            {
+                c: ["retail.Order"]
+                for c in ("order_id", "customer_id", "order_date", "status", "total_amount")
+            },
+        ),
     }
-    res = await run([customers()], turtles={"retail": APPLIED}, om_tables=tables)
-    assert res.operations == []
-    assert all("already" in w for w in res.warnings)
+    res = await run([orders(), customers()], turtles={"retail": APPLIED}, om_tables=tables)
+    assert res.operations == []  # concepts, attributes, FK relation and PK axioms all deduped
+    assert res.warnings == [
+        "retail.Customer is already realized by lake.sales.customers",
+        "retail.Order is already realized by lake.sales.orders",
+    ]
+
+
+async def test_enum_child_without_table_is_kept_with_warning() -> None:
+    models, om = make()
+    child = AddConcept(op="add_concept", name="Customer", parent="Order")
+    res = await dedupe(
+        [child],
+        model="retail",
+        models=models,
+        om=om.client,
+        pending=no_pending,
+        asset_by_table={},
+    )
+    assert [c.name for c in of(res, AddConcept)] == ["Customer"]
+    assert not of(res, AddRealization)
+    assert any("no source table" in w for w in res.warnings)
+
+
+async def test_existing_attribute_of_imported_concept_dropped_silently() -> None:
+    res = await run(
+        [customers()],
+        model="sales",
+        turtles={"sales": SALES, "retail": APPLIED},
+    )
+    assert not of(res, AddAttribute)  # customer_id and name exist on retail.Customer
+    assert not any("attribute" in w for w in res.warnings)
+    assert {(o.concept, o.column) for o in of(res, AddRealization)} >= {
+        ("retail.Customer", None),
+        ("retail.Customer", "customer_id"),
+    }
+
+
+async def test_imported_parent_dropped_and_output_accepted_by_to_om() -> None:
+    models, om = make(turtles={"sales": SALES, "retail": RETAIL})
+    ops: list[ProposalOperation] = [
+        *mapped(customers()),
+        AddConcept(op="add_concept", name="Gold", parent="Customer"),
+    ]
+    res = await dedupe(
+        ops,
+        model="sales",
+        models=models,
+        om=om.client,
+        pending=no_pending,
+        asset_by_table=ASSETS,
+    )
+    gold = [c for c in of(res, AddConcept) if c.name == "Gold"]
+    assert gold and gold[0].parent is None
+    assert any("parent retail.Customer is in an imported model" in w for w in res.warnings)
+    ctx = OMContext(
+        glossary_name="sales",
+        glossary_id="g",
+        base_iri="http://x/ontology/sales/",
+        ontology_id="o",
+        term_ids={c.name: draft_term_id(c) for c in of(res, AddConcept)},
+        term_versions={c.name: 0.1 for c in of(res, AddConcept)},
+    )
+    to_om_all(res.operations, ctx)  # must not raise
+
+
+async def test_qualified_ref_matches_only_own_model() -> None:
+    models, om = make()
+    ops: list[ProposalOperation] = [
+        AddRelation(op="add_relation", source="other.Order", relation_type="x", target="Thing"),
+    ]
+    res = await dedupe(
+        ops,
+        model="retail",
+        models=models,
+        om=om.client,
+        pending=no_pending,
+        asset_by_table={},
+    )
+    assert [r.source for r in of(res, AddRelation)] == ["other.Order"]
 
 
 async def test_relation_and_axiom_pending_keys_dropped() -> None:

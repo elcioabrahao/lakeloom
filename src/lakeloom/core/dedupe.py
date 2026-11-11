@@ -88,10 +88,6 @@ class _Target:
         """How operations of ``model`` refer to it: bare name locally, FQN when imported."""
         return self.fqn.rsplit(".", 1)[-1] if self.model == model else self.fqn
 
-    @property
-    def foreign_to(self) -> str:
-        return self.model
-
 
 def _norm(text: str) -> str:
     return "".join(ch for ch in text.casefold() if ch.isalnum())
@@ -102,7 +98,9 @@ def _local(iri: str) -> str:
 
 
 def _names(graph: Graph, node: object) -> set[str]:
-    out = {_norm(_local(str(node)))}
+    local = _local(str(node))
+    # native members are ``{base}{Concept}.{name}``: the part after the last dot is the name
+    out = {_norm(local), _norm(local.rsplit(".", 1)[-1])}
     out |= {_norm(str(o)) for o in graph.objects(node, RDFS.label)}  # pyright: ignore[reportArgumentType]
     return out
 
@@ -201,7 +199,7 @@ def _queries(op: AddConcept, table: str | None) -> list[str]:
     return list(dict.fromkeys(queries))
 
 
-def _score(match: ConceptMatch) -> tuple[float, str]:
+def _rank(match: ConceptMatch) -> tuple[float, str]:
     return (-match.score, match.concept.fqn)
 
 
@@ -281,7 +279,7 @@ class _Dedupe:
         best: ConceptMatch | None = None
         for query in _queries(op, _table_of(op)):
             for match in await score_candidates(self.models, query, model=slugs):
-                if best is None or _score(match) < _score(best):
+                if best is None or _rank(match) < _rank(best):
                     best = match
                 break  # sorted: the first is this query's best
         return best
@@ -299,9 +297,10 @@ class _Dedupe:
             action = "kept"
             if best.score >= REALIZE_MIN:
                 if asset is None:
+                    why = f"table {table} has no OM asset" if table else "it has no source table"
                     self.warn(
-                        f"concept {op.name} matches {ref.fqn} ({best.score:.2f}) but table "
-                        f"{table or '?'} has no OM asset to realize it; kept as new"
+                        f"concept {op.name} matches {ref.fqn} ({best.score:.2f}) but {why} "
+                        "to realize it; kept as new"
                     )
                 else:
                     action = "realized"
@@ -320,7 +319,12 @@ class _Dedupe:
     # -- per-operation rewriting -------------------------------------------------------
 
     def _ref(self, ref: str) -> tuple[str, _Target | None]:
-        target = self.replaced.get(ref.rsplit(".", 1)[-1])
+        name = ref
+        if "." in ref:  # a qualified ref matches only when it names this model
+            prefix, _, name = ref.rpartition(".")
+            if prefix != self.model:
+                return ref, None
+        target = self.replaced.get(name)
         if target is None:
             return ref, None
         return target.ref(self.model), target
@@ -414,7 +418,13 @@ class _Dedupe:
     def _reparent(self, op: AddConcept) -> AddConcept:
         if op.parent is None:
             return op
-        parent, _ = self._ref(op.parent)
+        parent, target = self._ref(op.parent)
+        if self._foreign(target) and target is not None:
+            self.warn(
+                f"parent {target.fqn} is in an imported model; proposing {op.name} without a "
+                "parent (cross-model not in M2a)"
+            )
+            return op.model_copy(update={"parent": None})
         return op.model_copy(update={"parent": parent})
 
     def _realization_op(self, op: AddRealization) -> list[ProposalOperation]:
