@@ -153,13 +153,14 @@ yours.
 4. Ask the specialist to decide: approve, reject, or request changes. Wait for their answer. \
 Do not suggest that silence or a general "ok" counts as approval.
 5. Only on their explicit decision, call review_proposal with the proposal_id and that decision. \
-This first returns a preview and a confirm_token and changes nothing: show the preview to the \
-specialist, and call review_proposal again with the same arguments and the confirm_token only \
-after they confirm. Never decide for them, and never reuse a confirm_token for another \
-proposal.
-6. A reason is required for reject and request_changes: ask the specialist for it and pass \
-their words as `reason`. Approval applies the change to OpenMetadata, so make sure they \
-understood it.
+For reject and request_changes a reason is required: ask the specialist for it first and pass \
+their words as `reason` in that same call. request_changes takes effect at once, with no \
+preview. For approve and reject the first call returns a preview and a confirm_token and \
+changes nothing: show the preview to the specialist, and call review_proposal again with the \
+same arguments and the confirm_token only after they confirm. Never decide for them, and never \
+reuse a confirm_token for another proposal.
+6. Approval applies the change to OpenMetadata, so make sure the specialist understood it \
+before they confirm.
 7. If review_proposal answers `forbidden`, report it plainly (for example: an agent sign-in \
 cannot review, or the specialist lacks reviewer permission) and ask them to review with \
 their own sign-in. If it answers `conflict`, call get_proposal again and, if the base changed, \

@@ -21,6 +21,7 @@ from lakeloom.core.proposals import (
     ProposalPart,
     Provenance,
     TableProvenance,
+    diff,
 )
 from lakeloom.errors import LakeloomError
 from lakeloom.server.http_app import AppDeps
@@ -91,7 +92,12 @@ class FakeReview:
             )
         token = kw.get("confirm_token")
         if decision != "request_changes" and token is None:
-            return ConfirmPreview(summary="Approving prop_1", confirm_token=TOKEN, expires_at=9)
+            return ConfirmPreview(
+                summary="Approving prop_1",
+                confirm_token=TOKEN,
+                expires_at=9,
+                diff=diff(self.p),
+            )
         status = {"approve": "applied", "reject": "rejected"}.get(decision, "changes_requested")
         return self.p.model_copy(update={"status": status})
 
@@ -194,6 +200,8 @@ async def test_review_preview_then_confirm(make_deps: DepsFactory, kit: AuthKit)
     p = structured(preview)
     assert (p["decided"], p["confirm_token"], p["expires_at"]) == (False, TOKEN, 9)
     assert "confirm_token" in text(preview) and "human" in text(preview)
+    assert p["diff"]["proposal_id"] == "prop_1" and len(p["diff"]["changes"]) == 2
+    assert structured(done)["diff"] is None
     d = structured(done)
     assert d["decided"] is True and d["proposal"]["status"] == "applied"
     assert d["confirm_token"] is None

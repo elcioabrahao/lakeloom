@@ -112,6 +112,8 @@ async def test_review_with_specialist_prompt_listed_and_renders(
     assert "never decide" in lower and "confirm_token" in text
     assert "reason" in lower and "reject" in lower and "request_changes" in text
     assert "untrusted" in lower
+    step5 = text[text.index("5. ") : text.index("6. ")]
+    assert "reason" in step5 and "request_changes takes effect at once" in step5
     for line in text.splitlines():
         assert not line.startswith("# SYSTEM"), line
     plain_body = plain.messages[0].content

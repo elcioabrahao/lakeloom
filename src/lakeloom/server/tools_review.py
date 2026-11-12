@@ -17,7 +17,7 @@ from mcp.types import CallToolResult, ToolAnnotations
 from pydantic import BaseModel, Field
 
 from lakeloom.core.pending import ModelGroup, group_pending
-from lakeloom.core.proposals import ConfirmPreview, Proposal
+from lakeloom.core.proposals import ConfirmPreview, Proposal, ProposalDiff
 from lakeloom.server.auth import Principal
 from lakeloom.server.http_app import AppDeps
 from lakeloom.server.tools_common import (
@@ -107,6 +107,9 @@ class ReviewResult(BaseModel):
     expires_at: int | None = Field(
         default=None, description="Dry run only: token expiry (epoch s)."
     )
+    diff: ProposalDiff | None = Field(
+        default=None, description="Dry run only: the entity-level changes the decision affects."
+    )
     proposal: Proposal | None = Field(default=None, description="After the decision: the proposal.")
 
 
@@ -189,6 +192,7 @@ def register_review_tools(mcp: MCPServer, deps: AppDeps) -> None:
                         summary=out.summary,
                         confirm_token=out.confirm_token,
                         expires_at=out.expires_at,
+                        diff=out.diff,
                     ),
                 )
             summary = deps.proposals.summary_markdown(out)
