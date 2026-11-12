@@ -555,6 +555,13 @@ services:
       LAKELOOM_OM_BOT_TOKEN_FILE: /secrets/om_bot_token
       LAKELOOM_OIDC_ISSUER: http://localhost:8180/realms/lakeloom
       LAKELOOM_OIDC_JWKS_URL: http://keycloak:8080/realms/lakeloom/protocol/openid-connect/certs
+      # M2b human review (ADR 0012): OM accepts only tokens with aud=openmetadata, so
+      # Lakeloom exchanges the reviewer's token (forward mode cannot work in this stack).
+      # The issuer host (localhost:8180) is unreachable from the container: exchange on the
+      # compose-network endpoint. Development only: fixed public dev client secret.
+      LAKELOOM_OIDC_CLIENT_ID: lakeloom
+      LAKELOOM_OIDC_CLIENT_SECRET: dev-lakeloom-secret
+      LAKELOOM_OIDC_TOKEN_ENDPOINT: http://keycloak:8080/realms/lakeloom/protocol/openid-connect/token
       LAKELOOM_PUBLIC_URL: http://localhost:8000
       LAKELOOM_SCOPE_GROUP_MAP: '{"ontology-reviewers":["lakeloom:read","lakeloom:review"],"data-engineers":["lakeloom:read","lakeloom:propose"],"lakeloom-admins":["lakeloom:read","lakeloom:admin"]}'
       LAKELOOM_GIT_REMOTE: http://gitea:3000/lakeloom-admin/ontologies.git
