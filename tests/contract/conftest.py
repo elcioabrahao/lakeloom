@@ -6,10 +6,11 @@ Tokens come from the dev Keycloak realm (ADR 0003). The OM bot token is read fro
 
 import os
 import subprocess
+from collections.abc import Callable
 
 import httpx
 import pytest
-from stack import COMPOSE, KEYCLOAK_URL, LAKELOOM_URL, OM_URL, TOKEN_URL
+from stack import COMPOSE, KEYCLOAK_URL, LAKELOOM_URL, OM_URL, TOKEN_URL, exchange_for_om
 
 # Lets the contract-marked Postgres ping in tests/unit/state run in `-m contract` too.
 os.environ.setdefault(
@@ -76,6 +77,21 @@ def _om_user_token(username: str) -> str:
     """A Keycloak token OpenMetadata accepts as ``username`` (``aud`` has ``openmetadata``
     via the optional scope ``openmetadata-audience``; ADR 0012)."""
     return _human_token(username, "openid openmetadata-audience")
+
+
+@pytest.fixture(scope="session")
+def om_token_for() -> Callable[[str], str]:
+    """``om_token_for("alice")``: alice's Lakeloom token exchanged for an OpenMetadata token
+    (client ``lakeloom``, ``audience=openmetadata``; ADR 0012). A secret: never print it."""
+
+    def exchange(username: str) -> str:
+        r = exchange_for_om(_human_token(username))
+        # Only the OAuth error code: a 200 body would hold the token.
+        error = None if r.status_code == 200 else r.json().get("error")
+        assert r.status_code == 200, f"token exchange failed: {r.status_code} {error}"
+        return str(r.json()["access_token"])
+
+    return exchange
 
 
 @pytest.fixture(scope="session")

@@ -10,13 +10,11 @@ import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
-from stack import TOKEN_URL
+from stack import TOKEN_URL, exchange_for_om
 
 pytestmark = pytest.mark.contract
 
 ISSUER = "http://localhost:8180/realms/lakeloom"
-TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange"  # noqa: S105 - grant URN
-ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"  # noqa: S105 - type URN
 
 
 def _logged_in_user(om_url: str, token: str) -> httpx.Response:
@@ -39,28 +37,6 @@ def _audiences(token: str) -> set[str]:
     if isinstance(aud, list):
         return {str(a) for a in aud}  # pyright: ignore[reportUnknownVariableType]
     return set()
-
-
-def _exchange(subject_token: str) -> httpx.Response:
-    """Standard token exchange (Keycloak V2) as the confidential client ``lakeloom``.
-
-    ``audience=openmetadata`` alone is refused ("Requested audience not available"): the
-    audience must come from a client scope of the request, here ``openmetadata-audience``.
-    """
-    return httpx.post(
-        TOKEN_URL,
-        data={
-            "grant_type": TOKEN_EXCHANGE,
-            "client_id": "lakeloom",
-            "client_secret": "dev-lakeloom-secret",  # DEV ONLY
-            "subject_token": subject_token,
-            "subject_token_type": ACCESS_TOKEN_TYPE,
-            "requested_token_type": ACCESS_TOKEN_TYPE,
-            "audience": "openmetadata",
-            "scope": "openmetadata-audience",
-        },
-        timeout=10,
-    )
 
 
 def test_bot_token_still_authenticates(om_url: str, om_bot_token: str) -> None:
@@ -107,7 +83,7 @@ def test_lakeloom_token_is_not_forwardable_to_om(om_url: str, human_token: str) 
 
 
 def test_token_exchange_yields_om_token_for_alice(om_url: str, human_token: str) -> None:
-    r = _exchange(human_token)
+    r = exchange_for_om(human_token)
     assert r.status_code == 200, r.text
     exchanged = str(r.json()["access_token"])
     claims = _claims(exchanged)
@@ -121,8 +97,9 @@ def test_token_exchange_yields_om_token_for_alice(om_url: str, human_token: str)
 
 
 def test_token_exchange_needs_lakeloom_in_subject_audience(wrong_audience_token: str) -> None:
-    r = _exchange(wrong_audience_token)
-    assert r.status_code == 403, r.text
+    r = exchange_for_om(wrong_audience_token)
+    # No body in the message: on a regression to 200 it would hold an exchanged token.
+    assert r.status_code == 403, f"HTTP {r.status_code}, error {r.json().get('error')!r}"
     assert r.json()["error"] == "access_denied"
 
 

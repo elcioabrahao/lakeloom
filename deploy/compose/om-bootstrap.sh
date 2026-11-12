@@ -12,14 +12,16 @@
 #      $OM_REVIEWER_USERS only (alice; carol deliberately gets no OM reviewer permission);
 #   4. reads the JWT of the `ingestion-bot` bot user and writes it to $OM_BOT_TOKEN_FILE
 #      (named volume `om-secrets`, mounted read-only into Lakeloom; owner 10001:10001, mode 0440).
-# Safe to re-run: every step is a lookup-then-create/patch.
+# Safe to re-run: every step is a lookup-then-create/patch; the reviewer policy's rules are
+# replaced when they differ from the ones below (older dev volumes had broader rules).
 #
 # Endpoints checked against the committed spec
 # src/lakeloom/om/openapi/openmetadata-2.1.0-rc1.json (see ADR 0003):
 #   GET  /api/v1/users/loggedInUser          -> the caller (checks the om-admin token)
 #   GET  /api/v1/users/name/{name}?fields=roles, POST /api/v1/users (CreateUser),
 #   PATCH /api/v1/users/{id} (JSON Patch)
-#   GET  /api/v1/policies/name/{name}, POST /api/v1/policies (CreatePolicy)
+#   GET  /api/v1/policies/name/{name}, POST /api/v1/policies (CreatePolicy),
+#   PATCH /api/v1/policies/{id} (JSON Patch: converge the reviewer rules)
 #   GET  /api/v1/roles/name/{name}, POST /api/v1/roles (CreateRole)
 #   GET  /api/v1/bots/name/{name}            -> botUser.id
 #   GET  /api/v1/users/auth-mechanism/{id}   -> config.JWTToken
@@ -102,24 +104,45 @@ for u in $OM_USERS; do
 done
 
 # --- 3. reviewer role -----------------------------------------------------------------------
-# Least privilege for applying ontology change sets and the glossary / native-ontology edits
-# an apply performs on models the bot created (ADR 0012 § OM reviewer role).
+# Least privilege for applying ontology change sets (glossary and native) on models the bot
+# created, as measured live on rc1 (ADR 0012 § Apply research):
+#   - EditAll on ontologyChangeSet: the authoring lease every apply needs;
+#   - EditAll on glossary / ontology: applying a glossary / native change set;
+#   - Create, Delete on ontologyConcept / ontologyProperty / ontologyAxiom: native upserts of
+#     new definitions and native deletes.
+# Reading and tagging assets with glossary terms need nothing here: OM's default DataConsumer
+# role (every user) already grants ViewAll, EditTags and EditGlossaryTerms on all resources.
+# On re-run the rules are converged: an older, broader rule set is replaced.
 policy="${OM_REVIEWER_ROLE}Policy"
+rules='[
+  {"name": "LakeloomReviewerChangeSetLease", "effect": "allow",
+   "resources": ["ontologyChangeSet"], "operations": ["EditAll"]},
+  {"name": "LakeloomReviewerApplyTargets", "effect": "allow",
+   "resources": ["glossary", "ontology"], "operations": ["EditAll"]},
+  {"name": "LakeloomReviewerNativeDefinitions", "effect": "allow",
+   "resources": ["ontologyConcept", "ontologyProperty", "ontologyAxiom"],
+   "operations": ["Create", "Delete"]}
+]'
+# Rules compared without OM's bookkeeping fields and with lists sorted.
+normalize='[.[] | {name, effect, condition, resources: (.resources | sort), operations: (.operations | sort)}] | sort_by(.name)'
 if [ "$(om_status "/v1/policies/name/$policy")" != "200" ]; then
-  body=$(jq -n --arg n "$policy" '{
+  body=$(jq -n --arg n "$policy" --argjson r "$rules" '{
     name: $n,
     displayName: "Lakeloom ontology reviewer (DEV)",
     description: "DEV ONLY (Lakeloom dev stack): lets a human reviewer apply ontology change sets.",
-    rules: [{
-      name: "LakeloomReviewerApplyChangeSets",
-      effect: "allow",
-      resources: ["ontologyChangeSet", "glossary", "glossaryTerm", "ontology",
-                  "ontologyConcept", "ontologyProperty", "ontologyAxiom"],
-      operations: ["ViewAll", "Create", "EditAll"]
-    }]
+    rules: $r
   }')
   om POST /v1/policies "$body" >/dev/null
   log "created policy $policy"
+else
+  current=$(om GET "/v1/policies/name/$policy")
+  if [ "$(printf '%s' "$current" | jq -c ".rules | $normalize")" = "$(printf '%s' "$rules" | jq -c "$normalize")" ]; then
+    log "policy $policy exists (rules current)"
+  else
+    patch=$(jq -n --argjson r "$rules" '[{op: "replace", path: "/rules", value: $r}]')
+    om PATCH "/v1/policies/$(printf '%s' "$current" | jq -r .id)" "$patch" application/json-patch+json >/dev/null
+    log "updated policy $policy rules"
+  fi
 fi
 policy_id=$(om GET "/v1/policies/name/$policy" | jq -r .id)
 if [ "$(om_status "/v1/roles/name/$OM_REVIEWER_ROLE")" != "200" ]; then

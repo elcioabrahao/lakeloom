@@ -79,6 +79,8 @@ param id must not be null`); `OMClient` fills both. Embedded entities also need 
 `id`. **Ids of created entities are not kept**: on apply OM mints new ids, and remaps
 references inside the same change set (an `ADD_RELATIONSHIP` whose `toTerm.id` was the
 draft id of a `CREATE_TERM` in the same set was applied to the new term).
+*Corrected in ADR 0012 § Apply research (M2b, 2026-11-12): an applied `CREATE_TERM` keeps the
+draft id it was given, and an applied `UPDATE_TERM` does change `description`.*
 
 Rule (verbatim from rc1): `targetId is required for non-create operations`; `baseVersion is
 required for an existing target` (any `targetId` triggers it); for native definitions

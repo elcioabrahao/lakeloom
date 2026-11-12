@@ -1,8 +1,8 @@
 # 0012. Review and human identity in OpenMetadata
 
-- Status: accepted (§ SSO; later sections follow in M2b)
+- Status: accepted (§ SSO, § Apply research; later sections follow in M2b)
 - Date: 2026-11-12
-- Requirements: FR-OM-05, NFR-SEC-08, NFR-SEC-09
+- Requirements: FR-OM-04, FR-OM-05, FR-REV-02, NFR-SEC-08, NFR-SEC-09, NFR-SEC-10, NFR-SEC-11
 
 ## Context
 
@@ -146,17 +146,16 @@ Everything was hard-deleted afterwards.
 
 OM's default roles are not enough. `DataSteward` has no `EditAll`, and the change-set lease
 already needs `EditAll` on `ontologyChangeSet`. So bootstrap creates policy
-`LakeloomOntologyReviewerPolicy` with one allow rule: operations `ViewAll`, `Create`,
-`EditAll` on resources `ontologyChangeSet`, `glossary`, `glossaryTerm`, `ontology`,
-`ontologyConcept`, `ontologyProperty`, `ontologyAxiom`. Role `LakeloomOntologyReviewer`
+`LakeloomOntologyReviewerPolicy`. Task 1 gave it one broad allow rule (`ViewAll`, `Create`,
+`EditAll` on seven resources); Task 2 trimmed it to the measured minimum (§ Apply research,
+"Reviewer role: the rule set"). Role `LakeloomOntologyReviewer`
 holds that policy and is granted to **alice only**. carol (same Keycloak group) and bob do
 not get it. The applied term showed `updatedBy: alice`, so the reviewer's identity reaches
 OM's history. The probe also saw the applied `UPDATE_TERM` change its description, unlike
 the M2a observation in ADR 0011. Task 2 re-checks this.
 
-The rule set is a superset of what the probe needed. Properties, axioms, `DELETE_TERM` and
-relationship operations were not probed one by one, and `Delete` is not granted. Task 2
-re-verifies the exact operation names.
+That first rule set was a superset of what the probe needed; Task 2 measured each operation
+kind and replaced it (below).
 
 ### Data volume
 
@@ -169,6 +168,151 @@ in CI) does not have these problems, so the dev data volumes `lakeloom_om-db-dat
 state-store database. After an upgrade from an older checkout, run
 `docker compose … down` and remove those two volumes once. Basic-auth users do not carry
 over.
+
+### Apply research (M2b Task 2, live 2026-11-12)
+
+Method: scratch scripts (not committed). For each run the bot created a throwaway glossary and
+paired native ontology (`ll-r2-<hex>`), a bot-created term `Base`, and a throwaway table in
+`lakeloom_fixture.retail.sales`; it drafted every change set with `to_om_all` (or the ADR 0011
+payloads) and submitted it. The probed user then applied each set with an exchanged token
+(lease, then `POST /v1/ontologyChangeSets/{id}/apply`). Afterwards everything was
+hard-deleted, nothing was sealed, and `retail`'s version and `updatedAt` were unchanged. To
+find the minimal rules, a temporary policy `LLProbePolicy` / role `LLProbeRole` held one
+candidate rule set and was granted to bob (who has no OM roles) for one run. The grant was
+removed and both were hard-deleted after each run.
+
+**Apply.**
+
+- An applied `CREATE_TERM` **keeps its draft id** (Lakeloom's uuid5 `draft_term_id`). The
+  operation result's `entity.id` and the stored term both have it, at version **0.1**. This
+  corrects ADR 0011 ("Ids of created entities are not kept"). Native upserts keep their
+  uuid5 ids too (`ontologyConcept`/`ontologyProperty` ids are the `_uid(...)` values).
+- An applied `UPDATE_TERM` keeps the term's id, moves it 0.1 → 0.2, and **does change
+  `description`** ("Base original" → "Base UPDATED"), together with synonyms. The M2a rc1
+  defect (ADR 0011: description not updated) did not reproduce in any run. Task 1 saw
+  the same.
+- `DELETE_TERM` soft-deletes: the term has `deleted: true` at the next version and is
+  404 without `include=all`.
+- `UPSERT_MAPPING` on an existing term applies.
+- A **SUBMITTED** set needs no other transition: apply moves it straight to `APPLIED`. A
+  failed apply (400, 412, 403) leaves it `SUBMITTED` with no `applicationResult`. OM releases
+  the lease on apply: a later `DELETE …/ontologyEditLocks/…` answers 404, which
+  `OMClient._release` ignores.
+- Result body (`applicationResult`): `{appliedAt, appliedBy, operationsProcessed,
+  operationsApplied, operationsFailed, results: [{operationId, status: APPLIED, entity:
+  {id, type, name, fullyQualifiedName, description, displayName, deleted, href},
+  entityVersion}]}`. `OMOperationResult` lifts `entity.id` / `entity.fullyQualifiedName`
+  to `entity_id` / `entity_fqn`.
+
+**Cross-part staleness.**
+
+- Two native sets drafted at `baseWorkingRevision` 1: the first applies (the revision goes
+  1 → 3, one step per definition). The second then fails **412** `Ontology changed since
+  this draft was created` and stays `SUBMITTED` → `OMConflict(kind="stale_revision")`. Each
+  later native part must be re-drafted at the current revision.
+- A glossary `ADD_RELATIONSHIP` drafted in another part, with `targetId` and `fromTerm` set
+  to the draft id of a term created by an earlier part and `baseVersion` 0.1, **applies**
+  once that earlier part is applied (`Gadget relatedTo Widget`, Gadget 0.1 → 0.2). This works
+  because draft ids are kept: there is nothing to remap, as long as parts are applied in
+  order and the endpoint term is still at 0.1.
+- Stale glossary base: an `UPDATE_TERM` at `baseVersion` 0.1 on a term now at 0.2 →
+  **400** `Ontology operation '<op id>' expected version 0.1 but found 0.2` →
+  `OMConflict(kind="stale_base")`, with the operation id in `entities`.
+
+**Native.**
+
+- `UPSERT_PROPERTY` `kind: OBJECT` (the relation's object property, domain and range the two
+  classes) **applies** (backlog item closed), in one set with the `UPSERT_CONCEPT` that
+  declares its domain class. Two `to_om_all` calls concatenated into one draft gave the same
+  `UPSERT_CONCEPT` twice. rc1 rejected that at create with 400 `A native draft may change
+  each definition only once`. One call with all operations does not duplicate it.
+- `UPSERT_AXIOM` (cardinality restriction), `DELETE_PROPERTY`, `DELETE_AXIOM` and
+  `DELETE_CONCEPT` apply.
+
+**Approver.** `applicationResult.appliedBy` is `alice` for every set alice applies. The
+created and updated terms, concepts and properties have `updatedBy: alice`. A tag she adds
+has `appliedBy: alice`, and the table has `updatedBy: alice`. The bot only drafted and
+submitted.
+
+**Permissions.**
+
+- Endpoint: `GET /v1/permissions/{resource}/{id}` (spec `getResourcePermission`). With no
+  `user` parameter it answers for the caller: `{"resource": "glossary", "permissions":
+  [{"operation", "access", "rule"?, "policy"?, "role"?}]}`. `access` is one of `allow`,
+  `deny`, `notAllow`, `conditionalAllow`, `conditionalDeny`. The native ontology's entity type
+  is `ontology` (as in `/v1/ontologies`), so `OMClient.get_permissions` takes
+  `"glossary" | "ontology"`.
+- alice on a bot-created glossary / ontology: `EditAll: allow` (from
+  `LakeloomOntologyReviewerPolicy`); `Delete: notAllow`.
+- carol: `EditAll: notAllow`, but `ViewAll`, `EditDescription`, `EditTags`,
+  `EditGlossaryTerms` are `allow` (DataConsumer). Without an id
+  (`/v1/permissions/ontologyChangeSet`), carol's `EditAll` reads `conditionalAllow`, because
+  owner conditions cannot be evaluated without an entity. So Lakeloom asks per entity and
+  treats only `allow` as yes (`OMPermissions.allows`).
+- What OM checks (the 403 text names the operation, e.g. `Principal:
+  CatalogPrincipal{name='carol'} operations [EditAll] not allowed`):
+
+| Step | OM check |
+|---|---|
+| lease (`ontologyEditLocks/acquire` on a change set) | `EditAll` on `ontologyChangeSet` |
+| apply a glossary set (create/update/delete term, relationship, mapping) | `EditAll` on `glossary` |
+| apply a native set | `EditAll` on `ontology` |
+| … new concept / property / axiom | `Create` on `ontologyConcept` / `ontologyProperty` / `ontologyAxiom` |
+| … `DELETE_CONCEPT` / `DELETE_PROPERTY` / `DELETE_AXIOM` | `Delete` on that member type |
+| … `UPSERT_*` of an *existing* member (`targetId`) | `EditAll` on that member type |
+| tag a table or column with a term (JSON Patch on `/tags`) | `EditTags`/`EditGlossaryTerms` (DataConsumer) |
+
+  `DELETE_TERM` needs no `Delete` (it is a soft delete under the glossary's `EditAll`).
+  `glossaryTerm` needs no rule. No `ViewAll` rule is needed, because DataConsumer grants
+  `ViewAll` on all resources.
+- `APPLY_PERMISSIONS` (`lakeloom.om.models`) = `{"glossary": ("EditAll",), "ontology":
+  ("EditAll",)}`: the per-target checks Task 5 can make in advance with
+  `get_permissions`. The lease and member checks happen only at apply, and their failure is
+  an `OMForbidden` (403) with the operation in `detail`.
+
+**Reviewer role: the rule set** (`deploy/compose/om-bootstrap.sh`; evidence: one
+probe-role run per variant):
+
+| Rule | Resources | Operations | Without it |
+|---|---|---|---|
+| `LakeloomReviewerChangeSetLease` | `ontologyChangeSet` | `EditAll` | every apply: lease 403 `[EditAll]` (carol) |
+| `LakeloomReviewerApplyTargets` | `glossary`, `ontology` | `EditAll` | without `glossary`: glossary apply 403 `[EditAll]`; without `ontology`: native apply 403 `[EditAll]` |
+| `LakeloomReviewerNativeDefinitions` | `ontologyConcept`, `ontologyProperty`, `ontologyAxiom` | `Create`, `Delete` | concept only: property/axiom upserts 403 `[Create]`; without `ontologyAxiom`: axiom 403 `[Create]`; `Delete` only on property: `DELETE_CONCEPT` 403 `[Delete]` |
+
+Dropped from Task 1's rule: `ViewAll` (DataConsumer has it), `Create` on `glossary`,
+`glossaryTerm`, `ontology` and `ontologyChangeSet`, all of `glossaryTerm`, and `EditAll` on
+the native member types. `EditAll` on members would only be needed to update an existing
+native definition in place (403 `[EditAll]` measured). Lakeloom never drafts that: `to_om_all`
+emits `UPSERT_*` only for new definitions, and removals as `DELETE_*`. `DELETE_AXIOM` was
+measured only with `Delete` granted on all three member types. Requiring `Delete` on
+`ontologyAxiom` is inferred from the concept and property cases. With this rule set, alice ran
+the whole scenario: every set applied except the expected 412, the expected stale-base 400,
+and the in-place member update (403, not used). bob and carol (no role) are refused at the
+lease.
+
+Bootstrap converges the rules. When the policy exists, its rules (compared by name, effect,
+condition and sorted resources/operations) are replaced with JSON Patch `replace /rules` if
+they differ ("updated policy … rules"). Otherwise it logs "rules current". The first run on
+the Task 1 dev volume updated it; the second reported current.
+
+**Tags.** As alice, a JSON Patch `[{"op": "add", "path": "/columns/0/tags", "value": [...own
+tags, {tagFQN: <term>, source: Glossary, labelType: Manual, state: Confirmed}]}]` (content
+type `application/json-patch+json`) on `PATCH /v1/tables/{id}` → 200, with the tag
+`appliedBy: alice`. Clearing the list works the same way. carol has `EditTags` and
+`EditGlossaryTerms` on tables from DataConsumer, so tagging is **not** gated by the
+reviewer role. Lakeloom's own gate (`lakeloom:review`) is what limits it. A JSON Patch
+`test` op (to guard the column index against a concurrent column change) makes rc1 demand
+**`EditAll` on the table** (403), so `add_asset_tags` does not use one. The index comes from
+the read just before, as in the seed script. The merge rules (`lakeloom.om.tags`): keep the
+asset's own tags, drop `labelType: Derived` ones (a table's tags shown on its columns), and
+add or remove only the glossary tag. No write happens when nothing changes (`False`).
+
+**Client surface** (`lakeloom.om.client`): `with_token` (shares the `httpx.AsyncClient`,
+does not own it, and no repr shows a token), `apply_change_set`, `get_permissions`,
+`get_current_user` (`/v1/users/loggedInUser`), `add_asset_tags` / `remove_asset_tags`
+(`PATCH /v1/tables/{id}`). All paths are in `PATHS` and checked against the spec. A 403 raises
+`OMForbidden`. Every `OMError` now has a `hint` (forbidden, `stale_base`, `stale_revision`,
+`lease`, `exists`). `OMConflict.entities` aliases `entity_ids`.
 
 ## Consequences
 

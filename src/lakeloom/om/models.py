@@ -255,29 +255,48 @@ class OMChangeOperation(BaseModel):
     confidence: float | None = None
 
 
-class OMChangeOperationResult(BaseModel):
-    """One ``OntologyChangeOperationResult`` of an apply."""
+class OMOperationResult(BaseModel):
+    """One ``OntologyChangeOperationResult`` of an apply.
+
+    OM nests the touched entity as an ``EntityReference``; its id and FQN are lifted to
+    ``entity_id``/``entity_fqn``. A ``CREATE_TERM`` keeps its draft id (ADR 0012).
+    """
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     operation_id: str = Field(alias="operationId")
-    status: str
-    entity: OMEntityRef | None = None
+    status: str  # IN_PROGRESS | APPLIED | ROLLED_BACK | SKIPPED | FAILED
+    entity_id: str | None = Field(default=None, alias="entityId")
+    entity_fqn: str | None = Field(default=None, alias="entityFqn")
+    entity_type: str | None = Field(default=None, alias="entityType")
     entity_version: float | None = Field(default=None, alias="entityVersion")
     message: str | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _lift_entity(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        body = dict(cast("dict[str, Any]", value))
+        if isinstance(body.get("entity"), dict):
+            entity = cast("dict[str, Any]", body.pop("entity"))
+            body.setdefault("entityId", entity.get("id"))
+            body.setdefault("entityFqn", entity.get("fullyQualifiedName"))
+            body.setdefault("entityType", entity.get("type"))
+        return body
 
-class OMChangeApplicationResult(BaseModel):
-    """``OntologyChangeApplicationResult``: what an apply did."""
+
+class OMApplicationResult(BaseModel):
+    """``OntologyChangeApplicationResult``: what an apply did and who applied it."""
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     applied_at: int | None = Field(default=None, alias="appliedAt")
     applied_by: str | None = Field(default=None, alias="appliedBy")
-    operations_processed: int | None = Field(default=None, alias="operationsProcessed")
-    operations_applied: int | None = Field(default=None, alias="operationsApplied")
-    operations_failed: int | None = Field(default=None, alias="operationsFailed")
-    results: list[OMChangeOperationResult] = []
+    operations_processed: int = Field(default=0, alias="operationsProcessed")
+    operations_applied: int = Field(default=0, alias="operationsApplied")
+    operations_failed: int = Field(default=0, alias="operationsFailed")
+    results: list[OMOperationResult] = []
 
 
 class OMChangeSet(BaseModel):
@@ -296,9 +315,7 @@ class OMChangeSet(BaseModel):
     glossaries: list[OMEntityRef] = []
     ontology: OMEntityRef | None = None
     base_working_revision: int | None = Field(default=None, alias="baseWorkingRevision")
-    application_result: OMChangeApplicationResult | None = Field(
-        default=None, alias="applicationResult"
-    )
+    application_result: OMApplicationResult | None = Field(default=None, alias="applicationResult")
     version: float | None = None
     updated_at: int | None = Field(default=None, alias="updatedAt")  # epoch milliseconds
 
@@ -390,3 +407,67 @@ class OMRelationshipType(BaseModel):
 
     id: str
     name: str
+
+
+# --- Identity and permissions (M2b Task 2; ADR 0012 § Apply research) ----------------------
+
+
+class OMUser(BaseModel):
+    """``GET /v1/users/loggedInUser``: the OM user a token acts as."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    id: str
+    name: str
+    email: str | None = None
+    is_admin: bool | None = Field(default=None, alias="isAdmin")
+    is_bot: bool | None = Field(default=None, alias="isBot")
+
+
+PermissionAccess = Literal["allow", "deny", "notAllow", "conditionalAllow", "conditionalDeny"]
+"""``Permission.access`` in the spec. Only ``allow`` is an unconditional yes."""
+
+PermissionResource = Literal["glossary", "ontology"]
+"""OM entity types Lakeloom asks permissions for: a model's glossary and its native ontology."""
+
+APPLY_PERMISSIONS: dict[PermissionResource, tuple[str, ...]] = {
+    "glossary": ("EditAll",),
+    "ontology": ("EditAll",),
+}
+"""Operations the caller needs on the target to apply a change set (live rc1, ADR 0012).
+
+Applying a glossary change set needs ``EditAll`` on the glossary; a native one ``EditAll`` on
+the ontology. Both also need ``EditAll`` on ``ontologyChangeSet`` (the authoring lease) and a
+native set needs ``Create``/``Delete`` on ``ontologyConcept``/``ontologyProperty``/
+``ontologyAxiom``; OM checks those at apply time only, so they are not pre-checked here.
+"""
+
+
+class OMPermissions(BaseModel):
+    """``ResourcePermission`` of ``GET /v1/permissions/{resource}/{id}`` for the caller:
+    ``operations`` maps an OM operation name to its access."""
+
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    resource: str | None = None
+    operations: dict[str, PermissionAccess | str] = {}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _index(cls, value: object) -> object:
+        if isinstance(value, dict) and "permissions" in value:
+            body = cast("dict[str, Any]", value)
+            entries = body["permissions"]
+            ops: dict[str, str] = {}
+            for entry in cast("list[object]", entries if isinstance(entries, list) else []):
+                if isinstance(entry, dict):
+                    item = cast("dict[str, Any]", entry)
+                    operation, access = item.get("operation"), item.get("access")
+                    if isinstance(operation, str) and isinstance(access, str):
+                        ops[operation] = access
+            return {"resource": body.get("resource"), "operations": ops}
+        return cast("object", value)
+
+    def allows(self, *operations: str) -> bool:
+        """``True`` when every operation is ``allow`` (unknown or conditional ones are not)."""
+        return all(self.operations.get(op) == "allow" for op in operations)

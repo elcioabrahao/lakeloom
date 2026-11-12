@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 import httpx2
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -22,6 +23,32 @@ LAKELOOM_URL = os.environ.get("LAKELOOM_TEST_URL", "http://localhost:8000").rstr
 KEYCLOAK_URL = os.environ.get("KEYCLOAK_URL", "http://localhost:8180").rstrip("/")
 OM_URL = os.environ.get("OM_URL", "http://localhost:8585").rstrip("/")
 TOKEN_URL = f"{KEYCLOAK_URL}/realms/lakeloom/protocol/openid-connect/token"
+TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange"  # noqa: S105 - grant URN
+ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"  # noqa: S105 - type URN
+
+
+def exchange_for_om(subject_token: str) -> httpx.Response:
+    """Standard token exchange (Keycloak V2) as the confidential client ``lakeloom``: a
+    Lakeloom user token in, an OpenMetadata token (``aud: openmetadata``) for the same user
+    out (ADR 0012). The response body holds a token: never print it.
+
+    ``audience=openmetadata`` alone is refused ("Requested audience not available"): the
+    audience must come from a client scope of the request, here ``openmetadata-audience``.
+    """
+    return httpx.post(
+        TOKEN_URL,
+        data={
+            "grant_type": TOKEN_EXCHANGE,
+            "client_id": "lakeloom",
+            "client_secret": "dev-lakeloom-secret",  # DEV ONLY fixed public dev credential
+            "subject_token": subject_token,
+            "subject_token_type": ACCESS_TOKEN_TYPE,
+            "requested_token_type": ACCESS_TOKEN_TYPE,
+            "audience": "openmetadata",
+            "scope": "openmetadata-audience",
+        },
+        timeout=10,
+    )
 
 
 def token_scopes(token: str) -> set[str]:

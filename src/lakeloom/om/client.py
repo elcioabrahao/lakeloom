@@ -1,21 +1,25 @@
 """Async OpenMetadata client (FR-OM-01, FR-OM-02, FR-OM-06, NFR-SEC-11).
 
 Reads cover the M0/M1 surface; M2a adds the write side: ontology change sets (drafts,
-operations, submit, discard; never apply), glossary creation and axiom validation. OM
-behaviour behind the write methods is recorded in ADR 0011.
+operations, submit, discard), glossary creation and axiom validation (ADR 0011). M2b adds
+apply, permissions, asset tags and per-identity clients (:meth:`OMClient.with_token`): a
+reviewer's apply runs with the reviewer's own exchanged token, never the bot's (FR-OM-05,
+NFR-SEC-10; ADR 0012).
 
 Paths are keys of the committed spec (``servers[0].url`` is ``/api``), verified by
 ``tests/unit/om/test_spec_paths.py``. The bot token is only ever placed in the request
-header; it is never part of an exception message, log line or repr.
+header; it is never part of an exception message, log line or repr. The same holds for user
+and exchanged tokens given to :meth:`OMClient.with_token` (NFR-SEC-11).
 """
 
 import asyncio
+import json as jsonlib
 import re
 import time
 import uuid
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
-from typing import Any, ClassVar, Literal, cast
+from typing import Any, ClassVar, Literal, Self, cast
 from urllib.parse import quote
 
 import httpx
@@ -36,12 +40,16 @@ from lakeloom.om.models import (
     OMOntology,
     OMOntologyState,
     OMPage,
+    OMPermissions,
     OMRelationshipType,
     OMTable,
+    OMUser,
     OMVersion,
+    PermissionResource,
     RdfStatus,
 )
 from lakeloom.om.native_rdf import build_graph
+from lakeloom.om.tags import merge_tags, remove_tags
 from lakeloom.telemetry import record_om_request, start_span
 
 API_PREFIX = "/api"
@@ -84,16 +92,41 @@ class OMError(Exception):
     """OpenMetadata answered with an error (or could not be used).
 
     ``detail`` is OM's own ``message`` (untrusted text, capped), kept out of ``str(exc)``.
+    ``hint`` says what a caller can do about it, when the client knows.
     """
 
-    def __init__(self, message: str, status: int | None = None, detail: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status: int | None = None,
+        detail: str | None = None,
+        hint: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.detail = detail
+        self.hint = hint
 
 
 class OMUnavailable(OMError):
     """OpenMetadata is down, too slow, or answered 5xx."""
+
+
+class OMForbidden(OMError):
+    """HTTP 403: the OM user behind the token lacks an OM permission. ``detail`` names the
+    operations, e.g. ``operations [EditAll] not allowed`` (ADR 0012)."""
+
+
+_HINTS: dict[str, str] = {
+    "forbidden": "the OpenMetadata user lacks a permission for this; an OpenMetadata admin "
+    "must grant it (for applying change sets, the reviewer role in ADR 0012)",
+    "stale_base": "an entity changed after the change set was drafted; re-propose against "
+    "the current version",
+    "stale_revision": "the native ontology changed after the change set was drafted; "
+    "re-propose against the current working revision",
+    "lease": "another session is editing this change set; retry shortly",
+    "exists": "the name is taken; choose another name",
+}
 
 
 class OMConflict(OMError):
@@ -115,9 +148,14 @@ class OMConflict(OMError):
         entity_ids: tuple[str, ...] = (),
         kind: ConflictKind = "lease",
     ) -> None:
-        super().__init__(message, status, detail)
+        super().__init__(message, status, detail, _HINTS[kind])
         self.entity_ids = entity_ids
         self.kind: ConflictKind = kind
+
+    @property
+    def entities(self) -> tuple[str, ...]:
+        """The entity ids OM named (same as ``entity_ids``)."""
+        return self.entity_ids
 
 
 class OMClient:
@@ -155,6 +193,11 @@ class OMClient:
         "list_ontology_axioms": ("GET", "/v1/ontologyAxioms"),
         # Proposals (M2a Task 6): relationship type ids for ADD_RELATIONSHIP
         "list_relationship_types": ("GET", "/v1/relationshipTypes"),
+        # Review (M2b Task 2; ADR 0012): applied with the reviewer's own token
+        "apply_change_set": ("POST", "/v1/ontologyChangeSets/{id}/apply"),
+        "get_permissions": ("GET", "/v1/permissions/{resource}/{id}"),
+        "get_current_user": ("GET", "/v1/users/loggedInUser"),
+        "patch_table": ("PATCH", "/v1/tables/{id}"),
     }
 
     def __init__(
@@ -172,6 +215,14 @@ class OMClient:
 
     def __repr__(self) -> str:
         return f"OMClient(base_url={self._base_url!r})"
+
+    def with_token(self, token: SecretStr) -> Self:
+        """A client acting as another OM identity (a reviewer's exchanged token; FR-OM-05).
+
+        Same base URL and the same ``httpx.AsyncClient``, which the new client does not own:
+        its :meth:`aclose` is a no-op. Cheap enough to create per request.
+        """
+        return type(self)(self._base_url, token, http=self._http)
 
     async def aclose(self) -> None:
         if self._owns_http:
@@ -192,12 +243,19 @@ class OMClient:
         params: dict[str, str] | None = None,
         accept: str = "application/json",
         json: object | None = None,
+        content_type: str | None = None,
     ) -> httpx.Response:
         method, path = self.PATHS[name]
         if path_args:
             # Every path segment is percent-encoded, including "/" (FQNs may hold quotes).
             path = path.format(**{k: quote(v, safe="") for k, v in path_args.items()})
         headers = {"Accept": accept}
+        content: bytes | None = None
+        if content_type is not None:
+            # httpx's json= always sends application/json; JSON Patch needs its own type.
+            headers["Content-Type"] = content_type
+            content = jsonlib.dumps(json).encode()
+            json = None
         if self._token is not None:
             headers["Authorization"] = f"Bearer {self._token.get_secret_value()}"
         url = f"{self._base_url}{API_PREFIX}{path}"
@@ -209,7 +267,7 @@ class OMClient:
             try:
                 with OM_REQUEST_SECONDS.labels(operation=name).time():
                     response = await self._http.request(
-                        method, url, headers=headers, params=params, json=json
+                        method, url, headers=headers, params=params, json=json, content=content
                     )
             except httpx.TimeoutException as exc:
                 self._observe(span, name, "error", started)
@@ -544,6 +602,81 @@ class OMClient:
         """Draft or Submitted -> Discarded."""
         return await self._command("discard_change_set", id)
 
+    async def apply_change_set(self, id: str) -> OMChangeSet:
+        """Submitted -> Applied, as the identity of this client (FR-REV-02; ADR 0012).
+
+        Call it on a :meth:`with_token` client holding the reviewer's token: OM records the
+        token's user as ``applicationResult.appliedBy`` and as the entities' ``updatedBy``.
+        A stale glossary base raises ``OMConflict`` (``stale_base``, the operation id in
+        ``entities``), a stale native revision ``OMConflict`` (``stale_revision``); in both
+        cases nothing is applied and the set stays Submitted. A missing OM permission raises
+        ``OMForbidden``. OM releases the lease itself on apply.
+        """
+        return await self._command("apply_change_set", id)
+
+    async def get_permissions(self, resource: PermissionResource, id: str) -> OMPermissions:
+        """The caller's own permissions on one glossary or native ontology (by id).
+
+        Compare with :data:`lakeloom.om.models.APPLY_PERMISSIONS` before an apply.
+        """
+        response = await self._request(
+            "get_permissions", path_args={"resource": resource, "id": id}
+        )
+        return OMPermissions.model_validate(_json(response))
+
+    async def get_current_user(self) -> OMUser:
+        """The OM user this client's token acts as."""
+        return OMUser.model_validate(_json(await self._request("get_current_user")))
+
+    async def add_asset_tags(
+        self, entity: Literal["table"], fqn: str, *, column: str | None, term_fqn: str
+    ) -> bool:
+        """Tag a table (or one of its columns) with the glossary term ``term_fqn``.
+
+        JSON Patch of the whole tag list, merged like ``lakeloom.om.tags.merge_tags``.
+        Returns ``False`` (and writes nothing) when the tag is already there. Raises
+        ``OMError`` 404 for an unknown table or column.
+        """
+        return await self._patch_tags(entity, fqn, column, term_fqn, add=True)
+
+    async def remove_asset_tags(
+        self, entity: Literal["table"], fqn: str, *, column: str | None, term_fqn: str
+    ) -> bool:
+        """Remove the glossary-term tag ``term_fqn`` from a table or column (mirror of
+        :meth:`add_asset_tags`); ``False`` when the asset has no own tag for it."""
+        return await self._patch_tags(entity, fqn, column, term_fqn, add=False)
+
+    async def _patch_tags(
+        self, entity: Literal["table"], fqn: str, column: str | None, term_fqn: str, *, add: bool
+    ) -> bool:
+        if entity != "table":  # pyright: ignore[reportUnnecessaryComparison]
+            raise ValueError(f"unsupported asset type {entity!r}")
+        table = await self.get_table_by_fqn(fqn, fields=("tags", "columns"))
+        if table is None:
+            raise OMError(f"table {fqn!r} not found", 404)
+        merge = merge_tags if add else remove_tags
+        if column is None:
+            path = "/tags"
+            existing = table.tags
+        else:
+            index = next((i for i, c in enumerate(table.columns) if c.name == column), None)
+            if index is None:
+                raise OMError(f"column {column!r} not found in table {fqn!r}", 404)
+            path = f"/columns/{index}/tags"
+            existing = table.columns[index].tags
+        tags = merge([t.model_dump(by_alias=True, exclude_none=True) for t in existing], term_fqn)
+        if tags is None:
+            return False
+        # The column index comes from the read just above. A JSON Patch `test` op would guard
+        # it, but rc1 then demands EditAll on the table instead of EditTags (ADR 0012).
+        await self._request(
+            "patch_table",
+            path_args={"id": table.id},
+            json=[{"op": "add", "path": path, "value": tags}],
+            content_type="application/json-patch+json",
+        )
+        return True
+
     async def validate_axiom(self, axiom: Mapping[str, Any]) -> OMAxiomValidation:
         """Validate a ``CreateOntologyAxiom`` against the *applied* declarations of the
         native ontology it names (``ontology``); 404 when that ontology does not exist."""
@@ -704,6 +837,8 @@ def _client_error(response: httpx.Response) -> OMError:
     status = response.status_code
     detail = _detail(response)
     message = f"OpenMetadata returned HTTP {status}"
+    if status == 403:
+        return OMForbidden(f"{message} (forbidden)", status, detail, _HINTS["forbidden"])
     stale = status == 400 and detail is not None and _STALE_BASE.search(detail) is not None
     if status in (409, 412) or stale:
         ids = tuple(dict.fromkeys(m.lower() for m in _UUID_IN_TEXT.findall(detail or "")))

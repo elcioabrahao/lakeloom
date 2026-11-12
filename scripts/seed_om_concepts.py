@@ -30,6 +30,8 @@ from typing import Any
 
 import httpx
 
+from lakeloom.om.tags import merge_tags  # same merge rules as OMClient.add_asset_tags
+
 GLOSSARY = "retail"
 BASE_IRI = "http://localhost:8000/ontology/retail/"
 TABLE_PREFIX = "lakeloom_fixture.retail.sales"
@@ -126,27 +128,6 @@ def term_payload(spec: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def glossary_tag(name: str) -> dict[str, str]:
-    return {
-        "tagFQN": term_fqn(name),
-        "source": "Glossary",
-        "labelType": "Manual",
-        "state": "Confirmed",
-    }
-
-
-def merge_tags(existing: list[dict[str, Any]], term: str) -> list[dict[str, Any]] | None:
-    """Own tags plus the glossary tag, or ``None`` when it is already there.
-
-    OM shows a table's tags on its columns with ``labelType: Derived``; those are not the
-    column's own tags and must not be written back.
-    """
-    own = [t for t in existing if t.get("labelType") != "Derived"]
-    if any(t.get("tagFQN") == term_fqn(term) for t in own):
-        return None
-    return [*own, glossary_tag(term)]
-
-
 def _check(response: httpx.Response, what: str) -> httpx.Response:
     if response.status_code >= 400:
         raise SystemExit(f"{what} failed: HTTP {response.status_code} {response.text[:500]}")
@@ -217,12 +198,12 @@ def seed_realizations(http: httpx.Client) -> int:
         entity = response.json()
         ops: list[dict[str, Any]] = []
         if table_term is not None:
-            merged = merge_tags(entity.get("tags", []), table_term)
+            merged = merge_tags(entity.get("tags", []), term_fqn(table_term))
             if merged is not None:
                 ops.append({"op": "add", "path": "/tags", "value": merged})
         for index, column in enumerate(entity["columns"]):
             if column["name"] in columns:
-                merged = merge_tags(column.get("tags", []), columns[column["name"]])
+                merged = merge_tags(column.get("tags", []), term_fqn(columns[column["name"]]))
                 if merged is not None:
                     ops.append({"op": "add", "path": f"/columns/{index}/tags", "value": merged})
         if ops:
