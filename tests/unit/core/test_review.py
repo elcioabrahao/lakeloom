@@ -30,16 +30,16 @@ from lakeloom.config import Settings
 from lakeloom.core.confirm import ConfirmTokens
 from lakeloom.core.model_policy import ModelPolicyEntry
 from lakeloom.core.obo import OnBehalfOf
-from lakeloom.core.operations import UpdateConcept
+from lakeloom.core.operations import AddRelation, UpdateConcept
 from lakeloom.core.proposals import (
     REBASE_HINT,
     ConfirmPreview,
     Proposal,
     summary_markdown,
 )
-from lakeloom.core.review import ReviewService
+from lakeloom.core.review import SELF_REVIEW, SESSION_REJECTED, ReviewService
 from lakeloom.errors import LakeloomError
-from lakeloom.om.client import OMClient, OMConflict, OMError, OMUnavailable
+from lakeloom.om.client import OMClient, OMConflict, OMError, OMForbidden, OMUnavailable
 from lakeloom.om.models import (
     OMApplicationResult,
     OMChangeSet,
@@ -88,23 +88,76 @@ class ReviewOM(FakeOM):
         self.descriptions: dict[str, str] = {}  # term FQN -> description OM holds
         self.tags: list[tuple[str, str | None, str, bool]] = []
         self.keep_descriptions = False  # True: apply leaves term descriptions (rc1 defect)
+        self.check_bases = False  # True: apply refuses a stale term baseVersion, as rc1 does
+        self.apply_failed: dict[str, str] = {}  # cs id -> rc1's FAILED message (once)
+        self.failed_ops: dict[str, int] = {}  # cs id -> failed operations of an APPLIED set
 
     def _cs(self, cs_id: str) -> OMChangeSet:
         cs = super()._cs(cs_id)
         data = self.change_sets[cs_id]
+        terms = {o.get("id"): o.get("term") for o in data["operations"]}
         return cs.model_copy(
             update={
                 "base_working_revision": data["kw"].get("base_working_revision"),
                 "application_result": data.get("result"),
+                "operations": [
+                    o.model_copy(update={"term": terms.get(o.id)}) for o in cs.operations
+                ],
             }
         )
+
+    def _term_by_id(self, term_id: str) -> tuple[str, int] | None:
+        for model, terms in self.terms.items():
+            for i, t in enumerate(terms):
+                if t.id == term_id:
+                    return model, i
+        return None
+
+    def _check_bases(self, data: dict[str, Any]) -> None:
+        """rc1: an operation whose baseVersion is not the term's version refuses the apply."""
+        for op in data["operations"]:
+            found = self._term_by_id(str(op.get("targetId")))
+            if "baseVersion" not in op or found is None:
+                continue
+            model, i = found
+            if float(op["baseVersion"]) != self.terms[model][i].version:
+                raise OMConflict("expected version", 400, entity_ids=(op["id"],), kind="stale_base")
+
+    def _bump_terms(self, data: dict[str, Any]) -> None:
+        for op in data["operations"]:
+            if op["operationType"] not in ("UPDATE_TERM", "ADD_RELATIONSHIP"):
+                continue
+            found = self._term_by_id(str(op.get("targetId")))
+            if found is not None:
+                model, i = found
+                t = self.terms[model][i]
+                self.terms[model][i] = t.model_copy(
+                    update={"version": round((t.version or 0) + 0.1, 6)}
+                )
 
     async def apply_change_set(self, cs_id: str) -> OMChangeSet:
         self.calls.append(("APPLY", cs_id))
         self._maybe_fail(f"apply:{cs_id}")
         data = self.change_sets[cs_id]
-        if data["state"] != "SUBMITTED":
+        if data["state"] not in ("SUBMITTED", "APPLY_FAILED"):  # rc1 re-runs APPLY_FAILED
             raise OMError("not submitted", 400)
+        if self.check_bases:
+            self._check_bases(data)
+        if cs_id in self.apply_failed:  # rc1: every operation rolled back, the set kept
+            data["state"] = "APPLY_FAILED"
+            data["version"] += 0.1
+            message = self.apply_failed.pop(cs_id)
+            data["result"] = OMApplicationResult.model_validate(
+                {
+                    "appliedBy": self.users.get(self.token or ""),
+                    "operationsProcessed": 1,
+                    "operationsFailed": 1,
+                    "results": [{"operationId": "op-1", "status": "FAILED", "message": message}],
+                }
+            )
+            return self._cs(cs_id)
+        if self.check_bases:
+            self._bump_terms(data)
         base = data["kw"].get("base_working_revision")
         if base is not None:
             if base < self.revision:
@@ -120,17 +173,24 @@ class ReviewOM(FakeOM):
         data["state"] = "APPLIED"
         data["version"] += 0.1
         n = len(data["operations"])
+        failed = self.failed_ops.get(cs_id, 0)
         data["result"] = OMApplicationResult.model_validate(
             {
                 "appliedBy": self.users.get(self.token or ""),
                 "operationsProcessed": n,
-                "operationsApplied": n,
+                "operationsApplied": n - failed,
+                "operationsFailed": failed,
+                "results": [
+                    {"operationId": f"op-{i}", "status": "FAILED", "message": "rc1 said no"}
+                    for i in range(failed)
+                ],
             }
         )
         return self._cs(cs_id)
 
     async def get_permissions(self, resource: str, id: str) -> OMPermissions:
         self.calls.append(("get_permissions", (resource, id)))
+        self._maybe_fail("get_permissions")
         user = self.users.get(self.token or "")
         access = "notAllow" if user in self.denied else "allow"
         return OMPermissions.model_validate(
@@ -169,6 +229,7 @@ class TokenOM:
     def __init__(self, inner: ReviewOM, token: str) -> None:
         self.inner = inner
         self.token = token
+        self.session_rejected = False  # like OMClient: set by an HTTP 401
 
     def with_token(self, token: SecretStr) -> "TokenOM":
         return TokenOM(self.inner, token.get_secret_value())
@@ -187,7 +248,12 @@ class TokenOM:
 
             async def run() -> Any:
                 self.inner.token = self.token
-                return await awaited
+                try:
+                    return await awaited
+                except OMError as exc:
+                    if exc.status == 401:
+                        self.session_rejected = True
+                    raise
 
             return run()
 
@@ -202,6 +268,10 @@ class FakeObo:
     def __init__(self, om: ReviewOM) -> None:
         self.om = om
         self.calls = 0
+        self.forgotten: list[str] = []
+
+    def forget(self, principal: Principal) -> None:
+        self.forgotten.append(principal.subject)
 
     async def om_for(self, principal: Principal) -> OMClient:
         if principal.type is not PrincipalType.HUMAN:
@@ -798,3 +868,265 @@ async def test_summary_shows_reviews(kit: ReviewKit) -> None:
     assert "request_changes by `alice`" in text
     assert "> [untrusted text from reviewer alice]" in text
     assert "![x](https://evil" not in text and "\n# heading" not in text
+
+
+# --- final-review fixes (M2b) ------------------------------------------------------------------
+
+
+async def _confirm(kit: ReviewKit, p: Proposal, who: Principal = ALICE) -> LakeloomError:
+    """Preview, then a confirm that fails; the error."""
+    preview = await kit.review.review(p.id, "approve", principal=who, client=None)
+    assert isinstance(preview, ConfirmPreview)
+    return await _error(
+        kit.review.review(
+            p.id, "approve", principal=who, client=None, confirm_token=preview.confirm_token
+        )
+    )
+
+
+async def test_stale_base_conflict_names_the_entity_not_the_operation_id(kit: ReviewKit) -> None:
+    """FR-OM-03: OM names its operation id; the reviewer reads the term."""
+    p = await _with_update(kit)
+    glossary = str(p.parts[-1].change_set_ids["glossary"])
+    op_id = next(
+        o["id"]
+        for o in kit.om.change_sets[glossary]["operations"]
+        if o["operationType"] == "UPDATE_TERM"
+    )
+    kit.om.fail[f"apply:{glossary}"] = OMConflict(
+        "expected version", 400, entity_ids=(op_id,), kind="stale_base"
+    )
+    err = await _confirm(kit, p)
+    assert err.code == "conflict" and err.hint == REBASE_HINT
+    assert "affected: `shop.Customer`" in err.message
+    assert op_id not in err.message
+
+
+async def test_stale_base_conflict_keeps_ids_it_cannot_match(kit: ReviewKit) -> None:
+    p = await kit.submitted()
+    glossary = str(p.parts[0].change_set_ids["glossary"])
+    kit.om.fail[f"apply:{glossary}"] = OMConflict(
+        "expected version", 400, entity_ids=("0b5c0d6e-unknown",), kind="stale_base"
+    )
+    err = await _confirm(kit, p)
+    assert err.code == "conflict" and "affected: `0b5c0d6e-unknown`" in err.message
+
+
+async def test_apply_failed_set_is_reapplied_on_retry(kit: ReviewKit) -> None:
+    """Live rc1 (ADR 0012): an APPLY_FAILED set is rolled back and kept; apply re-runs it."""
+    p = await kit.submitted()
+    glossary = str(p.parts[0].change_set_ids["glossary"])
+    kit.om.apply_failed[glossary] = "A term with the name 'Customer' already exists"
+    err = await _confirm(kit, p)
+    assert err.code == "upstream_unavailable"
+    assert "state APPLY_FAILED, 1 operation(s) failed" in err.message
+    assert "already exists" in err.message  # OM's reason, quoted
+    assert "approve again to re-run it once the cause is fixed" in err.hint
+    stored = await kit.repo.get(p.id)
+    assert stored.status == "apply_failed"
+    assert stored.parts[0].om_state["glossary"] == "APPLY_FAILED"
+
+    out = await kit.approve(p)
+    assert out.status == "applied"
+    assert kit.om.applied().count(glossary) == 2
+    assert out.parts[0].change_set_ids["glossary"] == glossary  # not re-drafted
+
+
+async def test_apply_failed_set_is_discarded_on_reject(kit: ReviewKit) -> None:
+    p = await kit.submitted()
+    glossary = str(p.parts[0].change_set_ids["glossary"])
+    kit.om.apply_failed[glossary] = "no"
+    await _confirm(kit, p)
+    preview = await kit.review.review(p.id, "reject", principal=ALICE, client=None, reason="no")
+    assert isinstance(preview, ConfirmPreview)
+    out = await kit.review.review(
+        p.id,
+        "reject",
+        principal=ALICE,
+        client=None,
+        reason="no",
+        confirm_token=preview.confirm_token,
+    )
+    assert isinstance(out, Proposal) and out.status == "rejected"
+    assert ("DISCARDED", glossary) in kit.om.calls
+    assert set(out.parts[0].om_state.values()) == {"DISCARDED"}
+
+
+async def test_applied_with_failed_operations_warns_and_does_not_promise_a_retry(
+    kit: ReviewKit,
+) -> None:
+    p = await kit.submitted()
+    glossary = str(p.parts[0].change_set_ids["glossary"])
+    kit.om.failed_ops[glossary] = 1
+    out = await kit.approve(p)
+    assert out.status == "applied"
+    assert glossary in out.reviews[-1].applied
+    (warning,) = [w for w in out.reviews[-1].warnings if glossary in w]
+    assert "1 failed operation(s)" in warning and "`rc1 said no`" in warning
+    assert "approve again" not in warning
+
+
+async def _relation_after_update(kit: ReviewKit, order_base: str | None = None) -> Proposal:
+    """Part A: UpdateConcept Customer (+ Product); part B: AddRelation Customer -> Order
+    (+ UpdateConcept Order with the agent's ``order_base``). max_ops=2."""
+    kit.om.terms["shop"] = [term("shop", name, 0.1) for name in ("Customer", "Order", "Product")]
+    scan_id = await kit.scan(widened(1)[0])
+    p = await kit.service.propose_from_scan(scan_id, "shop", principal=AGENT, client=None)
+
+    def update(name: str, base: str = "0.1") -> UpdateConcept:
+        return UpdateConcept(
+            op="update_concept",
+            fqn=f"shop.{name}",
+            base_version=base,
+            description=UntrustedText(text=f"{name}!", source="agent"),
+        )
+
+    relation = AddRelation(
+        op="add_relation", source="shop.Customer", target="shop.Order", relation_type="hasCustomer"
+    )
+    ops: list[Any] = [update("Customer"), update("Product"), relation]
+    if order_base is not None:
+        ops.append(update("Order", order_base))
+    p = await kit.service.propose_change(p.id, ops, principal=AGENT, client=None)
+    p = await kit.service.submit(p.id, principal=AGENT, client=None)
+    a, b = p.parts[-2:]
+    assert [o.op for o in a.operations] == ["update_concept", "update_concept"]
+    assert b.operations[0].op == "add_relation"
+    kit.om.check_bases = True
+    return p
+
+
+async def test_relation_on_a_term_an_earlier_part_updated_is_rebuilt_not_a_conflict(
+    build,
+) -> None:
+    """ADR 0012 § Review: a base Lakeloom took from OM (not the agent's) that an earlier
+    part of the same approve moved is re-drafted once, then applied."""
+    kit: ReviewKit = build(max_ops=2)
+    p = await _relation_after_update(kit)
+    old = p.parts[-1].change_set_ids["glossary"]
+    out = await kit.approve(p)
+    assert out.status == "applied"
+    part = out.parts[-1]
+    assert part.change_set_ids["glossary"] != old
+    assert old in part.superseded_change_set_ids
+    new = kit.om.change_sets[str(part.change_set_ids["glossary"])]
+    (relation,) = [o for o in new["operations"] if o["operationType"] == "ADD_RELATIONSHIP"]
+    assert relation["baseVersion"] == 0.2  # Customer after part A's apply
+    assert kit.om.change_sets[str(old)]["state"] == "DISCARDED"
+
+
+async def test_stale_agent_base_still_conflicts_after_a_derived_rebuild(build) -> None:
+    kit: ReviewKit = build(max_ops=2)
+    p = await _relation_after_update(kit, order_base="0.1")
+    i = next(i for i, t in enumerate(kit.om.terms["shop"]) if t.name == "Order")
+    kit.om.terms["shop"][i] = term("shop", "Order", 0.3)  # someone edited Order meanwhile
+    err = await _confirm(kit, p)
+    assert err.code == "conflict" and err.hint == REBASE_HINT
+    assert "affected: `shop.Order`" in err.message
+    stored = await kit.repo.get(p.id)
+    assert stored.status == "apply_failed"
+    part = stored.parts[-1]
+    assert len(part.superseded_change_set_ids) == 2  # rebuilt once for Customer's relation
+    new = kit.om.change_sets[str(part.change_set_ids["glossary"])]
+    (update,) = [o for o in new["operations"] if o["operationType"] == "UPDATE_TERM"]
+    assert update["baseVersion"] == 0.1  # the agent's base: never refreshed
+
+
+async def test_reviewer_cannot_review_own_proposal(kit: ReviewKit) -> None:
+    p = await kit.submitted()  # created by agent-7
+    me = human(AGENT.subject)
+    mark = kit.mark()
+    for decision in ("approve", "reject", "request_changes"):
+        err = await _error(kit.review.review(p.id, decision, principal=me, client="c", reason="r"))
+        assert err.code == "forbidden" and err.message == SELF_REVIEW
+    assert kit.om.token_calls[mark:] == []
+    assert kit.obo.calls == 0
+    rows = await kit.reviews()
+    assert [r.result for r in rows] == ["forbidden"] * 3
+    assert {r.proposal_id for r in rows} == {p.id}
+    assert (await kit.repo.get(p.id)).status == "submitted"
+    # an admin gets no exemption
+    admin = human(AGENT.subject, scopes=(REVIEW, "lakeloom:admin"))
+    err = await _error(kit.review.review(p.id, "approve", principal=admin, client=None))
+    assert err.message == SELF_REVIEW
+
+
+async def test_om_401_on_apply_is_forbidden_and_forgets_the_exchanged_token(
+    kit: ReviewKit,
+) -> None:
+    p = await kit.submitted()
+    glossary = str(p.parts[0].change_set_ids["glossary"])
+    kit.om.fail[f"apply:{glossary}"] = OMError("OpenMetadata returned HTTP 401", 401)
+    err = await _confirm(kit, p)
+    assert err.code == "forbidden" and err.message == SESSION_REJECTED
+    assert "sign in" in err.hint
+    assert kit.obo.forgotten == ["alice"]
+    assert (await kit.repo.get(p.id)).status == "apply_failed"
+    assert (await kit.reviews())[-1].error_code == "forbidden"
+    out = await kit.approve(p)  # signed in again
+    assert out.status == "applied"
+
+
+async def test_om_401_on_a_read_is_forbidden_too(kit: ReviewKit) -> None:
+    p = await kit.submitted()
+    kit.om.fail["get_permissions"] = OMError("OpenMetadata returned HTTP 401", 401)
+    err = await _error(kit.review.review(p.id, "approve", principal=ALICE, client=None))
+    assert err.code == "forbidden" and err.message == SESSION_REJECTED
+    assert kit.obo.forgotten == ["alice"]
+    assert (await kit.repo.get(p.id)).status == "submitted"
+
+
+async def test_request_changes_on_apply_failed(kit: ReviewKit) -> None:
+    p = await kit.submitted()
+    kit.om.fail[f"apply:{p.parts[0].change_set_ids['glossary']}"] = OMUnavailable("down", 503)
+    await _confirm(kit, p)
+    out = await kit.review.review(
+        p.id, "request_changes", principal=ALICE, client=None, reason="split it"
+    )
+    assert isinstance(out, Proposal) and out.status == "changes_requested"
+
+
+async def test_om_forbidden_part_way_keeps_progress(kit: ReviewKit) -> None:
+    p = await _two_parts(kit)
+    second = str(p.parts[1].change_set_ids["glossary"])
+    kit.om.fail[f"apply:{second}"] = OMForbidden(
+        "OpenMetadata returned HTTP 403 (forbidden)", 403, "operations [EditAll] not allowed"
+    )
+    err = await _confirm(kit, p)
+    assert err.code == "forbidden"
+    assert "operations [EditAll] not allowed" in err.message
+    assert "LakeloomOntologyReviewer" in err.hint
+    stored = await kit.repo.get(p.id)
+    assert stored.status == "apply_failed"
+    assert stored.parts[0].om_state == {"glossary": "APPLIED", "native": "APPLIED"}
+    assert stored.parts[1].om_state["glossary"] == "SUBMITTED"
+    review = stored.reviews[-1]
+    assert review.applied == list(p.parts[0].change_set_ids.values())
+    assert any(w.startswith("apply stopped: forbidden") for w in review.warnings)
+    out = await kit.approve(p)  # the role granted: continues with part 2
+    assert out.status == "applied"
+    assert kit.om.applied().count(str(p.parts[0].change_set_ids["glossary"])) == 1
+
+
+async def test_concurrent_confirms_by_two_reviewers_apply_once(kit: ReviewKit) -> None:
+    p = await kit.submitted()
+    bob = human("bob")
+    previews = [
+        await kit.review.review(p.id, "approve", principal=who, client=None) for who in (ALICE, bob)
+    ]
+    assert all(isinstance(x, ConfirmPreview) for x in previews)
+
+    async def confirm(who: Principal, preview: Any) -> Proposal | ConfirmPreview:
+        return await kit.review.review(
+            p.id, "approve", principal=who, client=None, confirm_token=preview.confirm_token
+        )
+
+    results = await asyncio.gather(
+        confirm(ALICE, previews[0]), confirm(bob, previews[1]), return_exceptions=True
+    )
+    ok = [r for r in results if isinstance(r, Proposal)]
+    failed = [r for r in results if isinstance(r, LakeloomError)]
+    assert len(ok) == 1 and len(failed) == 1
+    assert failed[0].code == "conflict"
+    assert kit.om.applied() == p.change_set_ids()  # each set applied exactly once
+    assert len([r for r in ok[0].reviews if r.decision == "approve"]) == 1

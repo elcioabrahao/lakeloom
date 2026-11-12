@@ -28,9 +28,8 @@ M2c/M3. Details and rulings: [ADR 0012](../decisions/0012-review-and-human-ident
 
 ## Review
 - `DISCARDED` / missing sides are rebuilt silently during approve (no warning).
-- A `stale_base` conflict names OM operation/entity ids, not concept names.
-- A non-`APPLIED` apply result is mapped to `upstream_unavailable`; `APPLIED` with
-  `operations_failed > 0` is not warned about.
+- A `stale_base` on a `DELETE_RELATIONSHIP` (its target is the relationship id, not a term)
+  still shows OM's operation id.
 - The description read-back after an applied `UpdateConcept` builds the term FQN differently
   from the realization term-FQN construction.
 

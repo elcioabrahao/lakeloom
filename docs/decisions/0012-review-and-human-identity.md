@@ -319,11 +319,18 @@ does not own it, and no repr shows a token), `apply_change_set`, `get_permission
 `mode` is `exchange` (exchange on, `LAKELOOM_OIDC_CLIENT_ID` and secret set), `forward`
 (exchange off, `LAKELOOM_OM_FORWARD_USER_TOKEN=true`) or `unavailable` (human review fails
 closed; the bot is never used). `get_server_info` reports it as `review_identity`. The
-exchange form carries `audience=<LAKELOOM_OM_AUDIENCE>` and, unless
-`LAKELOOM_OM_EXCHANGE_SCOPE` is set to an empty value (read as unset), `scope=<LAKELOOM_OM_EXCHANGE_SCOPE>` (default
-`openmetadata-audience`, the finding above). An exchange error is `forbidden` (400/401/403)
-or `upstream_unavailable` and never falls back to forwarding. Exchanged tokens are cached by
-the SHA-256 of the subject token until `expires_in - 30 s`.
+exchange form carries `audience=<LAKELOOM_OM_AUDIENCE>` and, when
+`LAKELOOM_OM_EXCHANGE_SCOPE` is set, `scope=<LAKELOOM_OM_EXCHANGE_SCOPE>` (unset by default;
+the dev stack sets `openmetadata-audience`, the finding above; an empty value reads as unset).
+An exchange error is `forbidden` (400/401/403) or `upstream_unavailable` and never falls back
+to forwarding. Exchanged tokens are cached by the SHA-256 of the subject token until
+`expires_in - 30 s`. When OM answers HTTP 401 to the reviewer's client (the exchanged token
+was rejected or expired), the review fails `forbidden` "OpenMetadata rejected your session;
+sign in again" and `OnBehalfOf.forget(principal)` drops the cached entry, so the next call
+exchanges again. All identities share the OM `httpx.AsyncClient` (one connection pool), whose
+cookie jar refuses every cookie: a `Set-Cookie` sent to one identity is never sent by another.
+Forward mode needs `LAKELOOM_OM_FORWARD_USER_TOKEN=true` **and**
+`LAKELOOM_OIDC_TOKEN_EXCHANGE=false`.
 
 ### Rebuild (M2b Task 4)
 
@@ -385,10 +392,13 @@ audited as `review_proposal`.
 
 - **Checks, in order, nothing sent to OM on a refusal:** human principal (an agent gets
   `forbidden` "agent principals cannot review proposals (FR-REV-01)"); the
-  `lakeloom:review` scope; the model's `review_groups`; a reason (reject) or comment
-  (request_changes), stored as `UntrustedText` capped at 4,000 characters; the status
-  (approve: `submitted` | `apply_failed`; reject: `submitted` | `changes_requested` |
-  `apply_failed`; request_changes: `submitted`); `OnBehalfOf.om_for` (its error is final,
+  `lakeloom:review` scope; the model's `review_groups`; **no self-review** (the reviewer's
+  subject equals the proposal's `provenance.principal_subject` → `forbidden` "reviewers
+  cannot review their own proposal" for every decision, no admin exemption; final-review
+  ruling); a reason (reject) or comment (request_changes), stored as `UntrustedText` capped
+  at 4,000 characters; the status (approve: `submitted` | `apply_failed`; reject:
+  `submitted` | `changes_requested` | `apply_failed`; request_changes: `submitted` |
+  `apply_failed`); `OnBehalfOf.om_for` (its error is final,
   never the bot); and `get_permissions` on the glossary and, when paired, the native
   ontology must allow `APPLY_PERMISSIONS`, else `forbidden` "OpenMetadata does not grant
   <user> review permission on <model>". `request_changes` touches nothing in OM, so it
@@ -411,13 +421,44 @@ audited as `review_proposal`.
   automatic re-draft): before a native side, its `baseWorkingRevision` behind the
   ontology's `workingRevision` (an earlier part was just applied), or a side an
   interrupted rebuild discarded → `rebuild_parts([part], om=reviewer, submit=True)` from
-  the same reviewed operations, old ids in `superseded_change_set_ids`. Glossary sides are
-  applied as drafted (draft ids survive apply). A `stale_revision` at apply gets one
-  rebuild and retry; a second is `apply_failed`. A `stale_base` (an agent-supplied
-  `base_version`) is never refreshed here: `conflict` naming OM's entity ids, hint "call
-  rebase_proposal, then submit_proposal for a new review", status `apply_failed`. Other
-  failures: `apply_failed` with progress stored; `OMForbidden` → `forbidden`. The OM
-  state is stored after every side.
+  the same reviewed operations, old ids in `superseded_change_set_ids`. **Derived glossary
+  bases** (final-review ruling): before a glossary side, when a part applied earlier
+  (normally in the same approve; on a retry, also parts applied by the earlier attempt)
+  changed a term this part references through a base version Lakeloom took from OM at
+  draft time, not from the agent — a relation's or mapping's source term, a synonym not
+  folded into an `UpdateConcept` — the part is rebuilt the same way once, then applied.
+  The check is by term name and over-inclusive on the "changed" side (every term an applied
+  part's operations name); a needless rebuild only re-drafts the part. Agent-supplied
+  bases (`UpdateConcept` / `RemoveConcept` `base_version`) are kept by every rebuild, so a
+  real concurrent edit still surfaces. Otherwise glossary sides are applied as drafted
+  (draft ids survive apply). A `stale_revision` at apply gets one rebuild and retry; a
+  second is `apply_failed`. A `stale_base` is never refreshed here: `conflict` naming the
+  **entities** (FR-OM-03: OM names its operation ids; Lakeloom reads the change set as the
+  reviewer and maps each id to the operation's target term FQN — OM's term by id, else the
+  term the operation carries, else the part's one matching `UpdateConcept` /
+  `RemoveConcept`; an id that matches nothing is shown as is), hint "call rebase_proposal,
+  then submit_proposal for a new review", status `apply_failed`. Other failures:
+  `apply_failed` with progress stored; `OMForbidden` → `forbidden`; HTTP 401 →
+  `forbidden` "OpenMetadata rejected your session; sign in again". The OM state is stored
+  after every side.
+- **`APPLY_FAILED` (live, rc1, 2026-11-12).** A throwaway glossary (bot) with term `A`; a
+  submitted set with a `CREATE_TERM A` (name taken) applied as alice (exchanged token)
+  answers 200 with state `APPLY_FAILED`, `operationsFailed: 1` and the result message "A
+  term with the name 'A' already exists …"; with an earlier valid `CREATE_TERM C` in the
+  same set that operation is `ROLLED_BACK` ("Rolled back because a later ontology
+  operation failed"): nothing is applied. An `APPLY_FAILED` set can be **applied again**
+  (OM re-runs it: still `APPLY_FAILED` while the cause stays; `APPLIED`, `appliedBy:
+  alice`, once `A` was hard-deleted) and **discarded** (→ `DISCARDED`; discarding or
+  submitting it again is then refused, 400 "transition from DISCARDED to … is not
+  allowed"). So `APPLY_FAILED` does not wedge a proposal: approve again re-runs the set,
+  and reject, discard and rebase discard it like a `SUBMITTED` one. Lakeloom stores the
+  state, raises `upstream_unavailable` quoting OM's failure messages, and hints "approve
+  again to re-run it once the cause is fixed, or call rebase_proposal". Other failures seen
+  in the same probe (unknown term: 404; a stale base: 400) leave the set `SUBMITTED`. All
+  probe entities were hard-deleted; nothing was sealed; `retail` was not touched. A set
+  `APPLIED` with `operationsFailed > 0` (not seen on rc1) is treated as applied and the
+  `ReviewRecord` gets a warning naming the failed operations (approving again would not
+  re-run them).
 - **Realizations** are tagged after all parts (`add_asset_tags` / `remove_asset_tags`,
   term FQN = the concept's FQN, `<model glossary>.<Concept>` for a bare name), skipping op
   keys in `Proposal.realizations_applied`; a tag failure is `apply_failed` and the retry
@@ -429,8 +470,8 @@ audited as `review_proposal`.
   On rc1 this is normally silent (UPDATE_TERM descriptions apply, above). A failed attempt
   also leaves a `ReviewRecord` whose last warning says where it stopped.
 - **Reject** discards every change set that is not applied, as the reviewer (404 = gone);
-  status `rejected`; the reason is stored. **Request changes**: status
-  `changes_requested`, comment stored.
+  status `rejected`; the reason is stored. **Request changes** (on `submitted` or
+  `apply_failed`): status `changes_requested`, comment stored; parts already applied stay.
 - **Reviews are provenance** (FR-REV-03): `Proposal.reviews` is stored with the proposal
   and rendered by `summary_markdown` under "Reviews", reasons as quoted untrusted text.
 - **Open statuses and applied parts (ruling B).** `OPEN_STATUSES` is now `draft`,

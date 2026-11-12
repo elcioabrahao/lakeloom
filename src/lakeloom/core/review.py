@@ -6,19 +6,24 @@
 1. the principal is human ("agent principals cannot review proposals (FR-REV-01)");
 2. it holds ``lakeloom:review``;
 3. the model's ``review_groups`` (:func:`~lakeloom.core.model_policy.require_group`);
-4. reject and request_changes carry a reason or comment (capped like other untrusted text);
-5. the status allows the decision (approve: submitted | apply_failed; reject: submitted |
-   changes_requested | apply_failed; request_changes: submitted). With a confirm token a
-   status that no longer allows it is a ``conflict`` (the previewed state is gone);
-6. an OM client acting as the reviewer (:meth:`OnBehalfOf.om_for`; its errors are final,
+4. the reviewer did not create the proposal (:data:`SELF_REVIEW`; no admin exemption);
+5. reject and request_changes carry a reason or comment (capped like other untrusted text);
+6. the status allows the decision (approve: submitted | apply_failed; reject: submitted |
+   changes_requested | apply_failed; request_changes: submitted | apply_failed). With a
+   confirm token a status that no longer allows it is a ``conflict`` (the previewed state
+   is gone);
+7. an OM client acting as the reviewer (:meth:`OnBehalfOf.om_for`; its errors are final,
    the bot is never a fallback, NFR-SEC-10);
-7. OM grants that user the apply operations (:data:`~lakeloom.om.models.APPLY_PERMISSIONS`)
+8. OM grants that user the apply operations (:data:`~lakeloom.om.models.APPLY_PERMISSIONS`)
    on the glossary and, when paired, the native ontology.
 
-``request_changes`` touches nothing in OM, so it stops after step 5 (no OM identity is
-needed). ``approve`` and ``reject`` are preview -> confirm token -> execute; the token's digest
-binds the reviewer, the decision, the proposal's status and revision and every change set's
-OM version and state (read as the reviewer).
+``request_changes`` touches nothing in OM, so it stops after step 6 (no OM identity is
+needed). Whenever OM answers HTTP 401 to the reviewer's client (its token was rejected or
+expired) the call fails ``forbidden`` (:data:`SESSION_REJECTED`) and
+:meth:`OnBehalfOf.forget` drops the cached exchanged token. ``approve`` and ``reject`` are
+preview -> confirm token -> execute; the token's digest binds the reviewer, the decision,
+the proposal's status and revision and every change set's OM version and state (read as the
+reviewer).
 
 Every OM call of a review goes through the reviewer's client, reads included; the
 :class:`~lakeloom.core.proposals.ProposalService` is used for its lock, its store write and
@@ -30,9 +35,15 @@ first. The glossary side is applied as drafted. Before the native side, a mechan
 draft (its ``baseWorkingRevision`` behind the ontology's ``workingRevision``, typically
 because an earlier part was just applied; or a side a rebuild discarded) is re-drafted from
 the same reviewed operations with ``rebuild_parts(submit=True)`` (old ids kept as
-superseded). A ``stale_revision`` at apply gets one such rebuild and retry; a second one is
-``apply_failed``. A ``stale_base`` (an agent-supplied base version) is never rebuilt here: it
-is a ``conflict`` naming the entities, with the hint to rebase and submit again (FR-OM-03).
+superseded). So is a glossary side that references, through a base version Lakeloom took from
+OM at draft time (relations, mappings, unfolded synonyms; :func:`_derived_bases`), a term an
+earlier applied part changed (:func:`_touched_terms`). A ``stale_revision`` at apply gets one
+such rebuild and retry; a second one is ``apply_failed``. A ``stale_base`` (an agent-supplied
+base version, which no rebuild refreshes) is a ``conflict`` naming the entities (OM's
+operation ids mapped to term FQNs), with the hint to rebase and submit again (FR-OM-03).
+An ``APPLY_FAILED`` result (rc1 rolled the set back and keeps it; it can be applied again or
+discarded, ADR 0012) is ``upstream_unavailable`` quoting OM's messages; ``APPLIED`` with
+failed operations is a warning on the record.
 The OM state is stored after every side. After the parts, realizations are tagged
 (``add_asset_tags`` / ``remove_asset_tags``), skipping op keys in
 ``Proposal.realizations_applied``. Success: status ``applied``, a :class:`ReviewRecord` with
@@ -66,8 +77,15 @@ from lakeloom.core.models import ModelInfo, ModelService
 from lakeloom.core.obo import OnBehalfOf
 from lakeloom.core.operations import (
     MAX_DESCRIPTION_CHARS,
+    AddConcept,
+    AddMapping,
     AddRealization,
+    AddRelation,
+    AddSynonym,
+    RemoveConcept,
+    RemoveMapping,
     RemoveRealization,
+    RemoveRelation,
     UpdateConcept,
     op_key,
 )
@@ -89,22 +107,35 @@ from lakeloom.core.proposals import (
 )
 from lakeloom.errors import LakeloomError
 from lakeloom.om.client import OMClient, OMConflict, OMError, OMForbidden
-from lakeloom.om.models import APPLY_PERMISSIONS, OMChangeSet, OMOntology
+from lakeloom.om.models import (
+    APPLY_PERMISSIONS,
+    OMApplicationResult,
+    OMChangeOperation,
+    OMChangeSet,
+    OMOntology,
+)
 from lakeloom.server.auth import Principal, PrincipalType
 from lakeloom.state.audit import AuditRepository
 from lakeloom.state.proposals import ProposalRepository
 from lakeloom.untrusted import UntrustedText, code_span
 
-__all__ = ["REVIEW_SCOPE", "REVIEW_TOOL", "ReviewService"]
+__all__ = ["REVIEW_SCOPE", "REVIEW_TOOL", "SELF_REVIEW", "SESSION_REJECTED", "ReviewService"]
 
 REVIEW_TOOL: Final = "review_proposal"
 REVIEW_SCOPE: Final = "lakeloom:review"
 AGENT_REFUSED: Final = "agent principals cannot review proposals (FR-REV-01)"
+SELF_REVIEW: Final = "reviewers cannot review their own proposal"
+SESSION_REJECTED: Final = "OpenMetadata rejected your session; sign in again"
+_SESSION_HINT: Final = (
+    "your OpenMetadata token was rejected or has expired (HTTP 401); sign in to Lakeloom "
+    "again and repeat the decision (the proposal keeps its progress)"
+)
 _ALLOWED: Final[dict[str, tuple[str, ...]]] = {
     "approve": ("submitted", "apply_failed"),
     "reject": ("submitted", "changes_requested", "apply_failed"),
-    "request_changes": ("submitted",),
+    "request_changes": ("submitted", "apply_failed"),
 }
+_MAX_FAILED_SHOWN: Final = 3
 _GONE: Final = ("DISCARDED", "MISSING")
 _OM_READS: Final = 8
 _log = logging.getLogger(__name__)
@@ -120,7 +151,9 @@ def _digest(data: dict[str, Any]) -> str:
 
 
 def _typed(exc: OMError, what: str) -> LakeloomError:
-    """An OM error of the review path as a typed error (403 -> ``forbidden``)."""
+    """An OM error of the review path as a typed error (401, 403 -> ``forbidden``)."""
+    if exc.status == 401:
+        return LakeloomError("forbidden", SESSION_REJECTED, _SESSION_HINT)
     if isinstance(exc, OMForbidden):
         detail = f": {code_span(exc.detail)}" if exc.detail else ""
         return LakeloomError(
@@ -154,6 +187,7 @@ class _Run:
     om_user: str | None = None
     warnings: list[str] = field(default_factory=list[str])
     changed: bool = False  # anything reached OM (the model cache is stale)
+    touched: set[str] = field(default_factory=set[str])  # terms applied parts changed
 
 
 class ReviewService:
@@ -217,6 +251,12 @@ class ReviewService:
                 require_group(
                     principal, access_for(self._policies, p.model), "review", model=p.model
                 )
+                if principal.subject == p.provenance.principal_subject:
+                    raise LakeloomError(
+                        "forbidden",
+                        SELF_REVIEW,
+                        "another reviewer must decide on it (ADR 0012); no exemption applies",
+                    )
                 text = self._reason(decision, reason, principal)
                 self._require_status(
                     p,
@@ -226,28 +266,50 @@ class ReviewService:
                 if decision == "request_changes":
                     return await self._request_changes(p, principal, text)
                 om = await self._obo.om_for(principal)
-                info, ontology = await self._require_om_permission(p, om, principal)
-                args = {
-                    "proposal_id": p.id,
-                    "decision": decision,
-                    "principal": principal.subject,
-                    "reason": reason,
-                }
-                digest = await self._state_digest(p, om, principal, decision)
-                if confirm_token is None:
-                    token, expires = self._confirm.issue(REVIEW_TOOL, args, digest)
-                    return ConfirmPreview(
-                        summary=self._preview(p, decision),
-                        confirm_token=token,
-                        expires_at=expires,
-                        diff=diff(p),
+                try:
+                    return await self._decide(
+                        trail, p, om, decision, principal, reason, text, confirm_token
                     )
-                self._confirm.verify(confirm_token, REVIEW_TOOL, args, digest)
-                if decision == "reject":
-                    return await self._reject(trail, p, om, principal, text)
-                return await self._approve(trail, p, om, info, ontology, principal, text)
+                except Exception:
+                    if not om.session_rejected:
+                        raise
+                    self._obo.forget(principal)  # exchange again on the next call
+                    raise LakeloomError("forbidden", SESSION_REJECTED, _SESSION_HINT) from None
 
         return await self._audited(principal, client, run)
+
+    async def _decide(
+        self,
+        trail: AuditContext,
+        p: Proposal,
+        om: OMClient,
+        decision: ReviewDecision,
+        principal: Principal,
+        reason: str | None,
+        text: UntrustedText | None,
+        confirm_token: str | None,
+    ) -> Proposal | ConfirmPreview:
+        """Steps 7 on, approve and reject, every OM call through the reviewer's ``om``."""
+        info, ontology = await self._require_om_permission(p, om, principal)
+        args = {
+            "proposal_id": p.id,
+            "decision": decision,
+            "principal": principal.subject,
+            "reason": reason,
+        }
+        digest = await self._state_digest(p, om, principal, decision)
+        if confirm_token is None:
+            token, expires = self._confirm.issue(REVIEW_TOOL, args, digest)
+            return ConfirmPreview(
+                summary=self._preview(p, decision),
+                confirm_token=token,
+                expires_at=expires,
+                diff=diff(p),
+            )
+        self._confirm.verify(confirm_token, REVIEW_TOOL, args, digest)
+        if decision == "reject":
+            return await self._reject(trail, p, om, principal, text)
+        return await self._approve(trail, p, om, info, ontology, principal, text)
 
     # -- checks ------------------------------------------------------------------------------
 
@@ -444,6 +506,8 @@ class ReviewService:
             for part in p.parts:
                 if not fully_applied(part):
                     await self._apply_part(trail, p, part, om, ontology, run)
+                if part.om_state.get("glossary") == "APPLIED":
+                    run.touched |= _touched_terms(part, p.model)
             await self._realize(p, om, info, run)
         except BaseException as exc:
             p.status = "apply_failed"
@@ -497,7 +561,11 @@ class ReviewService:
             cs = await self._refresh(part, side, om)
             if part.om_state.get(side) == "APPLIED":
                 continue
-            if not rebuilt and await self._stale(part, side, cs, om, ontology):
+            # Rulings A and the derived-base extension: rebuild a mechanically stale side once
+            derived = side == "glossary" and not _derived_bases(part, p.model).isdisjoint(
+                run.touched
+            )
+            if not rebuilt and (derived or await self._stale(part, side, cs, om, ontology)):
                 await self._rebuild(trail, p, part, om)
                 rebuilt = True
             for attempt in (1, 2):
@@ -509,7 +577,7 @@ class ReviewService:
                         await self._rebuild(trail, p, part, om)  # a race since the check
                         rebuilt = True
                         continue
-                    raise self._conflict(p, part, side, exc) from None
+                    raise await self._conflict(p, part, side, exc, om) from None
 
     async def _refresh(self, part: ProposalPart, side: Side, om: OMClient) -> OMChangeSet | None:
         """Store-side state of ``side`` updated from OM (a set applied by an earlier attempt
@@ -575,27 +643,35 @@ class ReviewService:
         result = cs.application_result
         if result is not None and result.applied_by:
             run.om_user = run.om_user or result.applied_by
-        if str(cs.state) != "APPLIED" or (result is not None and result.operations_failed):
-            failed = 0 if result is None else result.operations_failed
+        failed = 0 if result is None else result.operations_failed
+        if str(cs.state) != "APPLIED":
             await self._proposals.save(p)
             raise LakeloomError(
                 "upstream_unavailable",
                 f"OpenMetadata did not apply change set {cs_id} (state {cs.state}, "
-                f"{failed} operation(s) failed)",
-                "call get_proposal to see the change set in OpenMetadata; approve again to "
-                "retry, or rebase_proposal to re-draft it",
+                f"{failed} operation(s) failed{_failures(result)})",
+                "OpenMetadata rolled the change set back and keeps it: approve again to re-run "
+                "it once the cause is fixed, or call rebase_proposal to re-draft it from "
+                "OpenMetadata's current state (ADR 0012)",
+            )
+        if failed:  # applied, yet OM reports failed operations: a retry would not re-run them
+            run.warnings.append(
+                f"OpenMetadata applied change set {cs_id} but reports {failed} failed "
+                f"operation(s){_failures(result)}; check it in OpenMetadata and propose the "
+                "missing changes again"
             )
         run.applied.append(cs_id)
         if side == "glossary":
             run.warnings.extend(await self._description_check(p, part, om))
         await self._proposals.save(p)
 
-    def _conflict(
-        self, p: Proposal, part: ProposalPart, side: Side, exc: OMConflict
+    async def _conflict(
+        self, p: Proposal, part: ProposalPart, side: Side, exc: OMConflict, om: OMClient
     ) -> LakeloomError:
         cs_id = part.change_set_ids.get(side)
-        ids = ", ".join(code_span(e) for e in exc.entities) or "not named by OpenMetadata"
         if exc.kind == "stale_base":
+            names = await self._entity_names(p, part, cs_id, exc.entities, om)
+            ids = ", ".join(code_span(e) for e in names) or "not named by OpenMetadata"
             return LakeloomError(
                 "conflict",
                 f"OpenMetadata refused to apply change set {cs_id} of proposal {p.id}: a base "
@@ -610,6 +686,58 @@ class ReviewService:
                 "approve again to retry (the part is re-drafted from the reviewed operations)",
             )
         return map_om_error(exc, f"applying change set {cs_id}")
+
+    async def _entity_names(
+        self,
+        p: Proposal,
+        part: ProposalPart,
+        cs_id: str | None,
+        entities: Sequence[str],
+        om: OMClient,
+    ) -> list[str]:
+        """FR-OM-03: the entities behind the operation ids OM named in a stale-base refusal
+        (read as the reviewer); an id that matches nothing is kept as it is."""
+        if not entities or cs_id is None:
+            return list(entities)
+        try:
+            cs = await om.get_change_set(cs_id)
+        except (OMError, ValueError):
+            cs = None
+        ops = {} if cs is None else {o.id.lower(): o for o in cs.operations}
+        out: list[str] = []
+        for entity in entities:
+            op = ops.get(entity.lower())
+            name = None if op is None else await self._target_name(p, part, op, om)
+            out.append(name or entity)
+        return list(dict.fromkeys(out))
+
+    @staticmethod
+    async def _target_name(
+        p: Proposal, part: ProposalPart, op: OMChangeOperation, om: OMClient
+    ) -> str | None:
+        """The FQN of the term an OM operation targets: OM's term by id, else the term the
+        operation carries, else the one agent-based operation of the part it can be."""
+        if op.target_id is not None:
+            try:
+                found = await om.get_term(op.target_id, ())
+            except (OMError, ValueError):
+                found = None
+            if found is not None and found.fully_qualified_name:
+                return found.fully_qualified_name
+        name = (op.term or {}).get("name")
+        if isinstance(name, str) and name:
+            return f"{p.model}.{name}"
+        kind = {"UPDATE_TERM": UpdateConcept, "DELETE_TERM": RemoveConcept}.get(op.operation_type)
+        if kind is None or op.base_version is None:
+            return None
+        matches = [
+            o.fqn
+            for o in part.operations
+            if isinstance(o, kind) and float(o.base_version) == op.base_version
+        ]
+        if len(matches) != 1:
+            return None
+        return matches[0] if matches[0].startswith(f"{p.model}.") else f"{p.model}.{matches[0]}"
 
     async def _description_check(self, p: Proposal, part: ProposalPart, om: OMClient) -> list[str]:
         """ADR 0012: rc1 applies UPDATE_TERM descriptions; say so when OM holds another."""
@@ -721,3 +849,54 @@ class ReviewService:
             error_code=code,
         )
         await record(self._audit, rec)
+
+
+def _local(ref: str, model: str) -> str:
+    return ref.removeprefix(f"{model}.")
+
+
+def _touched_terms(part: ProposalPart, model: str) -> set[str]:
+    """Terms (local names) whose OM version applying the part's glossary side may move.
+    Over-inclusive on purpose: a needless rebuild of a later part is harmless."""
+    out: set[str] = set()
+    for op in part.operations:
+        if isinstance(op, UpdateConcept | RemoveConcept):
+            out.add(op.fqn)
+        elif isinstance(op, AddConcept):
+            out.add(op.name)
+        elif isinstance(op, AddSynonym):
+            out.add(op.concept_fqn)
+        elif isinstance(op, AddRelation | RemoveRelation):
+            out |= {op.source, op.target}
+        elif isinstance(op, AddMapping | RemoveMapping):
+            out.add(op.concept)
+    return {_local(name, model) for name in out}
+
+
+def _derived_bases(part: ProposalPart, model: str) -> set[str]:
+    """Terms (local names) the part's glossary side references through a base version
+    Lakeloom took from OM when drafting, not from the agent: relations and mappings (the
+    source term's version) and synonyms not folded into an ``UpdateConcept``. Such a base
+    goes mechanically stale when an earlier part changes the term (ADR 0012 § Review)."""
+    agent = {_local(op.fqn, model) for op in part.operations if isinstance(op, UpdateConcept)}
+    out: set[str] = set()
+    for op in part.operations:
+        if isinstance(op, AddRelation | RemoveRelation):
+            out.add(_local(op.source, model))
+        elif isinstance(op, AddMapping | RemoveMapping):
+            out.add(_local(op.concept, model))
+        elif isinstance(op, AddSynonym) and _local(op.concept_fqn, model) not in agent:
+            out.add(_local(op.concept_fqn, model))
+    return out
+
+
+def _failures(result: OMApplicationResult | None) -> str:
+    """``: <message>, ...`` of the operations OM reports FAILED (quoted, at most a few)."""
+    if result is None:
+        return ""
+    messages = [r.message for r in result.results if r.status == "FAILED" and r.message]
+    if not messages:
+        return ""
+    shown = ", ".join(code_span(m) for m in messages[:_MAX_FAILED_SHOWN])
+    more = len(messages) - _MAX_FAILED_SHOWN
+    return f": {shown}" + (f" and {more} more" if more > 0 else "")

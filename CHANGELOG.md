@@ -87,6 +87,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - M2b acceptance contract test: agents and callers without `lakeloom:review` or
     OpenMetadata's reviewer permission are refused, and OpenMetadata records the human
     reviewer as the one who applied (FR-REV-01, FR-REV-02).
+  - Reviewers cannot review their own proposals; `request_changes` also works on
+    `apply_failed` proposals.
+  - A later part referencing (through a relation, mapping or synonym) a term an earlier part
+    of the same approve changed is re-drafted once instead of failing as stale; a stale-base
+    conflict names the affected terms instead of OpenMetadata operation ids (FR-OM-03).
+  - OpenMetadata rejecting a reviewer's token (HTTP 401) is `forbidden` with a sign-in hint
+    and drops the cached exchanged token; reviewer clients sharing the OpenMetadata
+    connection pool keep no cookies.
+  - `LAKELOOM_OM_EXCHANGE_SCOPE` is unset by default (the dev stack sets
+    `openmetadata-audience`).
 
 ### Fixed
 

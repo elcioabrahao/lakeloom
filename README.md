@@ -379,11 +379,15 @@ plain language and calls `review_proposal` only on their explicit decision.
   failed approve leaves `apply_failed` with its progress; approving again continues.
 - **Human identity.** The approval reaches OpenMetadata as the reviewer, never as the bot. Lakeloom
   either exchanges the reviewer's token for an OpenMetadata one (token exchange) or forwards it
-  (`LAKELOOM_OM_FORWARD_USER_TOKEN`); with neither available it fails closed with a typed error
+  (`LAKELOOM_OM_FORWARD_USER_TOKEN=true` together with `LAKELOOM_OIDC_TOKEN_EXCHANGE=false`);
+  with neither available it fails closed with a typed error
   and applies nothing. OpenMetadata must grant the reviewer the apply permissions (role
   `LakeloomOntologyReviewer`). `request_changes` needs no OpenMetadata identity. See ADR 0012.
   OpenMetadata records the reviewer: `applicationResult.appliedBy`, the terms' `updatedBy` and
-  the realization tags' `appliedBy` name them.
+  the realization tags' `appliedBy` name them. When OpenMetadata rejects the reviewer's
+  token (HTTP 401) the decision fails `forbidden` and the reviewer signs in again.
+- **No self-review.** A reviewer cannot approve, reject or request changes on a proposal they
+  created themselves (`forbidden`, no admin exemption).
 - **Dev stack.** The Lakeloom container uses token exchange as the confidential client
   `lakeloom` (secret `dev-lakeloom-secret`, DEV ONLY) on the compose-network token endpoint
   (`LAKELOOM_OIDC_TOKEN_ENDPOINT`), because the issuer host `localhost:8180` is not reachable
