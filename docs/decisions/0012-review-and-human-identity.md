@@ -464,10 +464,14 @@ the exchange on the compose-network host works for tokens issued by `localhost:8
 Forward mode cannot work in this stack (OM refuses `aud: lakeloom`, above).
 
 `tests/contract/test_m2b_acceptance.py` runs the whole flow over real `/mcp` with Keycloak
-tokens on a throwaway model (`retail_m2b_<hex>`, hard-deleted, never sealed): the agent and
-bob are refused by the `lakeloom:review` scope check (nothing is read or applied), carol by
-OM's permission; alice's approval applies every change set with
-`applicationResult.appliedBy == "alice"` and the new terms are `updatedBy` alice; reject,
+tokens on a throwaway model (`retail_m2b_<hex>`, hard-deleted, never sealed): the default
+agent tokens and bob are refused by the `lakeloom:review` scope check (nothing is read or
+applied); an agent token that requested the realm's optional `lakeloom:review` scope passes
+that gate and is refused by the review service for approve, reject and request_changes
+(`forbidden` "agent principals cannot review proposals (FR-REV-01)", audited with the
+proposal id); carol is refused by OM's permission; alice's approval applies every change set
+with `applicationResult.appliedBy == "alice"`, the new terms are `updatedBy` alice and the
+realization tag on `orders` has `appliedBy` alice; reject,
 request changes and the agent's re-draft, the stale-base conflict and rebase, and a re-scan
 after apply are covered, as are the audit rows (`principal_type` human for every decision).
 Live findings of that run:
@@ -483,7 +487,8 @@ Live findings of that run:
   `R-DEDUPE`) and nothing else, and once those are applied a further scan has nothing new.
 - **Scope refusals carry no proposal id in the audit.** `guarded` refuses a missing
   `lakeloom:review` before the call body runs, so those rows have the principal and the
-  tool but no model or proposal; refusals inside the service (carol) carry both.
+  tool but no model or proposal. The service's agent refusal carries the proposal id but no
+  model (it comes before the proposal is read); carol's refusal carries both.
 - **Caches outlive an OM-side delete.** Lakeloom caches OM tables and models for
   `model_cache_ttl_seconds` (60 in dev); after a model's glossary is hard-deleted in OM,
   the asset context of a table that realized it is `not_found` until the TTL expires. The

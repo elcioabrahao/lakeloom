@@ -6,7 +6,10 @@ approves (NFR-SEC-10). The tests share one throwaway model ``retail_m2b_<hex>`` 
 run) and run in file order:
 
 1. the agent bootstraps the model from fixture_delta and submits; approving with the agent's
-   token or bob's (no ``lakeloom:review``) is refused and nothing is applied;
+   default tokens or bob's (no ``lakeloom:review``) is refused by the scope gate; an agent
+   token that requested the realm's optional ``lakeloom:review`` passes it and is refused by
+   the review service ("agent principals cannot review proposals", audited with the
+   proposal) for every decision; nothing is applied;
 2. carol has ``lakeloom:review`` but no OM reviewer role: refused by OM's permission;
 3. alice previews and confirms: every change set is APPLIED with ``appliedBy == "alice"``, the
    terms are ``updatedBy`` alice, the native classes and attributes exist; the mapper proposes
@@ -24,8 +27,9 @@ run) and run in file order:
 
 Teardown (module finalizer, runs on failure too) discards open proposals, hard-deletes every
 change set, the ontology and the glossary (recursive), checks they are gone, that no table
-keeps a tag of the throwaway glossary and that the seeded ``retail`` glossary is untouched,
-then waits until Lakeloom's caches no longer name the deleted model (TTL 60 s in dev).
+keeps a tag of the throwaway glossary; then (even when those checks fail) waits until
+Lakeloom's caches no longer name the deleted model (TTL 60 s in dev) and checks that the
+seeded ``retail`` glossary and ontology are untouched.
 No release is sealed. Tokens are never printed or put in assertion messages (NFR-SEC-11).
 """
 
@@ -43,10 +47,11 @@ import pytest
 import pytest_asyncio
 from mcp.types import CallToolResult
 from pydantic import SecretStr
-from stack import mcp_session
+from stack import TOKEN_URL, mcp_session, token_scopes
 
 from lakeloom.core.audit import AuditRecord
 from lakeloom.core.proposals import REBASE_HINT
+from lakeloom.core.review import AGENT_REFUSED
 from lakeloom.om.client import OMClient
 from lakeloom.state.audit import AuditRepository
 from lakeloom.state.db import create_engine
@@ -92,11 +97,44 @@ class Tokens:
     alice: str = field(repr=False)
     bob: str = field(repr=False)
     carol: str = field(repr=False)
+    agent_review: str = field(repr=False)  # lakeloom-agent WITH the optional lakeloom:review
+
+
+@dataclass(frozen=True)
+class Secrets:
+    """The run fixture's credentials, wrapped before anything in it can fail (NFR-SEC-11)."""
+
+    agent: str = field(repr=False)
+    bot: str = field(repr=False)
+
+
+def _agent_review_token() -> Token:
+    """lakeloom-agent's client_credentials token requesting the realm's optional
+    ``lakeloom:review`` scope: an agent that passes the scope gate (FR-REV-01)."""
+    r = httpx.post(
+        TOKEN_URL,
+        data={
+            "grant_type": "client_credentials",
+            "client_id": "lakeloom-agent",
+            "client_secret": "dev-agent-secret",  # DEV ONLY fixed public dev credential
+            "scope": "lakeloom:review",
+        },
+        timeout=10,
+    )
+    assert r.status_code == 200, f"token request failed: {r.status_code}"  # no body: a token
+    return Token(str(r.json()["access_token"]))
+
+
+# These fixtures only wrap (nothing in them can fail), so no frame holding a raw token fails.
+@pytest.fixture(scope="module")
+def who(admin_agent_token: str, human_token: str, bob_token: str, carol_token: str) -> Tokens:
+    raw = (admin_agent_token, human_token, bob_token, carol_token)
+    return Tokens(*(Token(t) for t in raw), agent_review=_agent_review_token())
 
 
 @pytest.fixture(scope="module")
-def who(admin_agent_token: str, human_token: str, bob_token: str, carol_token: str) -> Tokens:
-    return Tokens(*(Token(t) for t in (admin_agent_token, human_token, bob_token, carol_token)))
+def secrets(agent_token: str, om_bot_token: str) -> Secrets:
+    return Secrets(Token(agent_token), Token(om_bot_token))
 
 
 async def call(url: str, token: str, tool: str, args: dict[str, Any]) -> CallToolResult:
@@ -152,6 +190,14 @@ async def _table_tags(om: httpx.AsyncClient, table: str) -> set[str]:
     for column in body.get("columns") or []:
         tags |= {t["tagFQN"] for t in column.get("tags") or []}
     return tags
+
+
+async def _table_tag(om: httpx.AsyncClient, table: str, tag: str) -> dict[str, Any]:
+    """The table-level tag label ``tag`` of a fixture table."""
+    r = await om.get(f"/api/v1/tables/name/{OM_TABLE.format(table)}", params={"fields": "tags"})
+    labels = [t for t in r.raise_for_status().json().get("tags") or [] if t["tagFQN"] == tag]
+    assert len(labels) == 1, (table, tag)
+    return dict(labels[0])
 
 
 async def _review(
@@ -221,16 +267,14 @@ async def _teardown(run: Run) -> None:
     for table in TABLES:
         left = {t for t in await _table_tags(om, table) if t.startswith(f"{run.slug}.")}
         assert not left, (table, left)
-    await _wait_for_lakeloom_caches(run)
 
 
 async def _wait_for_lakeloom_caches(run: Run) -> None:
     """Lakeloom caches OM tables and models for ``model_cache_ttl_seconds`` (60 in dev); a
     model deleted behind its back makes the asset context of the tables that realized it
     ``not_found`` until then. Wait it out so the next contract module sees a clean stack."""
-    headers = {"Authorization": f"Bearer {run.agent}"}
     deadline = asyncio.get_running_loop().time() + CACHE_WAIT_SECONDS
-    async with httpx.AsyncClient(base_url=run.url, headers=headers, timeout=30) as api:
+    async with httpx.AsyncClient(base_url=run.url, headers=_bearer(run.agent), timeout=30) as api:
         for table in TABLES:
             while True:
                 r = await api.get(f"/v1/assets/{OM_TABLE.format(table)}/context")
@@ -240,27 +284,43 @@ async def _wait_for_lakeloom_caches(run: Run) -> None:
                 await asyncio.sleep(2)
 
 
+def _bearer(token: str) -> httpx.Headers:
+    """Headers kept in no named local: ``pytest -l`` would print a dict holding the token."""
+    return httpx.Headers({"Authorization": f"Bearer {token}"})
+
+
+async def _retail(om: httpx.AsyncClient) -> list[tuple[Any, Any]]:
+    """Version and updatedAt of the seeded ``retail`` glossary and ontology."""
+    out: list[tuple[Any, Any]] = []
+    for kind in ("glossaries", "ontologies"):
+        body = (await om.get(f"/api/v1/{kind}/name/retail")).raise_for_status().json()
+        out.append((body["version"], body["updatedAt"]))
+    return out
+
+
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
-async def run(
-    lakeloom_url: str, agent_token: str, om_url: str, om_bot_token: str
-) -> AsyncIterator[Run]:
-    headers = {"Authorization": f"Bearer {om_bot_token}"}  # read-only checks + teardown
-    async with httpx.AsyncClient(base_url=om_url, headers=headers, timeout=60) as om:
-        retail = (await om.get("/api/v1/glossaries/name/retail")).raise_for_status().json()
+async def run(lakeloom_url: str, om_url: str, secrets: Secrets) -> AsyncIterator[Run]:
+    # the bot: read-only checks and the teardown only
+    async with httpx.AsyncClient(base_url=om_url, headers=_bearer(secrets.bot), timeout=60) as om:
+        retail = await _retail(om)
         state = Run(
             url=lakeloom_url,
-            agent=Token(agent_token),
+            agent=secrets.agent,
             om=om,
-            bot_token=om_bot_token,
+            bot_token=secrets.bot,
             slug=f"retail_m2b_{uuid.uuid4().hex[:8]}",
             started=datetime.now(UTC) - timedelta(seconds=2),  # audit rows of this run
         )
         try:
             yield state
         finally:
-            await _teardown(state)
-        after = (await om.get("/api/v1/glossaries/name/retail")).raise_for_status().json()
-        assert (after["version"], after["updatedAt"]) == (retail["version"], retail["updatedAt"])
+            try:
+                await _teardown(state)
+            finally:
+                try:
+                    await _wait_for_lakeloom_caches(state)
+                finally:
+                    assert await _retail(om) == retail, "the seeded retail model changed"
 
 
 def _main(run: Run) -> str:
@@ -297,12 +357,16 @@ async def test_m2b_agent_cannot_approve(run: Run, who: Tokens) -> None:
     run.main = pid
 
     approve = {"proposal_id": pid, "decision": "approve"}
-    for token in (run.agent, who.admin):
+    no_scope = "review_proposal requires the lakeloom:review scope"
+    for token in (run.agent, who.admin, who.bob):  # refused by the scope gate (guarded)
         refused = error(await call(run.url, token, "review_proposal", approve))
-        assert refused["code"] == "forbidden", refused
-        assert "lakeloom:review" in refused["message"] or "agent" in refused["message"], refused
-    refused = error(await call(run.url, who.bob, "review_proposal", approve))
-    assert refused["code"] == "forbidden" and "lakeloom:review" in refused["message"], refused
+        assert (refused["code"], refused["message"]) == ("forbidden", no_scope), refused
+    # an agent holding lakeloom:review passes the gate and is refused by the review service
+    assert "lakeloom:review" in token_scopes(who.agent_review)
+    for decision in ("approve", "reject", "request_changes"):
+        args = {"proposal_id": pid, "decision": decision, "reason": "agent decision"}
+        refused = error(await call(run.url, who.agent_review, "review_proposal", args))
+        assert (refused["code"], refused["message"]) == ("forbidden", AGENT_REFUSED), refused
     refused = error(await call(run.url, who.bob, "list_pending_reviews", {}))
     assert refused["code"] == "forbidden", refused
 
@@ -380,6 +444,8 @@ async def test_m2b_alice_approves_and_om_records_alice(run: Run, who: Tokens) ->
     assert tagged["proposal"]["status"] == "applied"
     assert tagged["proposal"]["realizations_applied"]
     assert f"{run.slug}.Order" in await _table_tags(run.om, "orders")
+    label = await _table_tag(run.om, "orders", f"{run.slug}.Order")
+    assert label.get("appliedBy") == REVIEWER, label.get("appliedBy")
 
     explained = ok(
         await call(run.url, who.alice, "explain_concept", {"concept": f"{run.slug}.Order"})
@@ -524,7 +590,7 @@ async def test_m2b_rescan_no_duplicates_after_apply(run: Run, who: Tokens) -> No
     assert all(op["concept"].startswith(f"{run.slug}.") for op in ops)
     assert all("R-DEDUPE" in op["rule_ids"] for op in ops)
     proposed = {(op["concept"].rsplit(".", 1)[-1], op["asset_fqn"], op["column"]) for op in ops}
-    already = {  # applied by the earlier tests
+    already = {  # proposed by the earlier tests: applied, except orders.customer_id (rejected)
         ("Order", OM_TABLE.format("orders"), None),
         ("Customer", OM_TABLE.format("customers"), None),
         ("Order", OM_TABLE.format("invoices"), "order_id"),
@@ -572,9 +638,12 @@ async def test_m2b_audit_has_human_rows_for_every_decision(run: Run) -> None:
         assert all(r.principal_type == "human" for r in decided), (pid, decision)
     ok_rows = [r for r in reviews if r.result == "ok"]
     assert all(r.principal_type == "human" for r in ok_rows)
-    # carol: refused by OM's permission, after the proposal was read
-    carol = [r for r in reviews if r.proposal_id == run.main and r.result == "forbidden"]
-    assert [r.principal_type for r in carol] == ["human"]
+    # in the service, with the proposal: the agent holding lakeloom:review (approve, reject,
+    # request_changes; FR-REV-01), then carol (OM's permission)
+    in_service = [r for r in reviews if r.proposal_id == run.main and r.result == "forbidden"]
+    assert [r.principal_type for r in in_service] == ["agent", "agent", "agent", "human"]
+    # the agent is refused before the proposal is read (no model yet); carol after it
+    assert [r.model for r in in_service] == [None, None, None, run.slug]
     # the agents and bob: refused by the scope check, before any proposal is read
     by_scope = [
         r.principal_type
