@@ -7,6 +7,9 @@ compare-and-set on the proposal's ``revision`` so two writers can never silently
 each other.
 """
 
+import base64
+import binascii
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -20,11 +23,20 @@ from lakeloom.state.models import Base
 if TYPE_CHECKING:
     from lakeloom.core.proposals import Proposal
 
-__all__ = ["OPEN_STATUSES", "ProposalRepository", "ProposalRow"]
+__all__ = [
+    "OPEN_STATUSES",
+    "PENDING_STATUSES",
+    "ProposalRepository",
+    "ProposalRow",
+    "decode_cursor",
+    "encode_cursor",
+]
 
 # Proposals whose operations are still pending in OM (dedupe treats their ops as proposed)
 # and that can still be discarded: a review asked for changes, or an apply stopped part-way.
 OPEN_STATUSES = ("draft", "submitted", "changes_requested", "apply_failed")
+# awaiting a reviewer: submitted, or an approval that stopped part-way
+PENDING_STATUSES = ("submitted", "apply_failed")
 _WIDTHS = {"principal_subject": 255, "principal_type": 64, "client": 255}
 
 
@@ -71,6 +83,27 @@ def _from_row(row: ProposalRow) -> "Proposal":
     from lakeloom.core.proposals import Proposal
 
     return Proposal.model_validate(row.payload)
+
+
+def encode_cursor(proposal_id: str) -> str:
+    return base64.urlsafe_b64encode(proposal_id.encode()).decode()
+
+
+def decode_cursor(cursor: str | None) -> str | None:
+    if not cursor:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(cursor.encode("ascii"))
+        value = raw.decode()
+        if base64.urlsafe_b64encode(raw).decode() != cursor or not value:
+            raise ValueError(cursor)
+    except (binascii.Error, UnicodeError, ValueError) as exc:
+        raise LakeloomError(
+            "validation_error",
+            "Invalid cursor",
+            "pass the next_cursor from a previous list_pending_reviews call, or omit it",
+        ) from exc
+    return value
 
 
 def _not_found(proposal_id: str) -> LakeloomError:
@@ -134,6 +167,28 @@ class ProposalRepository:
         async with self._sessions() as session:
             rows = list((await session.execute(stmt)).scalars())
         return [_from_row(r) for r in rows]
+
+    async def list_by_status(
+        self, statuses: Sequence[str], model: str | None, cursor: str | None, limit: int
+    ) -> "tuple[list[Proposal], str | None]":
+        """Proposals in ``statuses`` (of ``model`` when given), oldest first (ids are ULIDs).
+
+        ``cursor`` is the opaque ``next_cursor`` of a previous call (``validation_error`` when
+        it is not one). Returns up to ``limit`` proposals and the cursor of the next page, or
+        ``None`` on the last page.
+        """
+        after = decode_cursor(cursor)
+        stmt = select(ProposalRow).where(ProposalRow.status.in_(list(statuses)))
+        if model is not None:
+            stmt = stmt.where(ProposalRow.model == model)
+        if after is not None:
+            stmt = stmt.where(ProposalRow.id > after)
+        stmt = stmt.order_by(ProposalRow.id).limit(limit + 1)
+        async with self._sessions() as session:
+            rows = list((await session.execute(stmt)).scalars())
+        page = rows[:limit]
+        more = len(rows) > limit
+        return [_from_row(r) for r in page], encode_cursor(page[-1].id) if more else None
 
     async def pending_op_keys(self, model: str) -> dict[str, str]:
         """``op_key`` -> proposal id of every operation in an open proposal of ``model``

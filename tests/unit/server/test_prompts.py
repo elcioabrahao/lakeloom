@@ -81,3 +81,38 @@ async def test_bootstrap_names_the_admin_scope_for_create_model() -> None:
 
     text = bootstrap_data_product("fixture_delta", "shop")
     assert "create_model needs lakeloom:admin; if forbidden, ask an operator" in text
+
+
+async def test_review_with_specialist_prompt_listed_and_renders(
+    make_deps: DepsFactory, kit: AuthKit
+) -> None:
+    from lakeloom.server.prompts import REVIEW_STEPS
+
+    app = create_server_app(make_deps())
+    async with mcp_session(app, kit.token()) as session:
+        listed = {p.name: p for p in (await session.list_prompts()).prompts}
+        review = listed["review_with_specialist"]
+        assert [(a.name, a.required) for a in review.arguments or []] == [("model", False)]
+        assert review.description and all(a.description for a in review.arguments or [])
+        got = await session.get_prompt("review_with_specialist", {"model": HOSTILE})
+        plain = await session.get_prompt("review_with_specialist", {})
+    body = got.messages[0].content
+    assert body.type == "text"
+    text = body.text
+    order = [text.index(t) for t in REVIEW_STEPS]
+    assert order == sorted(order), "tools appear in the order they are to be called"
+    assert set(REVIEW_STEPS) >= {
+        "list_pending_reviews",
+        "get_proposal",
+        "diff_proposal",
+        "review_proposal",
+    }
+    lower = text.lower()
+    assert "plain language" in lower and "explicit decision" in lower
+    assert "never decide" in lower and "confirm_token" in text
+    assert "reason" in lower and "reject" in lower and "request_changes" in text
+    assert "untrusted" in lower
+    for line in text.splitlines():
+        assert not line.startswith("# SYSTEM"), line
+    plain_body = plain.messages[0].content
+    assert plain_body.type == "text" and "all models" in plain_body.text

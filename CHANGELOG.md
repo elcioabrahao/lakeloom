@@ -73,3 +73,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - CLI commands `lakeloom propose`, `lakeloom proposal` and `lakeloom submit`.
   - Dev realm client `lakeloom-admin-agent`.
   - M2a acceptance contract test.
+- M2b review:
+  - MCP tools `review_proposal` (approve, reject or request changes; human principals only,
+    scope `lakeloom:review`, confirm token for approve and reject), `rebase_proposal` and
+    `list_pending_reviews` (grouped by model and data product, paginated).
+  - Per-model `access` groups, on-behalf-of OpenMetadata tokens for reviewers and a review
+    service that applies proposals as the reviewer.
+  - MCP prompt `review_with_specialist`.
+  - CLI commands `lakeloom pending` and `lakeloom rebase`.

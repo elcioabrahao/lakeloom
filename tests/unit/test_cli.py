@@ -359,3 +359,46 @@ def test_cli_operator_acts_as_admin_on_proposals() -> None:
 
     actor = _actor()
     assert actor.type == "human" and "lakeloom:admin" in actor.scopes
+
+
+def test_cli_pending_and_rebase(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from lakeloom.core.pending import PendingPage, PendingReview
+
+    fake = _fake_proposals(monkeypatch, tmp_path)
+
+    async def list_pending(principal: Any, **kw: Any) -> Any:
+        fake.calls.append(("list_pending", (principal, kw)))
+        entry = PendingReview(
+            id="prop_9",
+            model="shop",
+            status="submitted",
+            data_product="retail.sales",
+            data_products=["retail.sales"],
+            parts=1,
+            operations={"add_concept": 1},
+            proposer="op",
+            proposer_type="human",
+            age_seconds=7200,
+        )
+        return PendingPage(items=[entry])
+
+    async def rebase(proposal_id: str, **kw: Any) -> Any:
+        fake.calls.append(("rebase", (proposal_id, kw)))
+        return fake.p.model_copy(update={"warnings": ["Customer base refreshed"]})
+
+    fake.list_pending = list_pending  # pyright: ignore[reportAttributeAccessIssue]
+    fake.rebase = rebase  # pyright: ignore[reportAttributeAccessIssue]
+    runner = CliRunner()
+
+    pending = runner.invoke(app, ["pending", "--model", "shop"])
+    rebased = runner.invoke(app, ["rebase", "prop_9"])
+
+    assert pending.exit_code == 0, pending.output
+    assert "shop" in pending.output and "retail.sales" in pending.output
+    assert "prop_9" in pending.output and "submitted" in pending.output
+    name, (principal, kw) = fake.calls[0]
+    assert name == "list_pending" and kw["model"] == "shop" and kw["exclude_own"] is False
+    assert principal.type == "human"
+    assert rebased.exit_code == 0, rebased.output
+    assert "# Proposal `prop_9`" in rebased.output and "Customer base refreshed" in rebased.output
+    assert fake.calls[1][0] == "rebase" and fake.calls[1][1][1]["client"] == "lakeloom-cli"

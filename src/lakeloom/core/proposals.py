@@ -5,7 +5,7 @@ A :class:`Proposal` is a list of :class:`ProposalPart`. Each part holds at most
 submitted and discarded together (hybrid model, ADR 0011): ``glossary`` (terms, relations,
 mappings) named ``lakeloom-<proposal id>-<n>`` and ``native`` (classes, attributes, axioms)
 named ``lakeloom-<proposal id>-<n>-native``. A part of realizations only has no change set:
-realizations are Lakeloom-side until approval (M2b). Nothing is ever applied here.
+realizations are Lakeloom-side until approval (review_proposal). Nothing is ever applied here.
 
 ``propose_from_scan`` maps a scan (:mod:`lakeloom.core.mapper`), removes what already exists
 or is pending (:mod:`lakeloom.core.dedupe`), drops relations whose relationship type does not
@@ -70,7 +70,7 @@ import weakref
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import quote
 
 from pydantic import BaseModel, Field
@@ -120,6 +120,9 @@ from lakeloom.state.ids import new_ulid_id
 from lakeloom.state.proposals import OPEN_STATUSES, ProposalRepository
 from lakeloom.state.scans import ScanRecord, ScanRepository
 from lakeloom.untrusted import UntrustedText, code_span, quote_untrusted, single_line
+
+if TYPE_CHECKING:
+    from lakeloom.core.pending import PendingPage
 
 __all__ = [
     "DISCARD_TOOL",
@@ -1854,6 +1857,28 @@ class ProposalService:
 
     def summary_markdown(self, p: Proposal) -> str:
         return summary_markdown(p)
+
+    async def list_pending(
+        self,
+        principal: Caller,
+        *,
+        model: str | None = None,
+        cursor: str | None = None,
+        limit: int = 20,
+        exclude_own: bool = True,
+    ) -> "PendingPage":
+        """FR-REV-05: proposals awaiting ``principal`` (see :mod:`lakeloom.core.pending`)."""
+        from lakeloom.core.pending import list_pending
+
+        return await list_pending(
+            self._repo,
+            self._policies,
+            principal,
+            model=model,
+            cursor=cursor,
+            limit=limit,
+            exclude_own=exclude_own,
+        )
 
     def diff(self, p: Proposal) -> ProposalDiff:
         return diff(p)

@@ -440,6 +440,19 @@ audited as `review_proposal`.
   proposal on discard, of the `ReviewRecord` on reject) and the summary say "parts already
   applied stay in OpenMetadata: …". OM has no undo for an applied change set.
 
+### Pending reviews (M2b Task 6)
+
+`list_pending_reviews` (and `lakeloom pending`) list `submitted` and `apply_failed` proposals,
+oldest first, keyset-paginated by proposal id (`ProposalRepository.list_by_status`; opaque
+base64 cursor). For a caller, models whose `review_groups` exclude them are skipped and so are
+proposals they created; the CLI operator sees all. Grouping is by model, then data product.
+**Data product = lake schema:** the stored provenance holds no OM `dataProducts`, and the
+listing makes no OM calls, so a proposal's data product is the `catalog.schema` of its tables'
+lake full names (the first, sorted, when it spans several; `(no table)` for realization-only
+proposals). Age is the time since the proposal was last stored (its submission). There is no
+CLI review command: a decision must carry a human's own OM identity, which the CLI operator
+(bot credentials) does not have.
+
 ## Consequences
 
 - A Lakeloom reviewer action can reach OM as the reviewer through token exchange

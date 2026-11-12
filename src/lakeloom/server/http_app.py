@@ -39,6 +39,7 @@ from lakeloom.core.model_policy import ModelPolicyEntry
 from lakeloom.core.models import ModelService
 from lakeloom.core.obo import OnBehalfOf
 from lakeloom.core.proposals import ProposalService
+from lakeloom.core.review import ReviewService
 from lakeloom.core.scans import ScanService
 from lakeloom.core.sources import close_sources, start_sources
 from lakeloom.errors import LakeloomError
@@ -104,6 +105,7 @@ class AppDeps:
     confirm: ConfirmTokens = field(init=False)
     audit: AuditRepository = field(init=False)
     proposals: ProposalService = field(init=False)
+    review: ReviewService = field(init=False)
     obo: OnBehalfOf = field(init=False)
 
     def __post_init__(self) -> None:
@@ -116,16 +118,28 @@ class AppDeps:
         scan_repo = ScanRepository(self.engine)
         self.scans = ScanService(self.sources, scan_repo, self.om, self.settings)
         # audit=None: MCP tools audit through guarded() (one row per write; see proposals.py).
+        proposal_repo = ProposalRepository(self.engine)
         self.proposals = ProposalService(
             self.om,
             self.models,
             scan_repo,
-            ProposalRepository(self.engine),
+            proposal_repo,
             None,
             self.settings,
             confirm=self.confirm,
             sources=self.sources,
             policies=self.policies,
+        )
+        # Same for reviews: review_proposal is audited by guarded() (audit=None here).
+        self.review = ReviewService(
+            self.proposals,
+            proposal_repo,
+            self.obo,
+            self.models,
+            self.confirm,
+            self.settings,
+            None,
+            self.policies,
         )
 
 

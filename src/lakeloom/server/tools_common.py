@@ -29,6 +29,7 @@ __all__ = [
     "ADMIN_SCOPE",
     "PROPOSE_SCOPE",
     "READ_SCOPE",
+    "REVIEW_SCOPE",
     "client_name",
     "current_principal",
     "guarded",
@@ -38,6 +39,7 @@ __all__ = [
 
 READ_SCOPE = "lakeloom:read"
 PROPOSE_SCOPE = "lakeloom:propose"
+REVIEW_SCOPE = "lakeloom:review"
 ADMIN_SCOPE = "lakeloom:admin"
 
 _log = logging.getLogger("lakeloom.mcp")

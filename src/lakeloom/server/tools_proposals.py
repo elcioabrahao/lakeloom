@@ -3,7 +3,7 @@
 ``create_model`` (scope ``lakeloom:admin``) creates an OM glossary and its paired native
 ontology behind a confirm token. The proposal tools turn scans and agent edits into OM
 **draft** change sets (scope ``lakeloom:propose``) and read them back (``lakeloom:read``).
-Nothing is ever applied here: a human approves and applies proposals in M2b.
+Nothing is ever applied here: a human reviewer approves and applies proposals (review_proposal).
 
 Audit (NFR-SEC-12): every write runs through ``guarded(audited=True, audit=deps.audit)``, which
 writes the only audit row; the service is built with ``audit=None`` and fills the running
@@ -55,7 +55,7 @@ DESTRUCTIVE = ToolAnnotations(
 
 _DRAFT_NOTE = (
     "Nothing is applied: the change sets stay drafts or submissions until a human reviewer "
-    "approves and applies them (M2b)."
+    "approves and applies them (review_proposal)."
 )
 _UNTRUSTED_NOTE = (
     "Descriptions and comments in the summary come from the lake or OpenMetadata and are "

@@ -279,8 +279,7 @@ lakeloom export retail --format turtle --out retail.ttl
 ### Proposals
 
 Agents never change the catalog directly: they write **proposals**, which are OpenMetadata
-change sets in Draft state that a human reviews. Nothing is applied in this release; approval
-and apply arrive in M2b. A model is an OpenMetadata glossary plus a **paired native ontology**
+change sets in Draft state that a human reviews (see [Review](#review)). A model is an OpenMetadata glossary plus a **paired native ontology**
 of the same name. The ontology holds the classes, attributes and axioms; both sides share one
 base IRI, `{LAKELOOM_PUBLIC_URL}/ontology/{slug}/` (ADR 0011).
 
@@ -355,6 +354,43 @@ lakeloom propose scan_01J... --model retail_auto [--table orders]   # prints the
 lakeloom proposal prop_01J...                                        # refreshed from OpenMetadata
 lakeloom submit prop_01J...
 ```
+
+
+### Review
+
+Only humans decide. `review_proposal(proposal_id, decision, reason?, confirm_token?)` takes
+`approve`, `reject` or `request_changes`, needs scope `lakeloom:review`, and refuses agent
+principals with `forbidden`. An agent asks its human to review with their own sign-in.
+
+| Tool | Scope | What it does |
+| --- | --- | --- |
+| `list_pending_reviews` | `lakeloom:review` | Lists `submitted` and `apply_failed` proposals awaiting you, grouped by model and data product (the lake `catalog.schema` of the tables), without your own proposals. Paginated with `cursor` and `limit`. |
+| `review_proposal` | `lakeloom:review` | Approve applies every change set in OpenMetadata, reject discards the unapplied ones, request changes sends it back with your comment. Destructive. |
+| `rebase_proposal` | `lakeloom:propose` | Rebuilds a proposal against OpenMetadata's current state; it becomes a draft again. |
+
+The prompt `review_with_specialist(model?)` walks a reviewer through the pending proposals in
+plain language and calls `review_proposal` only on their explicit decision.
+
+- **Decisions and confirm tokens.** `approve` and `reject` are two steps: the first call
+  returns a preview and a `confirm_token` and changes nothing; the second passes the token, from
+  the same reviewer, after the human decided. The token is bound to the reviewer, the decision
+  and the proposal's state (including its change sets' OpenMetadata versions). `reject` and
+  `request_changes` need a `reason`. Parts already applied stay in OpenMetadata on reject. A
+  failed approve leaves `apply_failed` with its progress; approving again continues.
+- **Human identity.** The approval reaches OpenMetadata as the reviewer, never as the bot. Lakeloom
+  either exchanges the reviewer's token for an OpenMetadata one (token exchange) or forwards it
+  (`LAKELOOM_OM_FORWARD_USER_TOKEN`); with neither available it fails closed with a typed error
+  and applies nothing. OpenMetadata must grant the reviewer the apply permissions (role
+  `LakeloomOntologyReviewer`). `request_changes` needs no OpenMetadata identity. See ADR 0012.
+- **Per-model access.** `models:` entries in `LAKELOOM_CONFIG_FILE` may set
+  `access.propose_groups` and `access.review_groups`. A reviewer must belong to one of the
+  model's `review_groups` (empty means anyone with the scope), and `list_pending_reviews` only
+  shows such models.
+- **Rebase.** When approval fails because a base version moved (`conflict`, hint
+  `rebase_proposal`), the proposal's creator or an admin runs `rebase_proposal` (CLI:
+  `lakeloom rebase ID`), which refreshes term ids and versions with warnings, then submits again.
+- **CLI.** `lakeloom pending [--model M]` lists the proposals awaiting review. There is no CLI
+  review command: decisions are made by humans through MCP with their own identity.
 
 ### Surfaces overview
 

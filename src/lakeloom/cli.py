@@ -7,7 +7,10 @@ Configuration errors are printed to stderr and exit with code 2, without a trace
 ``lakeloom models``, ``concept``, ``context`` and ``export`` read the semantic models in
 OpenMetadata (FR-CTX-01..04, FR-IO-01). ``lakeloom propose SCAN_ID --model M``,
 ``lakeloom proposal ID`` and ``lakeloom submit ID`` are the proposal tools for the operator
-(drafts and submissions only; nothing is applied); they write their own audit rows. Typed
+(drafts and submissions only; nothing is applied); ``lakeloom pending [--model M]`` lists the
+proposals awaiting review and ``lakeloom rebase ID`` rebases one. There is no review command:
+approving and rejecting are for human reviewers through MCP (ADR 0012). They write their own
+audit rows. Typed
 errors (``not_found``, ``upstream_unavailable``, ...) exit with code 1.
 """
 
@@ -545,6 +548,60 @@ def submit_cmd(
     async def _go() -> None:
         async with _open_proposals(settings) as service:
             p = await service.submit(proposal_id, principal=_actor(), client=CLI_CLIENT)
+            typer.echo(service.summary_markdown(p), nl=False)
+
+    _run(_go())
+
+
+@app.command("pending")
+def pending_cmd(
+    model: Annotated[str | None, typer.Option("--model", help="Only this model.")] = None,
+) -> None:
+    """List the submitted and apply_failed proposals, by model and data product (the operator
+    reviews nothing here: approving or rejecting is for human reviewers through MCP)."""
+    from lakeloom.core.pending import group_pending
+
+    settings = _cli_settings()
+
+    async def _go() -> None:
+        async with _open_proposals(settings) as service:
+            cursor: str | None = None
+            items: list[Any] = []
+            while True:
+                page = await service.list_pending(
+                    _actor(), model=model, cursor=cursor, limit=100, exclude_own=False
+                )
+                items += page.items
+                cursor = page.next_cursor
+                if cursor is None:
+                    break
+            if not items:
+                typer.echo("No proposals await review.")
+                return
+            for group in group_pending(items):
+                typer.echo(f"model {single_line(group.model)}")
+                for dp in group.data_products:
+                    typer.echo(f"  data product {single_line(dp.data_product)}")
+                    for e in dp.proposals:
+                        ops = ", ".join(f"{n} {k}" for k, n in e.operations.items())
+                        typer.echo(
+                            f"    {e.id}  {e.status}  {e.parts} part(s)  {ops or 'no operations'}  "
+                            f"by {single_line(e.proposer)}  {e.age_seconds // 3600}h old"
+                        )
+
+    _run(_go())
+
+
+@app.command("rebase")
+def rebase_cmd(
+    proposal_id: Annotated[str, typer.Argument(help="Proposal id (prop_...).")],
+) -> None:
+    """Rebase a proposal on OpenMetadata's current state (it becomes a draft) and print it."""
+    settings = _cli_settings()
+
+    async def _go() -> None:
+        async with _open_proposals(settings) as service:
+            p = await service.rebase(proposal_id, principal=_actor(), client=CLI_CLIENT)
             typer.echo(service.summary_markdown(p), nl=False)
 
     _run(_go())
