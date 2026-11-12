@@ -61,6 +61,12 @@ pytestmark = [pytest.mark.contract, pytest.mark.asyncio(loop_scope="module")]
 TABLES = ("customers", "products", "orders", "invoices")
 OM_TABLE = "lakeloom_fixture.retail.sales.{}"
 REVIEWER = "alice"
+AGENT_REVIEW_FORM = {
+    "grant_type": "client_credentials",
+    "client_id": "lakeloom-agent",
+    "client_secret": "dev-agent-secret",  # DEV ONLY fixed public dev credential
+    "scope": "lakeloom:review",
+}
 CACHE_WAIT_SECONDS = 90  # > the dev stack's model_cache_ttl_seconds (60)
 
 
@@ -108,30 +114,29 @@ class Secrets:
     bot: str = field(repr=False)
 
 
-def _agent_review_token() -> Token:
-    """lakeloom-agent's client_credentials token requesting the realm's optional
-    ``lakeloom:review`` scope: an agent that passes the scope gate (FR-REV-01)."""
-    r = httpx.post(
-        TOKEN_URL,
-        data={
-            "grant_type": "client_credentials",
-            "client_id": "lakeloom-agent",
-            "client_secret": "dev-agent-secret",  # DEV ONLY fixed public dev credential
-            "scope": "lakeloom:review",
-        },
-        timeout=10,
-    )
-    assert r.status_code == 200, f"token request failed: {r.status_code}"  # no body: a token
-    return Token(str(r.json()["access_token"]))
-
-
-# These fixtures only wrap (nothing in them can fail), so no frame holding a raw token fails.
 @pytest.fixture(scope="module")
-def who(admin_agent_token: str, human_token: str, bob_token: str, carol_token: str) -> Tokens:
-    raw = (admin_agent_token, human_token, bob_token, carol_token)
-    return Tokens(*(Token(t) for t in raw), agent_review=_agent_review_token())
+def agent_review() -> Token:
+    """lakeloom-agent's client_credentials token requesting the realm's optional
+    ``lakeloom:review`` scope: an agent that passes the scope gate (FR-REV-01). Its own
+    fixture with no token arguments. No local holds the token (a Response's repr is only its
+    status line) and the error of a refused request names the status and URL, never the body."""
+    response = httpx.post(TOKEN_URL, data=AGENT_REVIEW_FORM, timeout=10)
+    response.raise_for_status()
+    return Token(str(response.json()["access_token"]))
 
 
+# Only wraps, takes no other step: nothing in this frame (raw token arguments) can fail.
+@pytest.fixture(scope="module")
+def who(
+    admin_agent_token: str, human_token: str, bob_token: str, carol_token: str, agent_review: Token
+) -> Tokens:
+    return Tokens(
+        Token(admin_agent_token), Token(human_token), Token(bob_token), Token(carol_token),
+        agent_review,
+    )  # fmt: skip
+
+
+# Only wraps, like ``who``.
 @pytest.fixture(scope="module")
 def secrets(agent_token: str, om_bot_token: str) -> Secrets:
     return Secrets(Token(agent_token), Token(om_bot_token))
