@@ -88,6 +88,7 @@ def test_expired_token() -> None:
     clock.now += 601
     err = _fail(tokens, token)
     assert err.code == "validation_error" and "expired" in err.message
+    assert err.hint is not None and "{" not in err.hint and "600 seconds" in err.hint
 
 
 def test_state_change_is_conflict_and_replay_fails() -> None:

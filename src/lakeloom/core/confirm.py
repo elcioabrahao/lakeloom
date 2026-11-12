@@ -112,7 +112,7 @@ class ConfirmTokens:
             raise LakeloomError(
                 "validation_error",
                 "confirm token expired",
-                "Tokens last {self._ttl} seconds; "
+                f"Tokens last {self._ttl} seconds; "
                 "call the tool again without confirm_token to get a fresh preview and token.",
             )
         if payload.get("s") != state_digest:
