@@ -433,7 +433,7 @@ Scopes are OAuth scopes (section 8.2). "OM write" means the tool creates or chan
 | `LAKELOOM_OIDC_CLIENT_SECRET` / `_FILE` | — | Secret of that client (`client_secret_basic`). |
 | `LAKELOOM_OIDC_TOKEN_ENDPOINT` | discovery | IdP token endpoint; default from the issuer's `/.well-known/openid-configuration`. |
 | `LAKELOOM_OM_AUDIENCE` | `openmetadata` | `audience` requested in the exchange. |
-| `LAKELOOM_OM_EXCHANGE_SCOPE` | `openmetadata-audience` | `scope` sent in the exchange (Keycloak client scope with the OM audience mapper); empty/unset in code (`None`) omits it. |
+| `LAKELOOM_OM_EXCHANGE_SCOPE` | `openmetadata-audience` | `scope` sent in the exchange (Keycloak client scope with the OM audience mapper); set it to an empty value to omit the scope. |
 | `LAKELOOM_OM_FORWARD_USER_TOKEN` | `false` | With exchange off, forward the caller's token to OM (OM must accept Lakeloom's audience). |
 | `LAKELOOM_SCOPE_GROUP_MAP` | — | Mapping of IdP groups to scopes (JSON). |
 | `LAKELOOM_DB_URL` | `sqlite:////data/lakeloom.db` | State store. |

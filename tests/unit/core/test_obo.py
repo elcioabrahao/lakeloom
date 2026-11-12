@@ -325,3 +325,26 @@ def test_client_secret_file(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -
 
     assert s.oidc_client_secret is not None
     assert s.oidc_client_secret.get_secret_value() == CLIENT_SECRET
+
+
+async def test_empty_client_secret_or_id_is_unavailable(
+    http: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LAKELOOM_OIDC_CLIENT_SECRET", "")
+    assert make(http, Settings(oidc_client_id="lakeloom")).mode == "unavailable"
+    monkeypatch.delenv("LAKELOOM_OIDC_CLIENT_SECRET")
+    monkeypatch.setenv("LAKELOOM_OIDC_CLIENT_ID", "")
+    s = Settings(oidc_client_secret=SecretStr(CLIENT_SECRET))
+    assert make(http, s).mode == "unavailable"
+
+
+@respx.mock
+async def test_empty_scope_env_omits_scope_field(
+    http: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LAKELOOM_OM_EXCHANGE_SCOPE", "")
+    route = respx.post(TOKEN_URL).mock(return_value=ok_response())
+
+    await make(http, settings()).om_for(principal())
+
+    assert "scope" not in parse_qs(route.calls.last.request.content.decode())

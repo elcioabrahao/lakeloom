@@ -135,6 +135,19 @@ class Settings(BaseSettings):
         # raw input (which holds plaintext secrets) -- NFR-SEC-11.
         super().__init__(**_with_secret_files(values))
 
+    @field_validator(
+        "oidc_client_id",
+        "oidc_client_secret",
+        "oidc_token_endpoint",
+        "om_exchange_scope",
+        mode="before",
+    )
+    @classmethod
+    def _blank_is_unset(cls, value: Any) -> Any:
+        """An empty or whitespace-only value (env var or ``_FILE``) means unset."""
+        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+        return None if isinstance(raw, str) and not raw.strip() else value
+
     @field_validator("sensitive_tags", mode="before")
     @classmethod
     def _parse_sensitive_tags(cls, value: Any) -> Any:

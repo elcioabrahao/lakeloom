@@ -230,3 +230,19 @@ def test_m2b_oidc_client_secret_from_file(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert s.oidc_client_secret is not None
     assert s.oidc_client_secret.get_secret_value() == "s3cret"
     assert "s3cret" not in repr(s)
+
+
+def test_m2b_blank_obo_values_are_unset(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    f = tmp_path / "cs"
+    f.write_text("  \n")
+    monkeypatch.setenv("LAKELOOM_OM_EXCHANGE_SCOPE", "")
+    monkeypatch.setenv("LAKELOOM_OIDC_CLIENT_ID", " ")
+    monkeypatch.setenv("LAKELOOM_OIDC_CLIENT_SECRET_FILE", str(f))
+    monkeypatch.setenv("LAKELOOM_OIDC_TOKEN_ENDPOINT", "")
+
+    s = Settings()
+
+    assert s.om_exchange_scope is None
+    assert s.oidc_client_id is None
+    assert s.oidc_client_secret is None
+    assert s.oidc_token_endpoint is None

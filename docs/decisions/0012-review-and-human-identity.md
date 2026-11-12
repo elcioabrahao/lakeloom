@@ -320,7 +320,7 @@ does not own it, and no repr shows a token), `apply_change_set`, `get_permission
 (exchange off, `LAKELOOM_OM_FORWARD_USER_TOKEN=true`) or `unavailable` (human review fails
 closed; the bot is never used). `get_server_info` reports it as `review_identity`. The
 exchange form carries `audience=<LAKELOOM_OM_AUDIENCE>` and, unless
-`om_exchange_scope` is `None`, `scope=<LAKELOOM_OM_EXCHANGE_SCOPE>` (default
+`LAKELOOM_OM_EXCHANGE_SCOPE` is set to an empty value (read as unset), `scope=<LAKELOOM_OM_EXCHANGE_SCOPE>` (default
 `openmetadata-audience`, the finding above). An exchange error is `forbidden` (400/401/403)
 or `upstream_unavailable` and never falls back to forwarding. Exchanged tokens are cached by
 the SHA-256 of the subject token until `expires_in - 30 s`.
