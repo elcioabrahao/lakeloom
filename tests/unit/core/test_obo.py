@@ -49,6 +49,7 @@ def settings(**kw: object) -> Settings:
         "oidc_client_id": "lakeloom",
         "oidc_client_secret": SecretStr(CLIENT_SECRET),
         "oidc_token_endpoint": TOKEN_URL,
+        "om_exchange_scope": "openmetadata-audience",  # as the dev stack sets it
         **kw,
     }
     return Settings(**values)  # pyright: ignore[reportArgumentType]
@@ -143,6 +144,24 @@ async def test_exchange_cached_until_expiry(http: httpx.AsyncClient) -> None:
     clock.now += 2  # past expires_in - 30
     await obo.om_for(principal())
     assert route.call_count == 2
+
+
+@respx.mock
+async def test_forget_drops_the_cached_exchange(http: httpx.AsyncClient) -> None:
+    """OM rejected the exchanged token (HTTP 401): the next call exchanges again."""
+    route = respx.post(TOKEN_URL).mock(return_value=ok_response(300))
+    obo = make(http, settings())
+
+    await obo.om_for(principal())
+    obo.forget(principal(token="another-subject-token"))  # noqa: S106 - someone else's: kept
+    await obo.om_for(principal())
+    assert route.call_count == 1
+
+    obo.forget(principal())
+    await obo.om_for(principal())
+    assert route.call_count == 2
+    obo.forget(principal())
+    obo.forget(principal())  # nothing cached: a no-op
 
 
 @respx.mock
@@ -345,6 +364,12 @@ async def test_empty_scope_env_omits_scope_field(
     monkeypatch.setenv("LAKELOOM_OM_EXCHANGE_SCOPE", "")
     route = respx.post(TOKEN_URL).mock(return_value=ok_response())
 
-    await make(http, settings()).om_for(principal())
+    s = Settings(
+        om_url="http://om.test:8585",
+        oidc_client_id="lakeloom",
+        oidc_client_secret=SecretStr(CLIENT_SECRET),
+        oidc_token_endpoint=TOKEN_URL,
+    )  # pyright: ignore[reportCallIssue]
+    await make(http, s).om_for(principal())
 
     assert "scope" not in parse_qs(route.calls.last.request.content.decode())

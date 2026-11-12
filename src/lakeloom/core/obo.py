@@ -11,8 +11,10 @@ An exchange error never falls back to forwarding or to the bot. Subject and exch
 tokens and the client secret never appear in logs, errors or exception chains; every
 failure is raised ``from None``. Exchanged tokens are cached in memory keyed by the
 SHA-256 of the subject token until 30 s before they expire (at most 256 entries, oldest
-evicted). Concurrent first calls for the same subject token may each exchange once; the
-cache is a latency optimisation, not a correctness mechanism, so no lock is held.
+evicted); :meth:`OnBehalfOf.forget` drops one when OM rejected it (HTTP 401). Concurrent first
+calls for the same subject token may each exchange once; the cache is a latency
+optimisation, not a correctness mechanism, so no lock is held. Forward mode needs
+``om_forward_user_token`` with ``oidc_token_exchange`` off.
 """
 
 import base64
@@ -82,17 +84,22 @@ class OnBehalfOf:
                 "human review is not configured",
                 hint=(
                     "operator: set LAKELOOM_OIDC_CLIENT_ID/_SECRET for token exchange, or "
-                    "LAKELOOM_OM_FORWARD_USER_TOKEN=true when OpenMetadata accepts "
-                    "Lakeloom's tokens (NFR-SEC-10)"
+                    "LAKELOOM_OM_FORWARD_USER_TOKEN=true with LAKELOOM_OIDC_TOKEN_EXCHANGE=false "
+                    "when OpenMetadata accepts Lakeloom's tokens (NFR-SEC-10)"
                 ),
             )
         if self.mode == "forward":
             return self._om.with_token(principal.token)
         return self._om.with_token(await self._exchange(principal.token))
 
+    def forget(self, principal: Principal) -> None:
+        """Drop the cached exchanged token for ``principal``'s subject token (OpenMetadata
+        rejected it, HTTP 401), so the next call exchanges again. A no-op when none is cached."""
+        self._cache.pop(_key(principal.token.get_secret_value()), None)
+
     async def _exchange(self, subject: SecretStr) -> SecretStr:
         raw = subject.get_secret_value()
-        key = hashlib.sha256(raw.encode()).hexdigest()
+        key = _key(raw)
         now = self._time()
         hit = self._cache.get(key)
         if hit is not None:
@@ -170,6 +177,11 @@ class OnBehalfOf:
             raise _unavailable("the identity provider's discovery document has no token endpoint")
         self._token_endpoint = endpoint
         return endpoint
+
+
+def _key(raw: str) -> str:
+    """The cache key of a subject token: its SHA-256 (the token itself is never kept)."""
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 def _unavailable(message: str) -> LakeloomError:
