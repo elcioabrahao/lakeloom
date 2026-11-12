@@ -350,13 +350,21 @@ review path never falls back to the bot.
   but not yet replaced keeps its old id with state `DISCARDED`; the next rebuild (rebase,
   or `propose_change` / `submit` on that draft) continues from there. Every change set OM
   holds stays recorded (current, superseded or abandoned).
+- **Applied parts and resumption (fix round 1).** `submit` (like every transition) skips
+  sides already `APPLIED`. Rebase hands the refreshed operations to `rebuild_parts`, which
+  assigns them (and their warnings) to a part only when it rebuilds that part, so a part a
+  failed rebase never reached keeps the operations its change sets in OM hold. A rebase
+  that stops part-way stores `Proposal.rebase_pending`; the next `propose_change`,
+  `submit` or `rebase` rebuilds every part that is not fully applied again. In a part whose
+  glossary set is `APPLIED`, terms its `RemoveConcept` deleted are not looked up; its
+  native side still gets the `DELETE_CONCEPT` of the class (which still exists).
 - **Rebase** (`ProposalService.rebase`, audited as `rebase_proposal`): owner (or admin)
   only, and the model's `propose_groups`; status `draft`, `submitted`,
   `changes_requested` or `apply_failed`. It refreshes the change-set states from OM,
   rebuilds every part that is not fully applied (every side with a change set
   `APPLIED`) with the bot, and the proposal becomes a `draft`. Agent-supplied base versions
   (`UpdateConcept`, `RemoveConcept`) are set to the term's current OM version with the
-  warning "base version of `<fqn>` refreshed from X to Y; re-review the change"; a removal's
+  warning "base version of `<fqn>` (quoted as code) refreshed from X to Y; re-review the change"; a removal's
   native base (taken from OM, never from the agent) that moved since the replaced set gets
   the same warning. A term OM no longer has is a `conflict` naming it, and the proposal is
   unchanged. `propose_change` and `submit` also accept `changes_requested`: they run the

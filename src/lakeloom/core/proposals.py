@@ -107,6 +107,7 @@ from lakeloom.core.operations import (
     UpdateConcept,
     draft_term_id,
     op_key,
+    remove_concept_native,
     to_om,
     to_om_all,
 )
@@ -159,6 +160,8 @@ REBASE_TOOL = "rebase_proposal"
 REBASE_STATUSES = ("draft", "submitted", "changes_requested", "apply_failed")
 _GONE = ("DISCARDED", "MISSING")  # a change set OM no longer holds as a draft
 _MAX_CS_NAME = 256  # OM's change-set name limit (ADR 0011)
+# part number -> (its operations with refreshed base versions, the warnings that says)
+type Refreshed = Mapping[int, tuple[list[ProposalOperation], list[str]]]
 _NATIVE_OPS = (AddConcept, RemoveConcept, AddAttribute, RemoveAttribute, AddAxiom, RemoveAxiom)
 _MAX_HINT_ITEMS = 20
 _MAX_DETAIL_ITEMS = 100  # per list in NothingToPropose.details()
@@ -242,6 +245,8 @@ class Proposal(BaseModel):
     matches: list[ProposalMatch] = []
     warnings: list[str] = []
     abandoned_change_sets: list[AbandonedChangeSet] = []
+    # a rebase stopped part-way: the next propose_change / submit / rebase finishes it
+    rebase_pending: bool = False
     created_at: datetime
     updated_at: datetime
     revision: int = 0  # compare-and-set counter of the repository
@@ -937,12 +942,14 @@ class ProposalService:
         ops: Sequence[ProposalOperation],
         *,
         existing: Collection[str] = (),
+        deleted: Collection[str] = (),
         om: OMClient | None = None,
     ) -> OMContext:
         """Everything ``to_om_all`` needs for ``ops`` (the whole proposal), read from OM.
         Fails closed (``validation_error``) when a referenced term is missing. ``existing``
         names concepts an ``AddConcept`` in ``ops`` created that OM now has (an applied part):
-        they resolve as existing terms."""
+        they resolve as existing terms. ``deleted`` names terms an applied ``RemoveConcept``
+        deleted: they are not looked up (only their native class is still addressed)."""
         om = om or self._om
         slug = target.info.slug
         created = {
@@ -955,7 +962,9 @@ class ProposalService:
             name
             for op in ops
             for ref in (*_term_refs(op), *_native_refs(op))
-            if (name := _local_ref(ref, slug)) is not None and name not in created
+            if (name := _local_ref(ref, slug)) is not None
+            and name not in created
+            and name not in deleted
         }
         if wanted:
             by_name = await self._terms_by_name(target.info, om=om)
@@ -1815,7 +1824,7 @@ class ProposalService:
         for part in p.parts:
             for side in SIDES:
                 cs_id = part.change_set_ids.get(side)
-                if cs_id is None or part.om_state.get(side) == state:
+                if cs_id is None or part.om_state.get(side) in (state, "APPLIED"):
                     continue
                 if state == "DISCARDED" and part.om_state.get(side) == "MISSING":
                     continue  # gone from OM: nothing left to discard
@@ -1925,9 +1934,10 @@ class ProposalService:
 
     async def _reopen(self, trail: AuditContext, p: Proposal) -> None:
         """Before ``propose_change`` / ``submit``: a ``changes_requested`` proposal is rebuilt
-        (drafts, not submitted) and becomes a draft; a draft whose rebuild was interrupted
-        (a side discarded, not yet replaced) finishes it."""
-        if p.status == "changes_requested":
+        (drafts, not submitted) and becomes a draft; a draft whose rebase stopped part-way
+        (``rebase_pending``) is rebased again (every part not fully applied); a draft whose
+        rebuild was interrupted (a side discarded, not yet replaced) finishes it."""
+        if p.status == "changes_requested" or (p.status == "draft" and p.rebase_pending):
             await self._rebuild_open(trail, p, every=True)
         elif p.status == "draft" and any(_interrupted(part) for part in p.parts):
             await self._rebuild_open(trail, p, every=False)
@@ -1946,22 +1956,26 @@ class ProposalService:
             for part in p.parts
             if ((not _fully_applied(part)) if every else _interrupted(part))
         ]
+        refreshed: Refreshed = {}
         if parts:
-            target = await self._target(p.model)
-            refreshed, warnings = await self._refreshed_bases(p, parts, target)
-            for part, ops in refreshed:
-                part.operations = ops
-            p.warnings.extend(w for w in warnings if w not in p.warnings)
+            refreshed = await self._refreshed_bases(p, parts, await self._target(p.model))
         p.status = "draft"
-        await self.rebuild_parts(p, parts, om=self._om, submit=False, trail=trail)
+        # stored with the first progress: a stop part-way leaves later parts untouched in OM
+        # (old operations, old change sets), and the next call rebases them
+        p.rebase_pending = every
+        await self.rebuild_parts(
+            p, parts, om=self._om, submit=False, trail=trail, refreshed=refreshed
+        )
+        p.rebase_pending = False
         await self._save(p)
 
     async def _refreshed_bases(
         self, p: Proposal, parts: Sequence[ProposalPart], target: _Target
-    ) -> tuple[list[tuple[ProposalPart, list[ProposalOperation]]], list[str]]:
+    ) -> Refreshed:
         """Each part's operations with every agent-supplied ``base_version`` (UpdateConcept,
         RemoveConcept) set to the term's current OM version, plus a warning per changed
-        entity. Nothing is modified here; a term OM no longer has is a ``conflict``."""
+        entity. Nothing is modified here (:meth:`rebuild_parts` assigns them to a part just
+        before rebuilding it); a term OM no longer has is a ``conflict``."""
         slug = p.model
         checked = [
             op
@@ -1971,7 +1985,7 @@ class ProposalService:
             if isinstance(op, UpdateConcept | RemoveConcept)
         ]
         if not checked:
-            return [], []
+            return {}
         by_name = await self._terms_by_name(target.info)
         current: dict[str, float] = {}
         gone: list[str] = []
@@ -1993,12 +2007,12 @@ class ProposalService:
                 "remove the operations on it (discard the proposal and propose again without "
                 "them), or check the name with find_concepts",
             )
-        warnings: list[str] = []
-        out: list[tuple[ProposalPart, list[ProposalOperation]]] = []
+        out: dict[int, tuple[list[ProposalOperation], list[str]]] = {}
         for part in parts:
             if part.om_state.get("glossary") == "APPLIED":
                 continue
             ops: list[ProposalOperation] = []
+            warnings: list[str] = []
             for op in part.operations:
                 name = (
                     _local_ref(op.fqn, slug)
@@ -2014,8 +2028,8 @@ class ProposalService:
                     warnings.append(_refresh_warning(f"{slug}.{name}", op.base_version, new))
                     op = op.model_copy(update={"base_version": new})
                 ops.append(op)
-            out.append((part, ops))
-        return out, warnings
+            out[part.n] = (ops, warnings)
+        return out
 
     async def rebuild_parts(
         self,
@@ -2025,6 +2039,7 @@ class ProposalService:
         om: OMClient,
         submit: bool,
         trail: AuditContext,
+        refreshed: Refreshed | None = None,
     ) -> None:
         """Re-draft ``parts`` of ``p`` against OM's current state; the caller holds the
         proposal's lock. Every OM call goes through ``om`` (the bot for rebase, the
@@ -2034,26 +2049,43 @@ class ProposalService:
         part's rebuild count) with the old ids moved to ``superseded_change_set_ids``, and
         submitted when ``submit``. An APPLIED side is never rebuilt. Progress is stored after
         each part and before an error propagates (a side discarded but not yet replaced keeps
-        its old id as ``DISCARDED``, and the next rebuild continues)."""
+        its old id as ``DISCARDED``, and the next rebuild continues).
+
+        ``refreshed`` (part number -> operations, warnings; from rebase) replaces a part's
+        operations, and adds its warnings, only when that part is rebuilt, so the store never
+        holds operations a change set in OM does not. A part whose glossary set is APPLIED
+        gets its native side only; terms its applied ``RemoveConcept`` deleted are not looked
+        up (the native ``DELETE_CONCEPT`` addresses the class, which still exists)."""
         if not parts:
             return
+        refreshed = refreshed or {}
+
+        def ops_of(part: ProposalPart) -> list[ProposalOperation]:
+            return refreshed[part.n][0] if part.n in refreshed else part.operations
+
         target = await self._target(p.model, om=om)
         open_parts = [part for part in p.parts if not _fully_applied(part)]
-        ops = [op for part in open_parts for op in part.operations]
+        ops = [op for part in open_parts for op in ops_of(part)]
         self._require_pair(target, ops)
+        applied = [part for part in p.parts if part.om_state.get("glossary") == "APPLIED"]
         existing = {
-            op.name
-            for part in p.parts
-            if part.om_state.get("glossary") == "APPLIED"
-            for op in part.operations
-            if isinstance(op, AddConcept)
+            op.name for part in applied for op in part.operations if isinstance(op, AddConcept)
         }
-        ctx = await self._context(target, ops, existing=existing, om=om)
+        deleted = {
+            name
+            for part in applied
+            for op in part.operations
+            if isinstance(op, RemoveConcept) and (name := _local_ref(op.fqn, p.model)) is not None
+        }
+        ctx = await self._context(target, ops, existing=existing, deleted=deleted, om=om)
         for part in parts:
-            self._require_native_members(p, part, ctx)
-        planned = [(part, to_om_all(part.operations, ctx)) for part in parts]  # fail closed
+            self._require_native_members(p, part, ctx, ops_of(part))
+        planned = [(part, _plan(part, ops_of(part), ctx)) for part in parts]  # fail closed
         for part, om_ops in planned:
             try:
+                if part.n in refreshed:
+                    part.operations, warnings = refreshed[part.n]
+                    p.warnings.extend(w for w in warnings if w not in p.warnings)
                 await self._rebuild_part(p, part, om_ops, ctx, target, om=om, trail=trail)
                 if submit:
                     await self._submit_part(part, om=om, trail=trail)
@@ -2063,17 +2095,25 @@ class ProposalService:
             await self._save(p)
 
     @staticmethod
-    def _require_native_members(p: Proposal, part: ProposalPart, ctx: OMContext) -> None:
+    def _require_native_members(
+        p: Proposal, part: ProposalPart, ctx: OMContext, ops: Sequence[ProposalOperation]
+    ) -> None:
         """A native definition a removal names must still exist (``conflict`` otherwise)."""
         if part.om_state.get("native") == "APPLIED" or not ctx.paired:
             return
+        glossary_applied = part.om_state.get("glossary") == "APPLIED"
         gone: list[str] = []
-        for op in part.operations:
+        for op in ops:
             if isinstance(op, RemoveAttribute | RemoveAxiom):
                 try:
                     to_om(op, ctx)
                 except LakeloomError:
                     gone.append(f"{p.model}.{_bare(op.concept)}.{op.name}")
+            elif isinstance(op, RemoveConcept) and glossary_applied:
+                try:
+                    remove_concept_native(op, ctx)
+                except LakeloomError:
+                    gone.append(f"{p.model}.{_bare(op.fqn)}")
         if gone:
             raise LakeloomError(
                 "conflict",
@@ -2207,13 +2247,26 @@ def _interrupted(part: ProposalPart) -> bool:
     )
 
 
+def _plan(part: ProposalPart, ops: Sequence[ProposalOperation], ctx: OMContext) -> OMOps:
+    """A part's payload. With its glossary set APPLIED only the native side is rebuilt, and a
+    ``RemoveConcept`` there (its term already deleted) contributes its ``DELETE_CONCEPT``."""
+    if part.om_state.get("glossary") != "APPLIED":
+        return to_om_all(ops, ctx)
+    rest = to_om_all([op for op in ops if not isinstance(op, RemoveConcept)], ctx)
+    deletes = [remove_concept_native(op, ctx) for op in ops if isinstance(op, RemoveConcept)]
+    return OMOps(native=[*rest.native, *deletes])
+
+
 def _version_text(version: float) -> str:
     """An OM version as ``base_version`` text (``0.6``, ``2``)."""
     return f"{version:.6f}".rstrip("0").rstrip(".")
 
 
 def _refresh_warning(entity: str, before: str, after: str) -> str:
-    return f"base version of {entity} refreshed from {before} to {after}; re-review the change"
+    return (
+        f"base version of {code_span(entity)} refreshed from {before} to {after}; "
+        "re-review the change"
+    )
 
 
 def _native_entry(

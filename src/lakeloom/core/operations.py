@@ -50,6 +50,7 @@ __all__ = [
     "UpdateConcept",
     "draft_term_id",
     "op_key",
+    "remove_concept_native",
     "to_om",
     "to_om_all",
 ]
@@ -757,16 +758,19 @@ def _native_delete(kind: str, prefix: str, iri: str, ctx: OMContext) -> dict[str
     }
 
 
+def remove_concept_native(op: RemoveConcept, ctx: OMContext) -> dict[str, Any]:
+    """The native ``DELETE_CONCEPT`` of a removal alone (its glossary ``DELETE_TERM`` already
+    applied: the term is gone, the class is not)."""
+    return _native_delete("DELETE_CONCEPT", "concept", _concept_iri(ctx, op.fqn), ctx)
+
+
 def _remove_concept(op: RemoveConcept, ctx: OMContext) -> OMOps:
-    iri = _concept_iri(ctx, op.fqn)
     glossary = {
         "operationType": "DELETE_TERM",
         "targetId": _lookup(ctx.term_ids, ctx, op.fqn, "term id"),
         "baseVersion": float(op.base_version),
     }
-    return OMOps(
-        glossary=[glossary], native=[_native_delete("DELETE_CONCEPT", "concept", iri, ctx)]
-    )
+    return OMOps(glossary=[glossary], native=[remove_concept_native(op, ctx)])
 
 
 def _add_attribute(op: AddAttribute, ctx: OMContext) -> OMOps:

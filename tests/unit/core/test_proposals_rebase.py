@@ -22,14 +22,16 @@ from lakeloom.core.audit import AuditContext
 from lakeloom.core.model_policy import ModelPolicyEntry
 from lakeloom.core.operations import (
     AddAttribute,
+    AddConcept,
     AddSynonym,
     RemoveAttribute,
+    RemoveConcept,
     UpdateConcept,
     draft_term_id,
 )
 from lakeloom.core.proposals import REBASE_HINT, Actor, Proposal
 from lakeloom.errors import LakeloomError
-from lakeloom.om.client import OMClient
+from lakeloom.om.client import OMClient, OMUnavailable
 from lakeloom.om.models import OMGlossaryTerm, OMTable
 
 ADMIN = Actor(subject="root", scopes=frozenset({"lakeloom:admin"}))
@@ -204,7 +206,6 @@ async def test_rebuild_skips_applied_parts(make) -> None:
     _apply(kit.om, *first.change_set_ids.values())  # part 1 fully applied
     _apply(kit.om, second.change_set_ids["glossary"])  # part 2: glossary only
     # the terms both glossary sets created now exist in OM, with their draft ids
-    from lakeloom.core.operations import AddConcept
 
     kit.om.terms["shop"] = [
         OMGlossaryTerm.model_validate(
@@ -291,11 +292,11 @@ async def test_rebase_refreshes_base_versions_with_warning(make) -> None:
     ops = out.operations()
     refreshed = next(o for o in ops if isinstance(o, UpdateConcept))
     assert refreshed.base_version == "0.6"
-    assert "base version of shop.Order refreshed from 0.4 to 0.6; re-review the change" in (
+    assert "base version of `shop.Order` refreshed from 0.4 to 0.6; re-review the change" in (
         out.warnings
     )
     assert (
-        "base version of shop.Customer.legacy refreshed from 2 to 3; re-review the change"
+        "base version of `shop.Customer.legacy` refreshed from 2 to 3; re-review the change"
         in out.warnings
     )
     created = [kw for n, kw in kit.om.calls[before:] if n == "create_change_set"]
@@ -373,7 +374,6 @@ async def test_rebuild_failure_midway_keeps_store_consistent(make) -> None:
     scan_id = await kit.scan(*widened(4))  # 2 parts
     p = await kit.service.propose_from_scan(scan_id, "shop", principal=AGENT, client=None)
     await kit.service.submit(p.id, principal=AGENT, client=None)
-    from lakeloom.om.client import OMUnavailable
 
     created = 0
     real = kit.om.create_change_set
@@ -396,6 +396,7 @@ async def test_rebuild_failure_midway_keeps_store_consistent(make) -> None:
     assert first.change_set_names["native"] == f"lakeloom-{p.id}-1-native-r1"
     assert second.change_set_names["glossary"] == f"lakeloom-{p.id}-2-r1"
     assert second.om_state["native"] == "DISCARDED"  # discarded, not yet replaced
+    assert stored.rebase_pending
     assert last_error(await kit.audit_rows()) == ("rebase_proposal", "upstream_unavailable")
 
     # submit continues the interrupted rebuild before submitting
@@ -412,3 +413,115 @@ def last_error(rows: list[Any]) -> tuple[str, str | None]:
 
 def test_rebase_hint_is_actionable() -> None:
     assert "rebase_proposal" in REBASE_HINT and "M2b" not in REBASE_HINT
+
+
+async def test_submit_after_rebase_skips_applied_parts(make) -> None:
+    kit = make(max_ops=8)
+    scan_id = await kit.scan(*widened(4))  # 2 parts
+    p = await kit.service.propose_from_scan(scan_id, "shop", principal=AGENT, client=None)
+    await kit.service.submit(p.id, principal=AGENT, client=None)
+    first = p.parts[0]
+    _apply(kit.om, *first.change_set_ids.values())  # part 1 applied, part 2 failed to apply
+    await _store_states(kit, p)
+    await _set_status(kit, p, "apply_failed")
+    rebased = await kit.service.rebase(p.id, principal=AGENT, client=None)
+    assert rebased.status == "draft"
+    before = len(kit.om.calls)
+
+    out = await kit.service.submit(p.id, principal=AGENT, client=None)
+
+    submitted = [c[1] for c in kit.om.calls[before:] if c[0] == "SUBMITTED"]
+    assert submitted == list(out.parts[1].change_set_ids.values())  # only the rebuilt part
+    assert out.status == "submitted"
+    assert out.parts[0].om_state == {"glossary": "APPLIED", "native": "APPLIED"}
+
+
+async def test_failed_rebase_stores_only_what_om_holds_and_resumes(make) -> None:
+    kit = make(max_ops=8)
+    kit.om.terms["shop"] = [shop_term("Order", 0.4)]
+    scan_id = await kit.scan(*widened(4))  # parts 1 and 2 full
+    p = await kit.service.propose_from_scan(scan_id, "shop", principal=AGENT, client=None)
+    update = UpdateConcept(op="update_concept", fqn="Order", base_version="0.4", synonyms=["B"])
+    p = await kit.service.propose_change(p.id, [update], principal=AGENT, client=None)
+    assert len(p.parts) == 3  # the update is part 3
+    await kit.service.submit(p.id, principal=AGENT, client=None)
+    third = p.parts[2].change_set_ids["glossary"]
+    kit.om.terms["shop"] = [shop_term("Order", 0.6)]
+    created = 0
+    real = kit.om.create_change_set
+
+    async def flaky(**kw: Any):
+        nonlocal created
+        created += 1
+        if created == 2:  # part 1, native side
+            raise OMUnavailable("down")
+        return await real(**kw)
+
+    kit.om.create_change_set = flaky  # type: ignore[method-assign]
+    with pytest.raises(LakeloomError):
+        await kit.service.rebase(p.id, principal=AGENT, client=None)
+    stored = await kit.repo.get(p.id)
+    assert stored.status == "draft" and stored.rebase_pending
+    # part 3 was never rebuilt: its stored operation still matches its change set in OM
+    untouched = next(o for o in stored.parts[2].operations if isinstance(o, UpdateConcept))
+    assert untouched.base_version == "0.4"
+    assert stored.parts[2].change_set_ids["glossary"] == third
+    assert not any("refreshed" in w for w in stored.warnings)
+    assert _recorded(stored) == set(kit.om.change_sets)
+
+    # submit resumes the whole rebase (every part not fully applied), then submits
+    before = len(kit.om.calls)
+    done = await kit.service.submit(p.id, principal=AGENT, client=None)
+    assert done.status == "submitted" and not done.rebase_pending
+    assert third in done.parts[2].superseded_change_set_ids
+    refreshed = next(o for o in done.parts[2].operations if isinstance(o, UpdateConcept))
+    assert refreshed.base_version == "0.6"
+    new = [kw for n, kw in kit.om.calls[before:] if n == "create_change_set"]
+    update_op = next(
+        o for kw in new for o in kw["operations"] if o["operationType"] == "UPDATE_TERM"
+    )
+    assert update_op["baseVersion"] == 0.6
+    assert {s for part in done.parts for s in part.om_state.values() if s} == {"SUBMITTED"}
+    assert _recorded(done) == set(kit.om.change_sets)
+
+
+async def test_rebuild_partly_applied_part_with_remove_concept(make) -> None:
+    kit = make()
+    legacy_iri = "http://x/ontology/shop/Legacy"
+    kit.om.terms["shop"] = [shop_term("Legacy", 0.3)]
+    kit.om.native["shop"] = (
+        [{"id": "concept-legacy", "iri": legacy_iri, "name": "Legacy", "version": 1.0}],
+        [],
+        [],
+    )
+    p = await _shop(kit)
+    drop = RemoveConcept(op="remove_concept", fqn="Legacy", base_version="0.3")
+    p = await kit.service.propose_change(p.id, [drop], principal=AGENT, client=None)
+    await kit.service.submit(p.id, principal=AGENT, client=None)
+    glossary, native = p.change_set_ids()
+    _apply(kit.om, glossary)  # the term is deleted; the native class is not
+    kit.om.terms["shop"] = [
+        OMGlossaryTerm.model_validate(
+            {
+                "id": draft_term_id(next(o for o in p.operations() if isinstance(o, AddConcept))),
+                "name": "Customer",
+                "fullyQualifiedName": "shop.Customer",
+                "description": "applied",
+                "version": 0.1,
+                "iri": "http://x/ontology/shop/Customer",
+                "glossary": {"id": "id-shop", "type": "glossary"},
+            }
+        )
+    ]
+    await _store_states(kit, p)
+    await _set_status(kit, p, "apply_failed")
+    before = len(kit.om.calls)
+
+    out = await kit.service.rebase(p.id, principal=AGENT, client=None)
+
+    created = [kw for n, kw in kit.om.calls[before:] if n == "create_change_set"]
+    assert [kw["name"] for kw in created] == [f"lakeloom-{p.id}-1-native-r1"]
+    delete = next(o for o in created[0]["operations"] if o["operationType"] == "DELETE_CONCEPT")
+    assert delete["targetId"] == "concept-legacy"
+    assert out.parts[0].change_set_ids["glossary"] == glossary
+    assert out.parts[0].superseded_change_set_ids == [native]
