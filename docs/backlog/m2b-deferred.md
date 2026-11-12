@@ -66,3 +66,13 @@ M2c/M3. Details and rulings: [ADR 0012](../decisions/0012-review-and-human-ident
 
 ## Bootstrap and dev stack
 - The bootstrap passes credentials as `curl` arguments (visible in the process list; dev only).
+
+## Final review leftovers
+- APPLY_FAILED re-apply/discard was probed live on a glossary change set only; native change
+  sets are assumed to behave the same.
+- A 401 swallowed by a best-effort read (entity names, description check) makes a later,
+  unrelated failure report as "sign in again".
+- The `term.name` fallback for conflict entity names builds `<model>.<name>`, wrong for
+  nested terms (used only when the targetId lookup fails).
+- On a retry, a derived-base rebuild discards an APPLY_FAILED glossary set instead of
+  re-running it (harmless; differs from the hint's wording).
