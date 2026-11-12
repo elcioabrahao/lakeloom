@@ -119,7 +119,7 @@ from lakeloom.state.audit import AuditRepository
 from lakeloom.state.ids import new_ulid_id
 from lakeloom.state.proposals import OPEN_STATUSES, ProposalRepository
 from lakeloom.state.scans import ScanRecord, ScanRepository
-from lakeloom.untrusted import code_span, quote_untrusted, single_line
+from lakeloom.untrusted import UntrustedText, code_span, quote_untrusted, single_line
 
 __all__ = [
     "DISCARD_TOOL",
@@ -138,13 +138,19 @@ __all__ = [
     "ProposalPart",
     "ProposalService",
     "Provenance",
+    "ReviewDecision",
+    "ReviewRecord",
     "TableProvenance",
+    "applied_parts_note",
+    "fully_applied",
+    "map_om_error",
     "split_parts",
 ]
 
 ProposalStatus = Literal[
     "draft", "submitted", "discarded", "applied", "apply_failed", "rejected", "changes_requested"
 ]
+ReviewDecision = Literal["approve", "reject", "request_changes"]
 Side = Literal["glossary", "native"]
 SIDES: tuple[Side, Side] = ("glossary", "native")
 DISCARD_TOOL = "discard_proposal"
@@ -235,6 +241,21 @@ class AbandonedChangeSet(BaseModel):
     discarded: bool
 
 
+class ReviewRecord(BaseModel):
+    """One review decision (FR-REV-03), stored with the proposal: who decided, as which OM
+    user it was applied (``applicationResult.appliedBy``), the reviewer's reason or comment
+    (untrusted, capped), the change sets applied by this decision and its warnings."""
+
+    decision: ReviewDecision
+    reviewer_subject: str
+    reviewer_username: str | None = None
+    om_user: str | None = None
+    at: datetime
+    reason: UntrustedText | None = None
+    applied: list[str] = []
+    warnings: list[str] = []
+
+
 class Proposal(BaseModel):
     id: str
     model: str
@@ -247,6 +268,9 @@ class Proposal(BaseModel):
     abandoned_change_sets: list[AbandonedChangeSet] = []
     # a rebase stopped part-way: the next propose_change / submit / rebase finishes it
     rebase_pending: bool = False
+    # review (M2b): every decision, and the op keys of realizations already tagged in OM
+    reviews: list[ReviewRecord] = []
+    realizations_applied: list[str] = []
     created_at: datetime
     updated_at: datetime
     revision: int = 0  # compare-and-set counter of the repository
@@ -264,14 +288,6 @@ class Proposal(BaseModel):
         return [op for part in self.parts for op in part.operations]
 
 
-class ConfirmPreview(BaseModel):
-    """Dry run of a destructive call: what would happen and the token to confirm it."""
-
-    summary: str
-    confirm_token: str
-    expires_at: int
-
-
 class EntityChange(BaseModel):
     entity: str
     kind: str
@@ -285,6 +301,16 @@ class ProposalDiff(BaseModel):
     proposal_id: str
     model: str
     changes: list[EntityChange] = []
+
+
+class ConfirmPreview(BaseModel):
+    """Dry run of a destructive call: what would happen and the token to confirm it
+    (``diff``: the structured changes, for a review)."""
+
+    summary: str
+    confirm_token: str
+    expires_at: int
+    diff: ProposalDiff | None = None
 
 
 class NothingToPropose(LakeloomError):
@@ -652,7 +678,34 @@ def summary_markdown(p: Proposal) -> str:
         for a in p.abandoned_change_sets:
             state = "discarded" if a.discarded else "could not be discarded"
             lines.append(f"- {code_span(a.name)} ({code_span(a.id)}), part {a.part}: {state}")
+    if p.reviews:
+        lines += ["", "## Reviews"]
+        lines.extend(line for r in p.reviews for line in _review_lines(r))
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _review_lines(r: ReviewRecord) -> list[str]:
+    om_user = f" (OpenMetadata user {code_span(r.om_user)})" if r.om_user else ""
+    head = f"- {r.decision} by {code_span(r.reviewer_subject)}{om_user} at {r.at.isoformat()}"
+    if r.applied:
+        head += "; applied " + ", ".join(code_span(cs) for cs in r.applied)
+    lines = [head]
+    if r.reason is not None:
+        lines.append(_indent(quote_untrusted(r.reason.text, source=r.reason.source)))
+    lines.extend(f"  - warning: {code_span(w)}" for w in r.warnings)
+    return lines
+
+
+def applied_parts_note(p: Proposal) -> str | None:
+    """Ruling B (ADR 0012 § Review): the parts a discard or reject leaves applied in OM."""
+    parts = [
+        str(part.n)
+        for part in p.parts
+        if any(part.om_state.get(side) == "APPLIED" for side in SIDES)
+    ]
+    if not parts:
+        return None
+    return f"parts already applied stay in OpenMetadata: {', '.join(parts)}"
 
 
 _DIFF_EXCLUDE = {"op", "rule_ids", "evidence", "rationale"}
@@ -731,6 +784,9 @@ def _om_error(exc: OMError, what: str) -> LakeloomError:
         f"OpenMetadata failed while {what}",
         "retry shortly; check the OpenMetadata logs",
     )
+
+
+map_om_error = _om_error  # the review service maps OM errors the same way
 
 
 async def _om[T](what: str, call: Awaitable[T]) -> T:
@@ -829,6 +885,14 @@ class ProposalService:
             lock = asyncio.Lock()
             self._locks[proposal_id] = lock
         return lock
+
+    def lock(self, proposal_id: str) -> asyncio.Lock:
+        """The per-proposal lock (the review service holds it for a whole review)."""
+        return self._lock(proposal_id)
+
+    async def save(self, p: Proposal) -> None:
+        """Compare-and-set store write (``conflict`` when another writer got there first)."""
+        await self._save(p)
 
     # -- audit ---------------------------------------------------------------------------
 
@@ -1859,7 +1923,8 @@ class ProposalService:
     ) -> Proposal | ConfirmPreview:
         """Destructive (FR-AGT-03): without a token, a preview with a confirm token bound to
         the proposal's current state (status, update time, every change set's OM version and
-        state); with it, every change set is discarded and the proposal becomes ``discarded``.
+        state); with it, every change set that is not applied is discarded and the proposal
+        becomes ``discarded`` (applied parts stay in OM and are listed in its warnings).
         A replayed token fails as ``conflict`` (the state it was bound to is gone)."""
 
         async def run(trail: AuditContext) -> tuple[Proposal | ConfirmPreview, str | None]:
@@ -1874,10 +1939,14 @@ class ProposalService:
                     self._require_open(p)
                     token, expires = self._confirm.issue(DISCARD_TOOL, args, digest)
                     count = len(p.change_set_ids())
+                    note = applied_parts_note(p)
                     summary = (
                         f"Discarding proposal {code_span(p.id)} discards its {count} "
-                        "OpenMetadata change set(s); this cannot be undone. Call again with "
-                        "confirm_token to proceed.\n\n" + summary_markdown(p)
+                        "OpenMetadata change set(s) that are not applied; this cannot be "
+                        "undone. "
+                        + (f"Note: {note}. " if note else "")
+                        + "Call again with confirm_token to proceed.\n\n"
+                        + summary_markdown(p)
                     )
                     return ConfirmPreview(
                         summary=summary, confirm_token=token, expires_at=expires
@@ -1891,6 +1960,9 @@ class ProposalService:
                             part.om_state[side] = states[cs][1]
                 await self._transition(trail, p, "DISCARDED", self._om.discard_change_set)
                 p.status = "discarded"
+                note = applied_parts_note(p)
+                if note is not None and note not in p.warnings:
+                    p.warnings.append(note)
                 await self._save(p)
                 return p, None
 
@@ -1900,8 +1972,8 @@ class ProposalService:
     def _require_open(p: Proposal) -> None:
         if p.status not in OPEN_STATUSES:
             raise _fail(
-                f"proposal {p.id} is {p.status}; only draft or submitted proposals can be "
-                "discarded",
+                f"proposal {p.id} is {p.status}; only {', '.join(OPEN_STATUSES)} proposals "
+                "can be discarded",
                 "nothing to do",
             )
 
@@ -1952,9 +2024,7 @@ class ProposalService:
                 if cs is not None:
                     part.om_state[side] = states[cs][1]
         parts = [
-            part
-            for part in p.parts
-            if ((not _fully_applied(part)) if every else _interrupted(part))
+            part for part in p.parts if ((not fully_applied(part)) if every else _interrupted(part))
         ]
         refreshed: Refreshed = {}
         if parts:
@@ -2064,7 +2134,7 @@ class ProposalService:
             return refreshed[part.n][0] if part.n in refreshed else part.operations
 
         target = await self._target(p.model, om=om)
-        open_parts = [part for part in p.parts if not _fully_applied(part)]
+        open_parts = [part for part in p.parts if not fully_applied(part)]
         ops = [op for part in open_parts for op in ops_of(part)]
         self._require_pair(target, ops)
         applied = [part for part in p.parts if part.om_state.get("glossary") == "APPLIED"]
@@ -2230,7 +2300,7 @@ class ProposalService:
             )
 
 
-def _fully_applied(part: ProposalPart) -> bool:
+def fully_applied(part: ProposalPart) -> bool:
     """Every side with a change set is APPLIED (vacuously true for a part without any)."""
     return all(
         part.om_state.get(side) == "APPLIED"

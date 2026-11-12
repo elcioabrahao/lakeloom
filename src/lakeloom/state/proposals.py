@@ -22,8 +22,9 @@ if TYPE_CHECKING:
 
 __all__ = ["OPEN_STATUSES", "ProposalRepository", "ProposalRow"]
 
-# Proposals whose operations are still pending in OM (dedupe treats their ops as proposed).
-OPEN_STATUSES = ("draft", "submitted")
+# Proposals whose operations are still pending in OM (dedupe treats their ops as proposed)
+# and that can still be discarded: a review asked for changes, or an apply stopped part-way.
+OPEN_STATUSES = ("draft", "submitted", "changes_requested", "apply_failed")
 _WIDTHS = {"principal_subject": 255, "principal_type": 64, "client": 255}
 
 
@@ -124,7 +125,7 @@ class ProposalRepository:
                 await session.delete(row)
 
     async def open_for_model(self, model: str) -> "list[Proposal]":
-        """Draft and submitted proposals of ``model``, oldest first."""
+        """Open proposals of ``model`` (:data:`OPEN_STATUSES`), oldest first."""
         stmt = (
             select(ProposalRow)
             .where(ProposalRow.model == model, ProposalRow.status.in_(OPEN_STATUSES))

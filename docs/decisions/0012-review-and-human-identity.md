@@ -377,6 +377,69 @@ review path never falls back to the bot.
   `propose`. `Caller` and `Actor` moved to `lakeloom.core.callers` (re-exported by
   `lakeloom.core.proposals`).
 
+### Review (M2b Task 5)
+
+`lakeloom.core.review.ReviewService.review(proposal_id, decision, *, principal, client,
+reason, confirm_token)` decides `approve`, `reject` or `request_changes` (FR-REV-01..03),
+audited as `review_proposal`.
+
+- **Checks, in order, nothing sent to OM on a refusal:** human principal (an agent gets
+  `forbidden` "agent principals cannot review proposals (FR-REV-01)"); the
+  `lakeloom:review` scope; the model's `review_groups`; a reason (reject) or comment
+  (request_changes), stored as `UntrustedText` capped at 4,000 characters; the status
+  (approve: `submitted` | `apply_failed`; reject: `submitted` | `changes_requested` |
+  `apply_failed`; request_changes: `submitted`); `OnBehalfOf.om_for` (its error is final,
+  never the bot); and `get_permissions` on the glossary and, when paired, the native
+  ontology must allow `APPLY_PERMISSIONS`, else `forbidden` "OpenMetadata does not grant
+  <user> review permission on <model>". `request_changes` touches nothing in OM, so it
+  stops after the status check and needs no OM identity (it works with `review_identity`
+  `unavailable`).
+- **Confirm token** (approve, reject): preview (summary + structured diff) -> token ->
+  execute. The digest binds the reviewer, the decision, the proposal's status and revision,
+  and every change set's OM version and state (read as the reviewer). The whole run holds
+  the proposal lock and stores with compare-and-set, so a second confirm of the same token
+  (concurrent or replayed) is a `conflict`; with a token, a status that no longer allows
+  the decision is also a `conflict`.
+- **Reviewer identity only.** Every OM call of a review (permissions, state reads, rebuild,
+  apply, tags, discards, the description read-back) goes through the reviewer's client;
+  `ProposalService` is used only for its lock, its store write and `rebuild_parts(om=…)`.
+  The unit tests record the token of every fake OM call and assert no review call carried
+  the bot token.
+- **Approve** applies part by part, in order, glossary side then native side, after
+  reading each side's state from OM (a set an earlier attempt applied counts as applied,
+  so a retry continues from the first unapplied part). **Mechanical staleness** (the only
+  automatic re-draft): before a native side, its `baseWorkingRevision` behind the
+  ontology's `workingRevision` (an earlier part was just applied), or a side an
+  interrupted rebuild discarded → `rebuild_parts([part], om=reviewer, submit=True)` from
+  the same reviewed operations, old ids in `superseded_change_set_ids`. Glossary sides are
+  applied as drafted (draft ids survive apply). A `stale_revision` at apply gets one
+  rebuild and retry; a second is `apply_failed`. A `stale_base` (an agent-supplied
+  `base_version`) is never refreshed here: `conflict` naming OM's entity ids, hint "call
+  rebase_proposal, then submit_proposal for a new review", status `apply_failed`. Other
+  failures: `apply_failed` with progress stored; `OMForbidden` → `forbidden`. The OM
+  state is stored after every side.
+- **Realizations** are tagged after all parts (`add_asset_tags` / `remove_asset_tags`,
+  term FQN = the concept's FQN, `<model glossary>.<Concept>` for a bare name), skipping op
+  keys in `Proposal.realizations_applied`; a tag failure is `apply_failed` and the retry
+  tags only the rest.
+- **Success:** status `applied`; a `ReviewRecord` (decision, reviewer subject and user
+  name, `om_user` = `applicationResult.appliedBy`, applied change set ids, warnings);
+  `ModelService.invalidate(model)` (also after a partial apply). A description an applied
+  `UpdateConcept` carried is read back; if OM holds another, the record gets a warning.
+  On rc1 this is normally silent (UPDATE_TERM descriptions apply, above). A failed attempt
+  also leaves a `ReviewRecord` whose last warning says where it stopped.
+- **Reject** discards every change set that is not applied, as the reviewer (404 = gone);
+  status `rejected`; the reason is stored. **Request changes**: status
+  `changes_requested`, comment stored.
+- **Reviews are provenance** (FR-REV-03): `Proposal.reviews` is stored with the proposal
+  and rendered by `summary_markdown` under "Reviews", reasons as quoted untrusted text.
+- **Open statuses and applied parts (ruling B).** `OPEN_STATUSES` is now `draft`,
+  `submitted`, `changes_requested`, `apply_failed`: their operations count as pending for
+  dedupe, and they can be discarded. Discard and reject of a proposal with applied parts
+  discard only the unapplied sides; the preview, the stored record (`warnings` of the
+  proposal on discard, of the `ReviewRecord` on reject) and the summary say "parts already
+  applied stay in OpenMetadata: …". OM has no undo for an applied change set.
+
 ## Consequences
 
 - A Lakeloom reviewer action can reach OM as the reviewer through token exchange
