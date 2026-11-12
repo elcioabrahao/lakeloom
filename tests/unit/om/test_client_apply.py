@@ -183,6 +183,42 @@ async def test_with_token_sends_that_token_and_shares_transport() -> None:
     await http.aclose()
 
 
+@respx.mock
+async def test_identities_sharing_a_transport_share_no_cookies() -> None:
+    """A Set-Cookie OM sends to one identity is never sent by another (nor kept at all)."""
+    http = httpx.AsyncClient()
+    bot = OMClient(BASE, SecretStr(BOT_TOKEN), http=http)
+    alice = bot.with_token(SecretStr(USER_TOKEN))
+    bob = bot.with_token(SecretStr("bob-om-token-value"))
+    user = {"id": GID, "name": "alice", "email": "alice@example.invalid", "isBot": False}
+    route = respx.get(f"{API}/users/loggedInUser").mock(
+        side_effect=[
+            httpx.Response(200, json=user, headers={"Set-Cookie": "JSESSIONID=alice; Path=/"}),
+            httpx.Response(200, json=user),
+            httpx.Response(200, json=user),
+        ]
+    )
+    await alice.get_current_user()
+    await bob.get_current_user()
+    await bot.get_current_user()
+    assert all("cookie" not in call.request.headers for call in route.calls)
+    assert len(http.cookies.jar) == 0
+    await http.aclose()
+
+
+@respx.mock
+async def test_http_401_marks_the_session_rejected() -> None:
+    http = httpx.AsyncClient()
+    alice = OMClient(BASE, None, http=http).with_token(SecretStr(USER_TOKEN))
+    respx.get(f"{API}/users/loggedInUser").respond(401, json={"message": "expired"})
+    assert alice.session_rejected is False
+    with pytest.raises(OMError) as info:
+        await alice.get_current_user()
+    assert info.value.status == 401 and alice.session_rejected is True
+    assert USER_TOKEN not in str(info.value)
+    await http.aclose()
+
+
 async def test_with_token_of_an_owning_client_does_not_close_it() -> None:
     bot = OMClient(BASE, SecretStr(BOT_TOKEN))
     user = bot.with_token(SecretStr(USER_TOKEN))

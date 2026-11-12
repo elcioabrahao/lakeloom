@@ -10,6 +10,10 @@ Paths are keys of the committed spec (``servers[0].url`` is ``/api``), verified 
 ``tests/unit/om/test_spec_paths.py``. The bot token is only ever placed in the request
 header; it is never part of an exception message, log line or repr. The same holds for user
 and exchanged tokens given to :meth:`OMClient.with_token` (NFR-SEC-11).
+
+Identities share one ``httpx.AsyncClient`` (its connection pool) but never its state: the
+client's cookie jar refuses every cookie, so a ``Set-Cookie`` OM sends to one identity is
+never sent with another's requests (OM's API authenticates by bearer token alone).
 """
 
 import asyncio
@@ -19,6 +23,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
+from http.cookiejar import Cookie, DefaultCookiePolicy
 from typing import Any, ClassVar, Literal, Self, cast
 from urllib.parse import quote
 
@@ -158,6 +163,25 @@ class OMConflict(OMError):
         return self.entity_ids
 
 
+class _NoCookies(DefaultCookiePolicy):
+    """Accepts and returns no cookie: identities sharing a transport share no session."""
+
+    def set_ok(self, cookie: Cookie, request: Any) -> bool:
+        return False
+
+    def return_ok(self, cookie: Cookie, request: Any) -> bool:
+        return False
+
+
+_NO_COOKIES = _NoCookies()
+
+
+def _refuse_cookies(http: httpx.AsyncClient) -> None:
+    jar = http.cookies.jar
+    jar.set_policy(_NO_COOKIES)
+    jar.clear()
+
+
 class OMClient:
     PATHS: ClassVar[dict[str, tuple[str, str]]] = {
         "get_version": ("GET", "/v1/system/version"),
@@ -212,6 +236,9 @@ class OMClient:
         self._token = token
         self._owns_http = http is None
         self._http = http if http is not None else httpx.AsyncClient(timeout=timeout)
+        _refuse_cookies(self._http)
+        # Set when OM answered HTTP 401 to this client: its token was rejected or expired.
+        self.session_rejected = False
 
     def __repr__(self) -> str:
         return f"OMClient(base_url={self._base_url!r})"
@@ -219,8 +246,9 @@ class OMClient:
     def with_token(self, token: SecretStr) -> Self:
         """A client acting as another OM identity (a reviewer's exchanged token; FR-OM-05).
 
-        Same base URL and the same ``httpx.AsyncClient``, which the new client does not own:
-        its :meth:`aclose` is a no-op. Cheap enough to create per request.
+        Same base URL and the same ``httpx.AsyncClient`` (connection pool; no cookies are
+        kept, module docstring), which the new client does not own: its :meth:`aclose` is a
+        no-op. Cheap enough to create per request.
         """
         return type(self)(self._base_url, token, http=self._http)
 
@@ -283,6 +311,8 @@ class OMClient:
         if status >= 500:
             raise OMUnavailable(f"OpenMetadata returned HTTP {status}", status)
         if status >= 400:
+            if status == 401:
+                self.session_rejected = True
             raise _client_error(response)
         return response
 
