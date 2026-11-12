@@ -20,17 +20,27 @@ part is stored right after its change sets exist; a change set whose companion w
 is discarded and listed in ``Proposal.abandoned_change_sets``, and operations appended to one
 side are removed again when the other side fails. So no OM change set is ever unrecorded and
 no recorded operation is missing from OM. OM conflicts become ``conflict`` errors with the
-hint to rebase (M2b).
+hint to rebase.
+
+Rebuild and rebase (FR-OM-03, ADR 0012 § Rebuild): :meth:`ProposalService.rebuild_parts`
+re-drafts parts against OM's current state with the client it is given (the bot for
+``rebase``, the reviewer's in review); ``rebase`` rebuilds every part that is not fully
+applied and refreshes agent-supplied base versions with a warning. ``propose_change`` and
+``submit`` accept a ``changes_requested`` proposal and rebuild it first.
+
+Per-model access (NFR-SEC-07): ``propose_from_scan``, ``propose_change``,
+``propose_realization`` and ``rebase`` require the model's ``propose_groups``
+(:func:`~lakeloom.core.model_policy.require_group`; empty = anyone, the CLI Actor exempt).
 
 Audit ownership (NFR-SEC-12): exactly one audit record per call of a write method
-(``propose_from_scan``, ``propose_change``, ``propose_realization``, ``submit``, ``discard``;
-``tool`` = the MCP tool name, ``submit_proposal`` and ``discard_proposal`` included, in the CLI
-too). The service writes it **only when constructed with an** ``audit`` **repository** (the
-CLI). MCP tools construct it with ``audit=None`` and rely on ``guarded(audited=True,
-audit=...)``; the service still fills the running call's
-:func:`~lakeloom.core.audit.current_audit` context (model, proposal, change set, and the error
-code of a partial result, audited as ``error``) so guarded's record carries them. Reads
-(``get_proposal``, ``summary_markdown``, ``diff``) are not audited.
+(``propose_from_scan``, ``propose_change``, ``propose_realization``, ``submit``, ``discard``,
+``rebase``; ``tool`` = the MCP tool name, ``submit_proposal``, ``discard_proposal`` and
+``rebase_proposal`` included, in the CLI too). The service writes it **only when
+constructed with an** ``audit`` **repository** (the CLI). MCP tools construct it with
+``audit=None`` and rely on ``guarded(audited=True, audit=...)``; the service still fills the
+running call's :func:`~lakeloom.core.audit.current_audit` context (model, proposal, change
+set, and the error code of a partial result, audited as ``error``) so guarded's record
+carries them. Reads (``get_proposal``, ``summary_markdown``, ``diff``) are not audited.
 
 Relations (hybrid model): each ``AddRelation`` is a glossary link plus a native object
 property named after the relation; when OM lacks the relationship type the glossary link
@@ -57,22 +67,23 @@ import json
 import logging
 import uuid
 import weakref
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, cast
 from urllib.parse import quote
 
 from pydantic import BaseModel, Field
 
 from lakeloom.config import Settings
 from lakeloom.core.audit import AuditContext, AuditRecord, current_audit, record
+from lakeloom.core.callers import Actor, Caller
 from lakeloom.core.concepts import direct_glossary_tags, resolve_concept
 from lakeloom.core.confirm import ConfirmTokens
 from lakeloom.core.context import resolve_asset
 from lakeloom.core.dedupe import dedupe, import_slugs, screen
 from lakeloom.core.mapper import map_scan
-from lakeloom.core.model_policy import ModelPolicyEntry, policy_for
+from lakeloom.core.model_policy import ModelPolicyEntry, access_for, policy_for, require_group
 from lakeloom.core.models import ModelInfo, ModelService
 from lakeloom.core.operations import (
     AddAttribute,
@@ -96,6 +107,7 @@ from lakeloom.core.operations import (
     UpdateConcept,
     draft_term_id,
     op_key,
+    to_om,
     to_om_all,
 )
 from lakeloom.errors import LakeloomError
@@ -110,6 +122,9 @@ from lakeloom.untrusted import code_span, quote_untrusted, single_line
 
 __all__ = [
     "DISCARD_TOOL",
+    "REBASE_HINT",
+    "REBASE_STATUSES",
+    "REBASE_TOOL",
     "AbandonedChangeSet",
     "Actor",
     "Caller",
@@ -132,11 +147,18 @@ ProposalStatus = Literal[
 Side = Literal["glossary", "native"]
 SIDES: tuple[Side, Side] = ("glossary", "native")
 DISCARD_TOOL = "discard_proposal"
-REBASE_HINT = "the base version changed; call rebase_proposal (available in M2b)"
+REBASE_HINT = (
+    "the base version changed; call rebase_proposal, then submit_proposal for a new review"
+)
 UNPAIRED_HINT = "call create_model with pair_existing=true"
 NOTHING = "nothing to propose (all matched existing concepts)"
 DRAFT_TERM_VERSION = 0.1  # a term created in the same proposal; OM starts terms at 0.1
 PROVENANCE_FENCE = "lakeloom-provenance"
+REBASE_TOOL = "rebase_proposal"
+# statuses rebase accepts (an applied, rejected or discarded proposal is final)
+REBASE_STATUSES = ("draft", "submitted", "changes_requested", "apply_failed")
+_GONE = ("DISCARDED", "MISSING")  # a change set OM no longer holds as a draft
+_MAX_CS_NAME = 256  # OM's change-set name limit (ADR 0011)
 _NATIVE_OPS = (AddConcept, RemoveConcept, AddAttribute, RemoveAttribute, AddAxiom, RemoveAxiom)
 _MAX_HINT_ITEMS = 20
 _MAX_DETAIL_ITEMS = 100  # per list in NothingToPropose.details()
@@ -148,25 +170,6 @@ _OM_READS = 8  # concurrent change-set reads
 
 
 # --- data -----------------------------------------------------------------------------------
-
-
-class Caller(Protocol):
-    """Who calls: an authenticated :class:`~lakeloom.server.auth.Principal` or an :class:`Actor`."""
-
-    @property
-    def subject(self) -> str: ...
-
-    @property
-    def type(self) -> str: ...
-
-
-@dataclass(frozen=True)
-class Actor:
-    """A caller outside MCP (CLI, tests); ``scopes`` as a token would grant them."""
-
-    subject: str
-    type: str = "agent"
-    scopes: frozenset[str] = frozenset()
 
 
 def _sides() -> dict[str, str | None]:
@@ -183,6 +186,11 @@ class ProposalPart(BaseModel):
     change_set_ids: dict[str, str | None] = Field(default_factory=_sides)
     change_set_names: dict[str, str | None] = Field(default_factory=_sides)
     om_state: dict[str, str | None] = Field(default_factory=_sides)
+    # rebuilds (rebase, ADR 0012 § Rebuild): replaced change sets, the count so far, and the
+    # names the sides had before their first rebuild (rebuilt names add ``-r<k>``)
+    superseded_change_set_ids: list[str] = []
+    rebuilds: int = 0
+    original_names: dict[str, str | None] = Field(default_factory=_sides)
 
 
 class TableProvenance(BaseModel):
@@ -883,15 +891,16 @@ class ProposalService:
 
     # -- OM context ----------------------------------------------------------------------
 
-    async def _target(self, model: str) -> _Target:
-        info = await self._models.get_model(model)
+    async def _target(self, model: str, *, om: OMClient | None = None) -> _Target:
+        om = om or self._om
+        info = await self._models.get_model(model, om=om)
         if info.base_iri is None:
             raise _fail(
                 f"model {model!r} has no base IRI",
                 "configure LAKELOOM_PUBLIC_URL so model IRIs can be derived",
             )
         ontology = await _om(
-            f"looking up the native ontology of {model!r}", self._om.get_ontology_by_name(model)
+            f"looking up the native ontology of {model!r}", om.get_ontology_by_name(model)
         )
         return _Target(info, info.base_iri, ontology)
 
@@ -903,14 +912,17 @@ class ProposalService:
                 UNPAIRED_HINT,
             )
 
-    async def _terms_by_name(self, info: ModelInfo) -> dict[str, list[OMGlossaryTerm]]:
+    async def _terms_by_name(
+        self, info: ModelInfo, *, om: OMClient | None = None
+    ) -> dict[str, list[OMGlossaryTerm]]:
+        om = om or self._om
         out: dict[str, list[OMGlossaryTerm]] = {}
         after: str | None = None
         seen: set[str] = set()
         while True:
             page = await _om(
                 f"listing the terms of {info.slug!r}",
-                self._om.list_terms(info.glossary_id, after=after, limit=100),
+                om.list_terms(info.glossary_id, after=after, limit=100),
             )
             for term in page.data:
                 out.setdefault(term.name, []).append(term)
@@ -919,11 +931,23 @@ class ProposalService:
             seen.add(page.after)
             after = page.after
 
-    async def _context(self, target: _Target, ops: Sequence[ProposalOperation]) -> OMContext:
+    async def _context(
+        self,
+        target: _Target,
+        ops: Sequence[ProposalOperation],
+        *,
+        existing: Collection[str] = (),
+        om: OMClient | None = None,
+    ) -> OMContext:
         """Everything ``to_om_all`` needs for ``ops`` (the whole proposal), read from OM.
-        Fails closed (``validation_error``) when a referenced term is missing."""
+        Fails closed (``validation_error``) when a referenced term is missing. ``existing``
+        names concepts an ``AddConcept`` in ``ops`` created that OM now has (an applied part):
+        they resolve as existing terms."""
+        om = om or self._om
         slug = target.info.slug
-        created = {op.name: op for op in ops if isinstance(op, AddConcept)}
+        created = {
+            op.name: op for op in ops if isinstance(op, AddConcept) and op.name not in existing
+        }
         term_ids: dict[str, str] = {n: draft_term_id(op) for n, op in created.items()}
         term_versions: dict[str, float] = dict.fromkeys(created, DRAFT_TERM_VERSION)
         terms: dict[str, TermSnapshot] = {}
@@ -934,7 +958,7 @@ class ProposalService:
             if (name := _local_ref(ref, slug)) is not None and name not in created
         }
         if wanted:
-            by_name = await self._terms_by_name(target.info)
+            by_name = await self._terms_by_name(target.info, om=om)
             for name in sorted(wanted):
                 found = by_name.get(name, [])
                 if not found:
@@ -962,7 +986,7 @@ class ProposalService:
         relationship_types: dict[str, str] = {}
         if any(isinstance(op, AddRelation) for op in ops):
             relationship_types = await _om(
-                "listing relationship types", self._om.list_relationship_types()
+                "listing relationship types", om.list_relationship_types()
             )
         native_ids: dict[str, str] = {}
         native_versions: dict[str, float] = {}
@@ -970,7 +994,7 @@ class ProposalService:
         removes = any(isinstance(op, RemoveConcept | RemoveAttribute | RemoveAxiom) for op in ops)
         if target.ontology is not None and (removes or terms):
             concepts, properties, axioms = await _om(
-                f"listing the native members of {slug!r}", self._om.list_native_members(slug)
+                f"listing the native members of {slug!r}", om.list_native_members(slug)
             )
             # existing terms whose class the native ontology lacks get one (pair_existing)
             native_classes = {str(iri) for m in concepts if (iri := m.get("iri")) is not None}
@@ -1051,14 +1075,18 @@ class ProposalService:
         side: Side,
         ops: list[dict[str, Any]],
         t: _Target,
+        *,
+        om: OMClient | None = None,
+        name: str | None = None,
     ) -> None:
-        name = self._cs_name(p, part.n, side)
+        om = om or self._om
+        name = name or self._cs_name(p, part.n, side)
         description = part_description(p, shown, side)
         display = f"Lakeloom proposal {p.id} part {part.n} ({side})"
         if side == "glossary":
             cs = await _om(
                 f"creating change set {name}",
-                self._om.create_change_set(
+                om.create_change_set(
                     name=name,
                     glossary_id=t.info.fqn,
                     description=description,
@@ -1071,11 +1099,11 @@ class ProposalService:
                 raise _fail(f"model {t.info.slug!r} has no paired native ontology", UNPAIRED_HINT)
             state = await _om(
                 f"reading the working revision of {t.info.slug!r}",
-                self._om.get_ontology_state(t.ontology.id),
+                om.get_ontology_state(t.ontology.id),
             )
             cs = await _om(
                 f"creating change set {name}",
-                self._om.create_change_set(
+                om.create_change_set(
                     name=name,
                     glossary_id=None,
                     ontology=t.info.slug,
@@ -1230,6 +1258,7 @@ class ProposalService:
     ) -> Proposal:
         async def run(trail: AuditContext) -> tuple[Proposal, str | None]:
             trail.model = model
+            self._require_propose(model, principal)
             # dedupe reads the open proposals of the model: two concurrent scans of one model
             # must not both propose the same concept (single replica; see module docstring)
             async with self._lock(f"model:{model}"):
@@ -1371,7 +1400,8 @@ class ProposalService:
                 p = await self._repo.get(proposal_id)
                 trail.model = p.model
                 self._require_owner(p, principal)
-                self._require_draft(p, "changed")
+                self._require_propose(p.model, principal)
+                self._require_draft(p, "changed", reopen=True)
                 ops: list[ProposalOperation] = []
                 realized: list[str] = []
                 for op in stamped:
@@ -1382,6 +1412,7 @@ class ProposalService:
                         ops.append(out)
                 if not ops:
                     raise NothingToPropose([], realized)
+                await self._reopen(trail, p)  # changes requested: rebuild first, then append
                 await self._append(trail, p, ops, screened=True, dropped=realized)
                 return p, None
 
@@ -1415,12 +1446,19 @@ class ProposalService:
         )
 
     @staticmethod
-    def _require_draft(p: Proposal, action: str) -> None:
-        if p.status != "draft":
-            raise _fail(
-                f"proposal {p.id} is {p.status}; only draft proposals can be {action}",
-                "start a new proposal (propose_from_scan or propose_realization)",
-            )
+    def _require_draft(p: Proposal, action: str, *, reopen: bool = False) -> None:
+        """Only a draft (``reopen``: or a ``changes_requested`` proposal, rebuilt first)."""
+        if p.status == "draft" or (reopen and p.status == "changes_requested"):
+            return
+        allowed = "draft or changes_requested" if reopen else "draft"
+        raise _fail(
+            f"proposal {p.id} is {p.status}; only {allowed} proposals can be {action}",
+            "start a new proposal (propose_from_scan or propose_realization)",
+        )
+
+    def _require_propose(self, model: str, principal: Caller) -> None:
+        """NFR-SEC-07: the model's ``propose_groups`` (an Actor is exempt)."""
+        require_group(principal, access_for(self._policies, model), "propose", model=model)
 
     async def _append(
         self,
@@ -1625,6 +1663,7 @@ class ProposalService:
                         )
                     trail.model = p.model
                     self._require_owner(p, principal)
+                    self._require_propose(p.model, principal)
                     self._require_draft(p, "changed")
                     op = cast(
                         "AddRealization", await self._realization(p.model, concept, asset, column)
@@ -1633,6 +1672,7 @@ class ProposalService:
                     return p, None
             if model is None:
                 raise _fail("pass a model or a proposal_id", "name the model to propose into")
+            self._require_propose(model, principal)
             await self._models.get_model(model)
             op = cast("AddRealization", await self._realization(model, concept, asset, column))
             p = await self._new_realization_proposal(model, op, principal, client)
@@ -1754,7 +1794,8 @@ class ProposalService:
                 p = await self._repo.get(proposal_id)
                 trail.model = p.model
                 self._require_owner(p, principal)
-                self._require_draft(p, "submitted")
+                self._require_draft(p, "submitted", reopen=True)
+                await self._reopen(trail, p)  # changes requested: rebuild first, then submit
                 await self._transition(trail, p, "SUBMITTED", self._om.submit_change_set)
                 p.status = "submitted"
                 await self._save(p)
@@ -1854,6 +1895,325 @@ class ProposalService:
                 "discarded",
                 "nothing to do",
             )
+
+    # -- rebuild / rebase (ADR 0012 § Rebuild) -------------------------------------------------
+
+    async def rebase(self, proposal_id: str, *, principal: Caller, client: str | None) -> Proposal:
+        """FR-OM-03: rebuild every part that is not fully applied against OM's current state
+        (fresh term ids and versions, the current native working revision), with the bot
+        client. Agent-supplied base versions are refreshed with a warning; a referenced entity
+        OM no longer has is a ``conflict`` and leaves the proposal unchanged. The proposal
+        becomes a ``draft`` (submit it again for a new review)."""
+
+        async def run(trail: AuditContext) -> tuple[Proposal, str | None]:
+            trail.proposal_id = proposal_id
+            async with self._lock(proposal_id):
+                p = await self._repo.get(proposal_id)
+                trail.model = p.model
+                self._require_owner(p, principal)
+                self._require_propose(p.model, principal)
+                if p.status not in REBASE_STATUSES:
+                    raise _fail(
+                        f"proposal {p.id} is {p.status}; only {', '.join(REBASE_STATUSES)} "
+                        "proposals can be rebased",
+                        "start a new proposal (propose_from_scan or propose_realization)",
+                    )
+                await self._rebuild_open(trail, p, every=True)
+                return p, None
+
+        return await self._audited(REBASE_TOOL, principal, client, run)
+
+    async def _reopen(self, trail: AuditContext, p: Proposal) -> None:
+        """Before ``propose_change`` / ``submit``: a ``changes_requested`` proposal is rebuilt
+        (drafts, not submitted) and becomes a draft; a draft whose rebuild was interrupted
+        (a side discarded, not yet replaced) finishes it."""
+        if p.status == "changes_requested":
+            await self._rebuild_open(trail, p, every=True)
+        elif p.status == "draft" and any(_interrupted(part) for part in p.parts):
+            await self._rebuild_open(trail, p, every=False)
+
+    async def _rebuild_open(self, trail: AuditContext, p: Proposal, *, every: bool) -> None:
+        """Rebuild the parts that are not fully applied (``every``) or whose rebuild was
+        interrupted, after refreshing base versions; the proposal becomes a draft (stored)."""
+        states = await self._om_states(p)
+        for part in p.parts:
+            for side in SIDES:
+                cs = part.change_set_ids.get(side)
+                if cs is not None:
+                    part.om_state[side] = states[cs][1]
+        parts = [
+            part
+            for part in p.parts
+            if ((not _fully_applied(part)) if every else _interrupted(part))
+        ]
+        if parts:
+            target = await self._target(p.model)
+            refreshed, warnings = await self._refreshed_bases(p, parts, target)
+            for part, ops in refreshed:
+                part.operations = ops
+            p.warnings.extend(w for w in warnings if w not in p.warnings)
+        p.status = "draft"
+        await self.rebuild_parts(p, parts, om=self._om, submit=False, trail=trail)
+        await self._save(p)
+
+    async def _refreshed_bases(
+        self, p: Proposal, parts: Sequence[ProposalPart], target: _Target
+    ) -> tuple[list[tuple[ProposalPart, list[ProposalOperation]]], list[str]]:
+        """Each part's operations with every agent-supplied ``base_version`` (UpdateConcept,
+        RemoveConcept) set to the term's current OM version, plus a warning per changed
+        entity. Nothing is modified here; a term OM no longer has is a ``conflict``."""
+        slug = p.model
+        checked = [
+            op
+            for part in parts
+            if part.om_state.get("glossary") != "APPLIED"
+            for op in part.operations
+            if isinstance(op, UpdateConcept | RemoveConcept)
+        ]
+        if not checked:
+            return [], []
+        by_name = await self._terms_by_name(target.info)
+        current: dict[str, float] = {}
+        gone: list[str] = []
+        for op in checked:
+            name = _local_ref(op.fqn, slug)
+            if name is None:
+                continue  # another model's term: to_om_all refuses it
+            found = by_name.get(name, [])
+            if not found:
+                gone.append(f"{slug}.{name}")
+            elif len(found) == 1 and found[0].version is not None:
+                current[name] = found[0].version
+        if gone:
+            raise LakeloomError(
+                "conflict",
+                "OpenMetadata no longer has "
+                + ", ".join(code_span(g) for g in sorted(set(gone)))
+                + f"; proposal {p.id} was not rebased",
+                "remove the operations on it (discard the proposal and propose again without "
+                "them), or check the name with find_concepts",
+            )
+        warnings: list[str] = []
+        out: list[tuple[ProposalPart, list[ProposalOperation]]] = []
+        for part in parts:
+            if part.om_state.get("glossary") == "APPLIED":
+                continue
+            ops: list[ProposalOperation] = []
+            for op in part.operations:
+                name = (
+                    _local_ref(op.fqn, slug)
+                    if isinstance(op, UpdateConcept | RemoveConcept)
+                    else None
+                )
+                if (
+                    isinstance(op, UpdateConcept | RemoveConcept)
+                    and name in current
+                    and float(op.base_version) != current[name]
+                ):
+                    new = _version_text(current[name])
+                    warnings.append(_refresh_warning(f"{slug}.{name}", op.base_version, new))
+                    op = op.model_copy(update={"base_version": new})
+                ops.append(op)
+            out.append((part, ops))
+        return out, warnings
+
+    async def rebuild_parts(
+        self,
+        p: Proposal,
+        parts: Sequence[ProposalPart],
+        *,
+        om: OMClient,
+        submit: bool,
+        trail: AuditContext,
+    ) -> None:
+        """Re-draft ``parts`` of ``p`` against OM's current state; the caller holds the
+        proposal's lock. Every OM call goes through ``om`` (the bot for rebase, the
+        reviewer's client in review). All payloads are built first (fail closed, nothing
+        written). Then, per part: its sides that are not APPLIED are discarded (a 404 or an
+        already discarded set: gone), recreated as ``<original name>-r<k>`` (``k`` = the
+        part's rebuild count) with the old ids moved to ``superseded_change_set_ids``, and
+        submitted when ``submit``. An APPLIED side is never rebuilt. Progress is stored after
+        each part and before an error propagates (a side discarded but not yet replaced keeps
+        its old id as ``DISCARDED``, and the next rebuild continues)."""
+        if not parts:
+            return
+        target = await self._target(p.model, om=om)
+        open_parts = [part for part in p.parts if not _fully_applied(part)]
+        ops = [op for part in open_parts for op in part.operations]
+        self._require_pair(target, ops)
+        existing = {
+            op.name
+            for part in p.parts
+            if part.om_state.get("glossary") == "APPLIED"
+            for op in part.operations
+            if isinstance(op, AddConcept)
+        }
+        ctx = await self._context(target, ops, existing=existing, om=om)
+        for part in parts:
+            self._require_native_members(p, part, ctx)
+        planned = [(part, to_om_all(part.operations, ctx)) for part in parts]  # fail closed
+        for part, om_ops in planned:
+            try:
+                await self._rebuild_part(p, part, om_ops, ctx, target, om=om, trail=trail)
+                if submit:
+                    await self._submit_part(part, om=om, trail=trail)
+            except BaseException:
+                await asyncio.shield(self._keep_progress(p))
+                raise
+            await self._save(p)
+
+    @staticmethod
+    def _require_native_members(p: Proposal, part: ProposalPart, ctx: OMContext) -> None:
+        """A native definition a removal names must still exist (``conflict`` otherwise)."""
+        if part.om_state.get("native") == "APPLIED" or not ctx.paired:
+            return
+        gone: list[str] = []
+        for op in part.operations:
+            if isinstance(op, RemoveAttribute | RemoveAxiom):
+                try:
+                    to_om(op, ctx)
+                except LakeloomError:
+                    gone.append(f"{p.model}.{_bare(op.concept)}.{op.name}")
+        if gone:
+            raise LakeloomError(
+                "conflict",
+                "OpenMetadata no longer has " + ", ".join(code_span(g) for g in gone),
+                "remove the operations on it (discard the proposal and propose again without them)",
+            )
+
+    async def _rebuild_part(
+        self,
+        p: Proposal,
+        part: ProposalPart,
+        planned: OMOps,
+        ctx: OMContext,
+        target: _Target,
+        *,
+        om: OMClient,
+        trail: AuditContext,
+    ) -> None:
+        part.rebuilds += 1
+        old_bases: dict[str, float] = {}
+        for side in SIDES:
+            cs_id = part.change_set_ids.get(side)
+            if cs_id is None or part.om_state.get(side) in _GONE:
+                continue
+            trail.change_set_id = cs_id
+            cs = await _om(f"reading change set {cs_id}", om.get_change_set(cs_id))
+            state = "MISSING" if cs is None else str(cs.state)
+            if cs is not None:
+                old_bases.update(
+                    (o.target_id, o.base_version)
+                    for o in cs.operations
+                    if o.target_id is not None and o.base_version is not None
+                )
+            if state not in (*_GONE, "APPLIED"):
+                try:
+                    cs = await _om(f"discarding change set {cs_id}", om.discard_change_set(cs_id))
+                    state = str(cs.state)
+                except LakeloomError as exc:
+                    if exc.code != "not_found":
+                        raise
+                    state = "MISSING"  # deleted meanwhile: already gone
+            part.om_state[side] = state
+        p.warnings.extend(
+            w for w in self._native_base_warnings(p, part, ctx, old_bases) if w not in p.warnings
+        )
+        sides: list[tuple[Side, list[dict[str, Any]]]] = [
+            ("glossary", planned.glossary),
+            ("native", planned.native),
+        ]
+        for side, side_ops in sides:
+            if part.om_state.get(side) == "APPLIED":
+                continue  # never rebuilt
+            old = part.change_set_ids.get(side)
+            if part.original_names.get(side) is None:
+                part.original_names[side] = part.change_set_names.get(side) or self._cs_name(
+                    p, part.n, side
+                )
+            if side_ops:
+                name = f"{part.original_names[side]}-r{part.rebuilds}"
+                if len(name) > _MAX_CS_NAME:
+                    raise _fail(
+                        f"rebuilt change set name is longer than {_MAX_CS_NAME} characters",
+                        "discard the proposal and propose again",
+                    )
+                await self._create_side(
+                    p, part, part, side, _with_ids(side_ops), target, om=om, name=name
+                )
+                trail.change_set_id = part.change_set_ids[side]
+            else:
+                part.change_set_ids[side] = part.change_set_names[side] = None
+                part.om_state[side] = None
+            if old is not None:
+                part.superseded_change_set_ids.append(old)
+
+    @staticmethod
+    def _native_base_warnings(
+        p: Proposal, part: ProposalPart, ctx: OMContext, old_bases: Mapping[str, float]
+    ) -> list[str]:
+        """A removal's native base version (taken from OM, not from the agent) that moved
+        since the replaced change set was drafted."""
+        if part.om_state.get("native") == "APPLIED":
+            return []
+        out: list[str] = []
+        for op in part.operations:
+            if not isinstance(op, RemoveAttribute | RemoveAxiom):
+                continue
+            item = to_om(op, ctx).native[0]
+            before, now = old_bases.get(str(item["targetId"])), float(item["baseVersion"])
+            if before is not None and before != now:
+                entity = f"{p.model}.{_bare(op.concept)}.{op.name}"
+                out.append(_refresh_warning(entity, _version_text(before), _version_text(now)))
+        return out
+
+    async def _submit_part(self, part: ProposalPart, *, om: OMClient, trail: AuditContext) -> None:
+        for side in SIDES:
+            cs_id = part.change_set_ids.get(side)
+            if cs_id is None or part.om_state.get(side) != "DRAFT":
+                continue
+            trail.change_set_id = cs_id
+            cs = await _om(f"moving change set {cs_id} to SUBMITTED", om.submit_change_set(cs_id))
+            part.om_state[side] = str(cs.state)
+
+    async def _keep_progress(self, p: Proposal) -> None:
+        """Store what a failed rebuild reached; if even that fails, log the change sets."""
+        try:
+            await self._save(p)
+        except Exception as exc:
+            _log.error(
+                "proposal %s: could not store rebuild progress (%s); change sets %s, superseded %s",
+                p.id,
+                type(exc).__name__,
+                p.change_set_ids(),
+                [cs for part in p.parts for cs in part.superseded_change_set_ids],
+            )
+
+
+def _fully_applied(part: ProposalPart) -> bool:
+    """Every side with a change set is APPLIED (vacuously true for a part without any)."""
+    return all(
+        part.om_state.get(side) == "APPLIED"
+        for side in SIDES
+        if part.change_set_ids.get(side) is not None
+    )
+
+
+def _interrupted(part: ProposalPart) -> bool:
+    """A rebuild stopped after discarding a side and before replacing it."""
+    return any(
+        part.change_set_ids.get(side) is not None and part.om_state.get(side) in _GONE
+        for side in SIDES
+    )
+
+
+def _version_text(version: float) -> str:
+    """An OM version as ``base_version`` text (``0.6``, ``2``)."""
+    return f"{version:.6f}".rstrip("0").rstrip(".")
+
+
+def _refresh_warning(entity: str, before: str, after: str) -> str:
+    return f"base version of {entity} refreshed from {before} to {after}; re-review the change"
 
 
 def _native_entry(

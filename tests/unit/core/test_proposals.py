@@ -5,7 +5,7 @@ A fake OM records every call; the state store is a real SQLite database.
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -18,6 +18,7 @@ from test_mapper import col, record, table
 from lakeloom.config import Settings
 from lakeloom.core.audit import AuditContext, audit_context
 from lakeloom.core.confirm import ConfirmTokens
+from lakeloom.core.model_policy import ModelPolicyEntry
 from lakeloom.core.models import ModelService
 from lakeloom.core.operations import (
     AddAttribute,
@@ -88,6 +89,9 @@ class FakeOM:
         self.tables: dict[str, OMTable] = {}
         self.axiom_report = OMAxiomValidation(valid=True)
         self.revision = 5
+        self.created_count = 0
+        # native members per ontology: (concepts, properties, axioms)
+        self.native: dict[str, tuple[list[dict[str, Any]], ...]] = {}
 
     @property
     def client(self) -> OMClient:
@@ -144,7 +148,8 @@ class FakeOM:
         return dict(self.relationship_types)
 
     async def list_native_members(self, name: str):
-        return [], [], []
+        self.calls.append(("list_native_members", name))
+        return self.native.get(name, ([], [], []))
 
     # writes
     def _cs(self, cs_id: str) -> OMChangeSet:
@@ -157,7 +162,11 @@ class FakeOM:
                 "version": data["version"],
                 "description": data["description"],
                 "operations": [
-                    {"id": o.get("id", "x"), "operationType": o["operationType"]}
+                    {
+                        "id": o.get("id", "x"),
+                        "operationType": o["operationType"],
+                        **{k: o[k] for k in ("targetId", "baseVersion") if k in o},
+                    }
                     for o in data["operations"]
                 ],
             }
@@ -167,7 +176,8 @@ class FakeOM:
         self.calls.append(("create_change_set", kw))
         self._maybe_fail("create_native" if kw.get("ontology") else "create_glossary_cs")
         self._maybe_fail("create_change_set")
-        cs_id = f"cs-{len(self.change_sets) + 1}"
+        self.created_count += 1  # not len(change_sets): a test may delete one
+        cs_id = f"cs-{self.created_count}"
         self.change_sets[cs_id] = {
             "name": kw["name"],
             "state": "DRAFT",
@@ -215,8 +225,8 @@ class FakeOM:
         return [kw for name, kw in self.calls if name == "create_change_set"]
 
 
-@pytest.fixture
-async def engine(tmp_path: Path) -> AsyncGenerator[AsyncEngine]:
+@pytest.fixture(name="engine")  # named: test_proposals_rebase imports the function
+async def engine_fixture(tmp_path: Path) -> AsyncGenerator[AsyncEngine]:
     eng = create_engine(f"sqlite:///{tmp_path / 'state.db'}")
     await upgrade(eng)
     yield eng
@@ -224,22 +234,33 @@ async def engine(tmp_path: Path) -> AsyncGenerator[AsyncEngine]:
 
 
 class Kit:
-    def __init__(self, engine: AsyncEngine, om: FakeOM, *, audited: bool, max_ops: int) -> None:
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        om: FakeOM,
+        *,
+        audited: bool,
+        max_ops: int,
+        policies: Sequence[ModelPolicyEntry] = (),
+        client: OMClient | None = None,
+    ) -> None:
         self.om = om
         self.scans = ScanRepository(engine)
         self.repo = ProposalRepository(engine)
         self.audit = AuditRepository(engine)
         self.scanned = 0
         settings = Settings(public_url="http://x", max_proposal_ops=max_ops)  # pyright: ignore[reportCallIssue]
-        self.models = ModelService(om.client, settings)
+        bot = client or om.client  # the service's own (bot) client
+        self.models = ModelService(bot, settings)
         self.service = ProposalService(
-            om.client,
+            bot,
             self.models,
             self.scans,
             self.repo,
             self.audit if audited else None,
             settings,
             confirm=ConfirmTokens(SECRET, 600),
+            policies=policies,
         )
 
     async def scan(self, *tables: ScannedTable) -> str:
@@ -252,10 +273,25 @@ class Kit:
         return list((await self.audit.list(None, None, 100)).items)
 
 
-@pytest.fixture
-def make(engine: AsyncEngine):
-    def build(*, paired: bool = True, audited: bool = True, max_ops: int = 50) -> Kit:
-        return Kit(engine, FakeOM(paired=paired), audited=audited, max_ops=max_ops)
+@pytest.fixture(name="make")
+def make_fixture(engine: AsyncEngine):
+    def build(
+        *,
+        paired: bool = True,
+        audited: bool = True,
+        max_ops: int = 50,
+        policies: Sequence[ModelPolicyEntry] = (),
+        client: Callable[[FakeOM], OMClient] | None = None,
+    ) -> Kit:
+        om = FakeOM(paired=paired)
+        return Kit(
+            engine,
+            om,
+            audited=audited,
+            max_ops=max_ops,
+            policies=policies,
+            client=None if client is None else client(om),
+        )
 
     return build
 
@@ -804,7 +840,9 @@ async def test_conflict_maps_and_store_consistent(make) -> None:
     with pytest.raises(LakeloomError) as info:
         await kit.service.propose_change(p.id, [synonym, attr], principal=AGENT, client=None)
     assert info.value.code == "conflict"
-    assert info.value.hint == "the base version changed; call rebase_proposal (available in M2b)"
+    assert info.value.hint == (
+        "the base version changed; call rebase_proposal, then submit_proposal for a new review"
+    )
     assert native_cs in info.value.message
     # the glossary append was rolled back; the store did not change
     assert kit.om.change_sets[glossary_cs]["operations"] == glossary_before

@@ -325,6 +325,50 @@ exchange form carries `audience=<LAKELOOM_OM_AUDIENCE>` and, unless
 or `upstream_unavailable` and never falls back to forwarding. Exchanged tokens are cached by
 the SHA-256 of the subject token until `expires_in - 30 s`.
 
+### Rebuild (M2b Task 4)
+
+`ProposalService.rebuild_parts(p, parts, *, om, submit, trail)` re-drafts parts of a
+proposal against OM's current state. It is the primitive behind `rebase_proposal` (FR-OM-03)
+and the review service's re-draft of later parts. All its OM calls go through the `om`
+it is given, reads included (the bot for rebase, the reviewer's client in review), so a
+review path never falls back to the bot.
+
+- **Fail closed first.** One fresh `OMContext` (current term ids and versions; concepts
+  created by a part whose glossary set is `APPLIED` now resolve as existing terms, with
+  their kept draft ids) is read, and every part's payload is built with `to_om_all` (one
+  call per part, so no duplicate `UPSERT_CONCEPT`) before anything is written. A removal
+  of a native definition OM no longer has is a `conflict` naming it.
+- **Per part, in order:** the part's rebuild count `k` goes up by one; each side that is
+  not `APPLIED` and not already gone is read (`get_change_set`) and discarded (a 404 counts
+  as gone); each such side is recreated as `<original name>-r<k>` (the name before the
+  first rebuild, kept in `ProposalPart.original_names`; well under OM's 256-character
+  limit and within its name pattern), with a fresh `baseWorkingRevision`, and the old id
+  is moved to `ProposalPart.superseded_change_set_ids`. With `submit` the new sets are
+  submitted. An `APPLIED` side is never rebuilt; a partially applied part (glossary
+  applied, native not) gets a new native set only.
+- **Progress** is stored after each part, and before an error propagates. A side discarded
+  but not yet replaced keeps its old id with state `DISCARDED`; the next rebuild (rebase,
+  or `propose_change` / `submit` on that draft) continues from there. Every change set OM
+  holds stays recorded (current, superseded or abandoned).
+- **Rebase** (`ProposalService.rebase`, audited as `rebase_proposal`): owner (or admin)
+  only, and the model's `propose_groups`; status `draft`, `submitted`,
+  `changes_requested` or `apply_failed`. It refreshes the change-set states from OM,
+  rebuilds every part that is not fully applied (every side with a change set
+  `APPLIED`) with the bot, and the proposal becomes a `draft`. Agent-supplied base versions
+  (`UpdateConcept`, `RemoveConcept`) are set to the term's current OM version with the
+  warning "base version of `<fqn>` refreshed from X to Y; re-review the change"; a removal's
+  native base (taken from OM, never from the agent) that moved since the replaced set gets
+  the same warning. A term OM no longer has is a `conflict` naming it, and the proposal is
+  unchanged. `propose_change` and `submit` also accept `changes_requested`: they run the
+  same rebuild (drafts, not submitted) first, then append or submit.
+- **Access groups** (NFR-SEC-07): `models[].access.{propose_groups, review_groups}` in the
+  config file; `model_policy.may` is the predicate and `require_group` raises `forbidden`
+  "model <m> restricts <action> to groups …". An empty list allows everyone; the CLI
+  operator (`Actor`) is exempt. Proposal entry points that create or extend a proposal
+  (`propose_from_scan`, `propose_change`, `propose_realization`, `rebase`) check
+  `propose`. `Caller` and `Actor` moved to `lakeloom.core.callers` (re-exported by
+  `lakeloom.core.proposals`).
+
 ## Consequences
 
 - A Lakeloom reviewer action can reach OM as the reviewer through token exchange

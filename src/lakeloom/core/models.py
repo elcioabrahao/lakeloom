@@ -151,9 +151,11 @@ class ModelService:
         next_cursor = base64.urlsafe_b64encode(page.after.encode()).decode() if page.after else None
         return Page[ModelInfo](items=[self._info(g) for g in page.data], next_cursor=next_cursor)
 
-    async def get_model(self, slug: str) -> ModelInfo:
+    async def get_model(self, slug: str, *, om: OMClient | None = None) -> ModelInfo:
+        """The model's info; ``om`` reads it with another client than the service's own
+        (a reviewer's, so the bot is not used)."""
         try:
-            glossary = await self._om.get_glossary_by_name(slug)
+            glossary = await (om or self._om).get_glossary_by_name(slug)
         except OMError as exc:
             raise _upstream(exc) from exc
         if glossary is None:

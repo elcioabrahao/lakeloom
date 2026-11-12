@@ -12,21 +12,39 @@ Operators tune the mapping of a model through the ``models:`` section of the YAM
           attribute_naming: camel
           datatype_map: {money: xsd:decimal}   # merged over DEFAULT_DATATYPES
 
-A model without an entry gets the defaults. Unknown keys are rejected.
+        access:
+          propose_groups: [stewards]   # who may create or extend proposals (NFR-SEC-07)
+          review_groups: [reviewers]   # who may review them
+
+A model without an entry gets the defaults. Unknown keys are rejected. An empty (or absent)
+group list means no restriction; the CLI operator (:class:`~lakeloom.core.callers.Actor`) is
+exempt. Otherwise one of the caller's ``groups`` must be listed (:func:`require_group`).
 """
 
 import re
-from typing import Literal
+from collections.abc import Sequence
+from typing import Annotated, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from lakeloom.core.callers import Actor, Caller
+from lakeloom.errors import LakeloomError
 
 __all__ = [
     "DEFAULT_DATATYPES",
     "XSD_DATATYPE_PATTERN",
+    "AccessAction",
     "MappingPolicy",
+    "ModelAccess",
     "ModelPolicyEntry",
+    "access_for",
+    "may",
     "policy_for",
+    "require_group",
 ]
+
+AccessAction = Literal["propose", "review"]
+GroupName = Annotated[str, Field(min_length=1, max_length=255)]
 
 # Keys are lower-case Spark base types (parameters such as ``(10,2)`` are stripped).
 DEFAULT_DATATYPES: dict[str, str] = {
@@ -93,11 +111,19 @@ class _MappingSettings(_Strict):
         return value
 
 
+class ModelAccess(_Strict):
+    """Per-model access groups (NFR-SEC-07); an empty list means no restriction."""
+
+    propose_groups: list[GroupName] = []
+    review_groups: list[GroupName] = []
+
+
 class ModelPolicyEntry(_Strict):
-    """One ``models:`` item: ``{name, mapping: {...}}``."""
+    """One ``models:`` item: ``{name, mapping: {...}, access: {...}}``."""
 
     name: str = Field(min_length=1)
     mapping: _MappingSettings = _MappingSettings()
+    access: ModelAccess = ModelAccess()
 
     def to_policy(self) -> MappingPolicy:
         settings = self.mapping.model_dump()
@@ -112,9 +138,47 @@ def _is_xsd(value: str) -> bool:
     return re.fullmatch(XSD_DATATYPE_PATTERN, value) is not None
 
 
-def policy_for(entries: list[ModelPolicyEntry], model: str) -> MappingPolicy:
+def policy_for(entries: Sequence[ModelPolicyEntry], model: str) -> MappingPolicy:
     """The policy configured for ``model``, or the defaults."""
     for entry in entries:
         if entry.name == model:
             return entry.to_policy()
     return MappingPolicy(model=model)
+
+
+def access_for(entries: Sequence[ModelPolicyEntry], model: str) -> ModelAccess:
+    """The access groups configured for ``model``, or none (no restriction)."""
+    for entry in entries:
+        if entry.name == model:
+            return entry.access
+    return ModelAccess()
+
+
+def _groups(access: ModelAccess, action: AccessAction) -> list[str]:
+    return access.propose_groups if action == "propose" else access.review_groups
+
+
+def may(principal: Caller, access: ModelAccess, action: AccessAction) -> bool:
+    """Whether ``principal`` may ``action`` on a model with ``access`` (never raises)."""
+    allowed = _groups(access, action)
+    if not allowed or isinstance(principal, Actor):
+        return True
+    groups: object = getattr(principal, "groups", frozenset[str]())
+    if not isinstance(groups, frozenset | set):
+        return False
+    return not set(allowed).isdisjoint(cast("frozenset[str]", groups))
+
+
+def require_group(
+    principal: Caller, access: ModelAccess, action: AccessAction, *, model: str | None = None
+) -> None:
+    """``forbidden`` unless :func:`may` allows it."""
+    if may(principal, access, action):
+        return
+    which = "this model" if model is None else f"model {model!r}"
+    raise LakeloomError(
+        "forbidden",
+        f"{which} restricts {action} to groups {', '.join(sorted(_groups(access, action)))}",
+        "ask an operator to add you to one of these groups (models[].access in the "
+        "Lakeloom config), or work on a model open to you",
+    )
