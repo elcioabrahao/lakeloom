@@ -1,6 +1,6 @@
 # 0012. Review and human identity in OpenMetadata
 
-- Status: accepted (§ SSO, § Apply research; later sections follow in M2b)
+- Status: accepted (M2b complete; acceptance test `tests/contract/test_m2b_acceptance.py`)
 - Date: 2026-11-12
 - Requirements: FR-OM-04, FR-OM-05, FR-REV-02, NFR-SEC-08, NFR-SEC-09, NFR-SEC-10, NFR-SEC-11
 
@@ -453,6 +453,46 @@ proposals). Age is the time since the proposal was last stored (its submission).
 CLI review command: a decision must carry a human's own OM identity, which the CLI operator
 (bot credentials) does not have.
 
+### Dev stack wiring and acceptance (M2b Task 7)
+
+The Lakeloom container runs in `exchange` mode: `LAKELOOM_OIDC_CLIENT_ID=lakeloom`,
+`LAKELOOM_OIDC_CLIENT_SECRET=dev-lakeloom-secret` (DEV ONLY) and
+`LAKELOOM_OIDC_TOKEN_ENDPOINT=http://keycloak:8080/realms/lakeloom/protocol/openid-connect/token`.
+The token endpoint is set explicitly because the issuer host (`localhost:8180`) is not
+reachable from inside the container; Keycloak's back channel follows the request host, so
+the exchange on the compose-network host works for tokens issued by `localhost:8180`.
+Forward mode cannot work in this stack (OM refuses `aud: lakeloom`, above).
+
+`tests/contract/test_m2b_acceptance.py` runs the whole flow over real `/mcp` with Keycloak
+tokens on a throwaway model (`retail_m2b_<hex>`, hard-deleted, never sealed): the agent and
+bob are refused by the `lakeloom:review` scope check (nothing is read or applied), carol by
+OM's permission; alice's approval applies every change set with
+`applicationResult.appliedBy == "alice"` and the new terms are `updatedBy` alice; reject,
+request changes and the agent's re-draft, the stale-base conflict and rebase, and a re-scan
+after apply are covered, as are the audit rows (`principal_type` human for every decision).
+Live findings of that run:
+
+- **xsd:date is not an OWL 2 datatype.** OM rc1 drafts a data property with range
+  `xsd:date` but refuses it at apply (400 "Data property ranges require supported OWL 2
+  datatypes"). The native range of an attribute is now its xsd datatype when it is in the
+  OWL 2 datatype map and `rdfs:Literal` otherwise (`operations.OWL2_XSD_DATATYPES`); the
+  proposal keeps the precise datatype. Fixture `orders.order_date` (Spark `date`) hit it.
+- **The mapper proposes no realizations for new concepts.** Realizations need a concept
+  OM has, so the first scan of an empty model proposes concepts only; after apply, a
+  re-scan proposes the column realizations of the applied concepts (dedupe rule
+  `R-DEDUPE`) and nothing else, and once those are applied a further scan has nothing new.
+- **Scope refusals carry no proposal id in the audit.** `guarded` refuses a missing
+  `lakeloom:review` before the call body runs, so those rows have the principal and the
+  tool but no model or proposal; refusals inside the service (carol) carry both.
+- **Caches outlive an OM-side delete.** Lakeloom caches OM tables and models for
+  `model_cache_ttl_seconds` (60 in dev); after a model's glossary is hard-deleted in OM,
+  the asset context of a table that realized it is `not_found` until the TTL expires. The
+  acceptance teardown waits for it (backlog).
+- Two open `update_concept` of one term are impossible through the tools: the second is
+  dropped as "already proposed in …" by dedupe, and one proposal changes an existing
+  concept once. The stale case is therefore a synonym (first proposal) and an
+  `update_concept` with the agent's base version (second proposal) on the same term.
+
 ## Consequences
 
 - A Lakeloom reviewer action can reach OM as the reviewer through token exchange
@@ -475,3 +515,14 @@ CLI review command: a decision must carry a human's own OM identity, which the C
   `alice`. The OM UI itself was not driven in a browser. Given the start-up warning above,
   a manual login at http://localhost:8585 is still to be confirmed.
 - The bot token keeps working. All earlier contract tests pass unchanged on the new stack.
+- FR-REV-01 and FR-REV-02 hold live: only a human holding `lakeloom:review` and OM's
+  reviewer permission can approve or reject, and OM's own audit (`appliedBy`, `updatedBy`,
+  the table tag's `appliedBy`) names the reviewer. The bot is never used to approve
+  (NFR-SEC-10); `review_identity` `unavailable` fails closed.
+- Deployments must configure token exchange (a confidential client allowed to exchange,
+  and a client scope that carries the OM audience) or run OM so that it accepts Lakeloom's
+  own tokens (forward mode). Neither is optional for review; there is no bot fallback.
+- An OM user with the reviewer role can apply change sets directly in OM, outside
+  Lakeloom; and per the `DataConsumer` finding above any OM user can edit terms directly.
+  Lakeloom governs the path through Lakeloom, not OM itself.
+- Deferred items of M2b are listed in `docs/backlog/m2b-deferred.md`.

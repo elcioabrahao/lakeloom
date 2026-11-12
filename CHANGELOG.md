@@ -81,3 +81,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     service that applies proposals as the reviewer.
   - MCP prompt `review_with_specialist`.
   - CLI commands `lakeloom pending` and `lakeloom rebase`.
+  - Dev stack: the Lakeloom container exchanges reviewers' tokens for OpenMetadata tokens
+    (client `lakeloom`, DEV ONLY secret, compose-network token endpoint); forward mode is not
+    usable in the dev stack.
+  - M2b acceptance contract test: agents and callers without `lakeloom:review` or
+    OpenMetadata's reviewer permission are refused, and OpenMetadata records the human
+    reviewer as the one who applied (FR-REV-01, FR-REV-02).
+
+### Fixed
+
+- An attribute whose xsd datatype is not in the OWL 2 datatype map (such as `xsd:date` from a
+  Spark `date` column) gets the native range `rdfs:Literal`, so OpenMetadata applies it; the
+  proposal keeps the precise datatype.

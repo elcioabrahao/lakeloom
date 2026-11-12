@@ -382,6 +382,16 @@ plain language and calls `review_proposal` only on their explicit decision.
   (`LAKELOOM_OM_FORWARD_USER_TOKEN`); with neither available it fails closed with a typed error
   and applies nothing. OpenMetadata must grant the reviewer the apply permissions (role
   `LakeloomOntologyReviewer`). `request_changes` needs no OpenMetadata identity. See ADR 0012.
+  OpenMetadata records the reviewer: `applicationResult.appliedBy`, the terms' `updatedBy` and
+  the realization tags' `appliedBy` name them.
+- **Dev stack.** The Lakeloom container uses token exchange as the confidential client
+  `lakeloom` (secret `dev-lakeloom-secret`, DEV ONLY) on the compose-network token endpoint
+  (`LAKELOOM_OIDC_TOKEN_ENDPOINT`), because the issuer host `localhost:8180` is not reachable
+  from inside the container. Forward mode is not usable in the dev stack: OpenMetadata accepts
+  only tokens whose audience includes `openmetadata`, and Lakeloom's tokens do not.
+  `get_server_info` reports the mode as `review_identity`. In the dev realm `alice` can
+  approve, `carol` has `lakeloom:review` but no OpenMetadata reviewer role (refused by
+  OpenMetadata's permission), and `bob` has no review scope.
 - **Per-model access.** `models:` entries in `LAKELOOM_CONFIG_FILE` may set
   `access.propose_groups` and `access.review_groups`. A reviewer must belong to one of the
   model's `review_groups` (empty means anyone with the scope), and `list_pending_reviews` only
