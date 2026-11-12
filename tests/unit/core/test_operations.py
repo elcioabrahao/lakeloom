@@ -207,6 +207,22 @@ def test_remove_concept() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("datatype", "expected"),
+    [
+        ("xsd:dateTime", "http://www.w3.org/2001/XMLSchema#dateTime"),
+        ("xsd:long", "http://www.w3.org/2001/XMLSchema#long"),
+        ("xsd:date", "http://www.w3.org/2000/01/rdf-schema#Literal"),
+        ("xsd:time", "http://www.w3.org/2000/01/rdf-schema#Literal"),
+    ],
+)
+def test_add_attribute_range_is_an_owl2_datatype(datatype: str, expected: str) -> None:
+    """OM rc1 refuses at apply a data property range outside the OWL 2 datatype map."""
+    op = AddAttribute(op="add_attribute", concept="retail.Order", name="d", datatype=datatype)
+    (native,) = to_om(op, CTX).native
+    assert native["property"]["range"] == [expected]
+
+
 def test_add_attribute_maps_to_native_property() -> None:
     op = AddAttribute(
         op="add_attribute",

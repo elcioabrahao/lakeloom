@@ -61,6 +61,19 @@ MAX_EVIDENCE = 20
 MAX_AXIOM_BYTES = 16 * 1024
 RULE_ID_PATTERN = r"^R-[A-Z0-9-]{1,32}$"
 XSD = "http://www.w3.org/2001/XMLSchema#"
+RDFS_LITERAL = "http://www.w3.org/2000/01/rdf-schema#Literal"
+# The xsd part of the OWL 2 datatype map (OWL 2 Structural Specification, section 4).
+# OpenMetadata rc1 refuses, at apply only, a data property whose range is outside it
+# ("Data property ranges require supported OWL 2 datatypes"), e.g. xsd:date.
+OWL2_XSD_DATATYPES: frozenset[str] = frozenset(
+    {
+        "decimal", "integer", "nonNegativeInteger", "nonPositiveInteger", "positiveInteger",
+        "negativeInteger", "long", "int", "short", "byte", "unsignedLong", "unsignedInt",
+        "unsignedShort", "unsignedByte", "double", "float", "string", "normalizedString",
+        "token", "language", "Name", "NCName", "NMTOKEN", "boolean", "hexBinary",
+        "base64Binary", "anyURI", "dateTime", "dateTimeStamp",
+    }
+)  # fmt: skip
 _NAME = r"^[A-Za-z][A-Za-z0-9_ ]{0,127}$"
 _RELATION = r"^[a-zA-Z][a-zA-Z0-9]*$"
 _NS = uuid.UUID("6f1b3c1e-5a0e-4b0a-9a3e-4c6d2f7a9b10")
@@ -773,6 +786,13 @@ def _remove_concept(op: RemoveConcept, ctx: OMContext) -> OMOps:
     return OMOps(glossary=[glossary], native=[remove_concept_native(op, ctx)])
 
 
+def _native_range(datatype: str) -> str:
+    """The OM range of an attribute: its xsd datatype when OWL 2 has it, else
+    ``rdfs:Literal`` (xsd:date, xsd:time, ...; the proposal keeps the precise datatype)."""
+    local = datatype.removeprefix("xsd:")
+    return XSD + local if local in OWL2_XSD_DATATYPES else RDFS_LITERAL
+
+
 def _add_attribute(op: AddAttribute, ctx: OMContext) -> OMOps:
     domain = _concept_iri(ctx, op.concept)
     name = f"{_bare(op.concept)}.{op.name}"
@@ -784,7 +804,7 @@ def _add_attribute(op: AddAttribute, ctx: OMContext) -> OMOps:
         "iri": _member_iri(ctx, op.concept, op.name),
         "kind": "DATA",
         "domain": [domain],
-        "range": [XSD + op.datatype.removeprefix("xsd:")],
+        "range": [_native_range(op.datatype)],
         "isIdentifier": op.is_identifier,
         "ontology": _ontology_ref(ctx),
     }
