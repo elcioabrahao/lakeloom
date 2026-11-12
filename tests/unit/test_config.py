@@ -216,7 +216,7 @@ def test_m2b_obo_defaults() -> None:
     assert s.oidc_client_secret is None
     assert s.oidc_token_endpoint is None
     assert s.om_audience == "openmetadata"
-    assert s.om_exchange_scope == "openmetadata-audience"
+    assert s.om_exchange_scope is None
     assert s.om_forward_user_token is False
 
 

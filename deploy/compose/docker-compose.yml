@@ -562,6 +562,8 @@ services:
       LAKELOOM_OIDC_CLIENT_ID: lakeloom
       LAKELOOM_OIDC_CLIENT_SECRET: dev-lakeloom-secret
       LAKELOOM_OIDC_TOKEN_ENDPOINT: http://keycloak:8080/realms/lakeloom/protocol/openid-connect/token
+      # Keycloak 26 exchange V2: the client scope carrying the OM audience mapper.
+      LAKELOOM_OM_EXCHANGE_SCOPE: openmetadata-audience
       LAKELOOM_PUBLIC_URL: http://localhost:8000
       LAKELOOM_SCOPE_GROUP_MAP: '{"ontology-reviewers":["lakeloom:read","lakeloom:review"],"data-engineers":["lakeloom:read","lakeloom:propose"],"lakeloom-admins":["lakeloom:read","lakeloom:admin"]}'
       LAKELOOM_GIT_REMOTE: http://gitea:3000/lakeloom-admin/ontologies.git

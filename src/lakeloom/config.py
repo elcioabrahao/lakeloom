@@ -87,9 +87,10 @@ class Settings(BaseSettings):
     oidc_client_secret: SecretStr | None = None
     oidc_token_endpoint: str | None = None
     om_audience: str = "openmetadata"
-    # Sent as ``scope`` in the exchange; Keycloak 26 V2 needs the client scope that carries
-    # the OM audience mapper. None omits the field.
-    om_exchange_scope: str | None = "openmetadata-audience"
+    # Sent as ``scope`` in the exchange when set; Keycloak 26 V2 needs the client scope that
+    # carries the OM audience mapper (the dev stack sets ``openmetadata-audience``). None
+    # (the default) omits the field.
+    om_exchange_scope: str | None = None
     om_forward_user_token: bool = False
     scope_group_map: dict[str, list[str]] = {}
     # May embed credentials: kept out of repr (NFR-SEC-11).
