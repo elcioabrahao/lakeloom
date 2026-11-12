@@ -22,7 +22,13 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 from lakeloom.scopes import SCOPES
 
 ENV_PREFIX = "LAKELOOM_"
-SECRET_FILE_FIELDS = ("om_bot_token", "git_token", "db_url", "confirm_secret")
+SECRET_FILE_FIELDS = (
+    "om_bot_token",
+    "git_token",
+    "db_url",
+    "confirm_secret",
+    "oidc_client_secret",
+)
 
 
 class ConfigError(Exception):
@@ -76,6 +82,15 @@ class Settings(BaseSettings):
     oidc_issuer: str | None = None
     oidc_audience: str = "lakeloom"
     oidc_token_exchange: bool = True
+    # M2b: on-behalf-of OM tokens for human reviewers (ADR 0012, NFR-SEC-08..10).
+    oidc_client_id: str | None = None
+    oidc_client_secret: SecretStr | None = None
+    oidc_token_endpoint: str | None = None
+    om_audience: str = "openmetadata"
+    # Sent as ``scope`` in the exchange; Keycloak 26 V2 needs the client scope that carries
+    # the OM audience mapper. None omits the field.
+    om_exchange_scope: str | None = "openmetadata-audience"
+    om_forward_user_token: bool = False
     scope_group_map: dict[str, list[str]] = {}
     # May embed credentials: kept out of repr (NFR-SEC-11).
     db_url: str = Field(default="sqlite:////data/lakeloom.db", repr=False)

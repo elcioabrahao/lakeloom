@@ -37,6 +37,7 @@ from lakeloom.core.confirm import (
 )
 from lakeloom.core.model_policy import ModelPolicyEntry
 from lakeloom.core.models import ModelService
+from lakeloom.core.obo import OnBehalfOf
 from lakeloom.core.proposals import ProposalService
 from lakeloom.core.scans import ScanService
 from lakeloom.core.sources import close_sources, start_sources
@@ -92,7 +93,7 @@ class AppDeps:
     om: OMClient
     engine: AsyncEngine
     validator: TokenValidator
-    # Closed by the app lifespan (the validator's shared client).
+    # Closed by the app lifespan; shared by the validator and on-behalf-of exchanges.
     idp_http: httpx.AsyncClient | None = None
     # Operator-configured lake sources (NFR-SEC-13); started and closed by the lifespan.
     sources: dict[str, LakeSource] = field(default_factory=dict[str, LakeSource])
@@ -103,9 +104,13 @@ class AppDeps:
     confirm: ConfirmTokens = field(init=False)
     audit: AuditRepository = field(init=False)
     proposals: ProposalService = field(init=False)
+    obo: OnBehalfOf = field(init=False)
 
     def __post_init__(self) -> None:
         self.confirm = confirm_tokens_from_settings(self.settings)
+        if self.idp_http is None:
+            self.idp_http = httpx.AsyncClient(timeout=_IDP_TIMEOUT)  # closed by the lifespan
+        self.obo = OnBehalfOf(self.settings, self.idp_http, self.om)
         self.audit = AuditRepository(self.engine)
         self.models = ModelService(self.om, self.settings)
         scan_repo = ScanRepository(self.engine)

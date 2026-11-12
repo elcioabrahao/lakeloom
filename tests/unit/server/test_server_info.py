@@ -63,3 +63,18 @@ async def test_nfr_sec_11_server_info_never_contains_token(make_deps: DepsFactor
     assert OM_BOT_TOKEN not in dumped
     assert info.caller is not None
     assert "token" not in info.caller.model_dump()
+
+
+async def test_server_info_reports_review_identity_mode(make_deps: DepsFactory) -> None:
+    unavailable = await build_server_info(make_deps(), principal())
+    assert unavailable.review_identity == "unavailable"
+
+    forward = await build_server_info(
+        make_deps(oidc_token_exchange=False, om_forward_user_token=True), principal()
+    )
+    assert forward.review_identity == "forward"
+
+    exchange = await build_server_info(
+        make_deps(oidc_client_id="lakeloom", oidc_client_secret=SecretStr("x")), principal()
+    )
+    assert exchange.review_identity == "exchange"

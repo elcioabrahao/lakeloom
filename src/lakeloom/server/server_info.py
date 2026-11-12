@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 import lakeloom
+from lakeloom.core.obo import OboMode
 from lakeloom.core.sources import SourceStatus, source_status
 from lakeloom.om.models import OMCapabilities
 from lakeloom.server.auth import Principal, PrincipalType
@@ -40,6 +41,12 @@ class ServerInfo(BaseModel):
             "not live capabilities: a flag can be on before the feature ships."
         )
     )
+    review_identity: OboMode = Field(
+        description=(
+            "How human review reaches OpenMetadata: 'exchange' (RFC 8693), 'forward' (the "
+            "caller's token) or 'unavailable' (review fails closed)."
+        )
+    )
     sources: list[SourceStatus] = Field(
         description="Configured lake sources with kind, capabilities and availability."
     )
@@ -67,6 +74,7 @@ async def build_server_info(deps: AppDeps, principal: Principal | None) -> Serve
             "stdio": bool(settings.stdio_enabled),
             "token_exchange": settings.oidc_token_exchange,
         },
+        review_identity=deps.obo.mode,
         sources=[source_status(n, s) for n, s in deps.sources.items()],
         models=[],
         caller=caller,

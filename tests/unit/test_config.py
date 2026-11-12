@@ -207,3 +207,26 @@ def test_fr_src_09_profile_and_scan_settings_are_bounded(
         monkeypatch.setenv(env, str(bad))
         with pytest.raises(ValidationError):
             Settings()
+
+
+def test_m2b_obo_defaults() -> None:
+    s = Settings()
+
+    assert s.oidc_client_id is None
+    assert s.oidc_client_secret is None
+    assert s.oidc_token_endpoint is None
+    assert s.om_audience == "openmetadata"
+    assert s.om_exchange_scope == "openmetadata-audience"
+    assert s.om_forward_user_token is False
+
+
+def test_m2b_oidc_client_secret_from_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    f = tmp_path / "cs"
+    f.write_text("s3cret\n")
+    monkeypatch.setenv("LAKELOOM_OIDC_CLIENT_SECRET_FILE", str(f))
+
+    s = Settings()
+
+    assert s.oidc_client_secret is not None
+    assert s.oidc_client_secret.get_secret_value() == "s3cret"
+    assert "s3cret" not in repr(s)
