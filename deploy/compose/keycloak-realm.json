@@ -246,6 +246,29 @@
         "include.in.token.scope": "true",
         "display.on.consent.screen": "false"
       }
+    },
+    {
+      "name": "openmetadata-audience",
+      "description": "DEV ONLY: adds audience openmetadata (OM accepts a Keycloak token only if aud contains its client id)",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "audience-openmetadata",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "openmetadata",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
     }
   ],
   "defaultDefaultClientScopes": [
@@ -356,7 +379,7 @@
     {
       "clientId": "lakeloom-dev-cli",
       "name": "lakeloom-dev-cli",
-      "description": "DEV ONLY: public PKCE client; direct access grants on for contract tests",
+      "description": "DEV ONLY: public PKCE client; direct access grants on for contract tests and om-bootstrap (optional scope openmetadata-audience yields OM tokens)",
       "enabled": true,
       "protocol": "openid-connect",
       "publicClient": true,
@@ -385,7 +408,8 @@
         "lakeloom:propose",
         "lakeloom:review",
         "lakeloom:publish",
-        "lakeloom:admin"
+        "lakeloom:admin",
+        "openmetadata-audience"
       ],
       "protocolMappers": [
         {
@@ -422,9 +446,82 @@
         "lakeloom:read"
       ],
       "optionalClientScopes": []
+    },
+    {
+      "clientId": "openmetadata",
+      "name": "openmetadata",
+      "description": "DEV ONLY: OpenMetadata UI (public, PKCE); audience of OM tokens",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:8585/*"
+      ],
+      "webOrigins": [
+        "http://localhost:8585"
+      ],
+      "fullScopeAllowed": false,
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8585/*"
+      },
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "email",
+        "groups",
+        "openmetadata-audience"
+      ],
+      "optionalClientScopes": []
+    },
+    {
+      "clientId": "lakeloom",
+      "name": "lakeloom",
+      "description": "DEV ONLY: Lakeloom server (confidential); only exchanges reviewer tokens for OM tokens",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "dev-lakeloom-secret",
+      "serviceAccountsEnabled": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "fullScopeAllowed": false,
+      "attributes": {
+        "standard.token.exchange.enabled": "true"
+      },
+      "defaultClientScopes": [
+        "basic",
+        "profile",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "openmetadata-audience"
+      ]
     }
   ],
   "users": [
+    {
+      "username": "om-admin",
+      "enabled": true,
+      "email": "om-admin@example.invalid",
+      "emailVerified": true,
+      "firstName": "OM",
+      "lastName": "Admin",
+      "groups": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "om-admin",
+          "temporary": false
+        }
+      ]
+    },
     {
       "username": "alice",
       "enabled": true,
@@ -457,6 +554,24 @@
         {
           "type": "password",
           "value": "bob",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "carol",
+      "enabled": true,
+      "email": "carol@example.invalid",
+      "emailVerified": true,
+      "firstName": "Carol",
+      "lastName": "Dev",
+      "groups": [
+        "/ontology-reviewers"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "carol",
           "temporary": false
         }
       ]

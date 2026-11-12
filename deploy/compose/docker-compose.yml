@@ -22,22 +22,26 @@ x-om-environment: &om-environment
   MIGRATION_LIMIT_PARAM: ${MIGRATION_LIMIT_PARAM:-1200}
 
   # OpenMetadata Server Authentication Configuration
+  # Lakeloom deviation (ADR 0012): OM authenticates with the dev Keycloak realm (custom OIDC,
+  # client `openmetadata`, admin principal `om-admin`) instead of basic auth. OM accepts a
+  # Keycloak token only when `aud` contains `openmetadata`; bot JWTs keep validating via OM's
+  # own JWKS (first public key URL). Users resolve from `email`: local part = OM user name.
   AUTHORIZER_CLASS_NAME: ${AUTHORIZER_CLASS_NAME:-org.openmetadata.service.security.DefaultAuthorizer}
   AUTHORIZER_REQUEST_FILTER: ${AUTHORIZER_REQUEST_FILTER:-org.openmetadata.service.security.JwtFilter}
-  AUTHORIZER_ADMIN_PRINCIPALS: ${AUTHORIZER_ADMIN_PRINCIPALS:-[admin]}
+  AUTHORIZER_ADMIN_PRINCIPALS: ${AUTHORIZER_ADMIN_PRINCIPALS:-[om-admin]}
   AUTHORIZER_ALLOWED_REGISTRATION_DOMAIN: ${AUTHORIZER_ALLOWED_REGISTRATION_DOMAIN:-["all"]}
   AUTHORIZER_INGESTION_PRINCIPALS: ${AUTHORIZER_INGESTION_PRINCIPALS:-[ingestion-bot]}
-  AUTHORIZER_PRINCIPAL_DOMAIN: ${AUTHORIZER_PRINCIPAL_DOMAIN:-"open-metadata.org"}
+  AUTHORIZER_PRINCIPAL_DOMAIN: ${AUTHORIZER_PRINCIPAL_DOMAIN:-"example.invalid"}
   AUTHORIZER_ALLOWED_DOMAINS: ${AUTHORIZER_ALLOWED_DOMAINS:-[]}
   AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN: ${AUTHORIZER_ENFORCE_PRINCIPAL_DOMAIN:-false}
   AUTHORIZER_ENABLE_SECURE_SOCKET: ${AUTHORIZER_ENABLE_SECURE_SOCKET:-false}
-  AUTHENTICATION_PROVIDER: ${AUTHENTICATION_PROVIDER:-basic}
-  AUTHENTICATION_RESPONSE_TYPE: ${AUTHENTICATION_RESPONSE_TYPE:-id_token}
-  CUSTOM_OIDC_AUTHENTICATION_PROVIDER_NAME: ${CUSTOM_OIDC_AUTHENTICATION_PROVIDER_NAME:-""}
-  AUTHENTICATION_PUBLIC_KEYS: ${AUTHENTICATION_PUBLIC_KEYS:-[http://localhost:8585/api/v1/system/config/jwks]}
-  AUTHENTICATION_AUTHORITY: ${AUTHENTICATION_AUTHORITY:-https://accounts.google.com}
-  AUTHENTICATION_CLIENT_ID: ${AUTHENTICATION_CLIENT_ID:-""}
-  AUTHENTICATION_CALLBACK_URL: ${AUTHENTICATION_CALLBACK_URL:-""}
+  AUTHENTICATION_PROVIDER: ${AUTHENTICATION_PROVIDER:-custom-oidc}
+  AUTHENTICATION_RESPONSE_TYPE: ${AUTHENTICATION_RESPONSE_TYPE:-code}  # implicit flow is off on the Keycloak client
+  CUSTOM_OIDC_AUTHENTICATION_PROVIDER_NAME: ${CUSTOM_OIDC_AUTHENTICATION_PROVIDER_NAME:-keycloak}
+  AUTHENTICATION_PUBLIC_KEYS: ${AUTHENTICATION_PUBLIC_KEYS:-[http://localhost:8585/api/v1/system/config/jwks, http://keycloak:8080/realms/lakeloom/protocol/openid-connect/certs]}
+  AUTHENTICATION_AUTHORITY: ${AUTHENTICATION_AUTHORITY:-http://localhost:8180/realms/lakeloom}
+  AUTHENTICATION_CLIENT_ID: ${AUTHENTICATION_CLIENT_ID:-openmetadata}
+  AUTHENTICATION_CALLBACK_URL: ${AUTHENTICATION_CALLBACK_URL:-http://localhost:8585/callback}
   AUTHENTICATION_JWT_PRINCIPAL_CLAIMS: ${AUTHENTICATION_JWT_PRINCIPAL_CLAIMS:-[email,preferred_username,sub]}
   AUTHENTICATION_JWT_PRINCIPAL_CLAIMS_MAPPING: ${AUTHENTICATION_JWT_PRINCIPAL_CLAIMS_MAPPING:-[]}
   AUTHENTICATION_ENABLE_SELF_SIGNUP: ${AUTHENTICATION_ENABLE_SELF_SIGNUP:-true}
@@ -323,6 +327,9 @@ services:
         condition: service_healthy
       execute-migrate-all:
         condition: service_completed_successfully
+      # OM validates user tokens against the Keycloak JWKS (ADR 0012).
+      keycloak:
+        condition: service_healthy
       fuseki:
         condition: service_healthy
         required: false
@@ -333,15 +340,19 @@ services:
       retries: 30
       start_period: 60s
 
-  # One-shot: log in as the default OM admin, fetch the ingestion-bot JWT and write it to
-  # the om-secrets volume (/secrets/om_bot_token). Re-run: docker compose ... run --rm om-bootstrap
+  # One-shot (ADR 0012): with a Keycloak token for OM's admin principal `om-admin`, create the
+  # OM users alice/bob/carol, grant alice the OM reviewer role, then fetch the ingestion-bot
+  # JWT into the om-secrets volume (/secrets/om_bot_token). Idempotent; re-run:
+  #   docker compose -f deploy/compose/docker-compose.yml run --rm om-bootstrap
   om-bootstrap:
     image: alpine:3.22.8
     entrypoint: ["/bin/sh", "/om-bootstrap.sh"]
     environment:
       OM_URL: http://openmetadata-server:8585
-      OM_ADMIN_EMAIL: ${OM_ADMIN_EMAIL:-admin@open-metadata.org}
-      OM_ADMIN_PASSWORD: ${OM_ADMIN_PASSWORD:-admin}
+      KC_TOKEN_URL: http://keycloak:8080/realms/lakeloom/protocol/openid-connect/token
+      # DEV ONLY: fixed public credential of the dev realm's om-admin user.
+      OM_ADMIN_USER: ${OM_ADMIN_USER:-om-admin}
+      OM_ADMIN_PASSWORD: ${OM_ADMIN_PASSWORD:-om-admin}
       OM_BOT_NAME: ${OM_BOT_NAME:-ingestion-bot}
       OM_BOT_TOKEN_FILE: /secrets/om_bot_token
     volumes:
@@ -349,6 +360,8 @@ services:
       - om-secrets:/secrets
     depends_on:
       openmetadata-server:
+        condition: service_healthy
+      keycloak:
         condition: service_healthy
     restart: "no"
 

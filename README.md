@@ -91,7 +91,7 @@ curl localhost:8000/readyz
 | Service       | URL                     | Notes                  |
 |---------------|-------------------------|------------------------|
 | Lakeloom      | http://localhost:8000   | MCP at `/mcp`          |
-| OpenMetadata  | http://localhost:8585   |                        |
+| OpenMetadata  | http://localhost:8585   | log in via Keycloak    |
 | Keycloak      | http://localhost:8180   | realm `lakeloom`       |
 | Gitea         | http://localhost:3000   |                        |
 | PostgreSQL    | localhost:5432          |                        |
@@ -99,8 +99,18 @@ curl localhost:8000/readyz
 All ports are bound to `127.0.0.1` only.
 
 > **Development only.** Every credential in the dev stack is a fixed, publicly known default
-> (for example the Keycloak client secret `dev-agent-secret` and the OpenMetadata admin
-> `admin@open-metadata.org` / `admin`). Never reuse them outside a local machine.
+> (for example the Keycloak client secret `dev-agent-secret`). Never reuse them outside a
+> local machine.
+
+OpenMetadata signs in through Keycloak (realm `lakeloom`). The OM admin is `om-admin` /
+`om-admin`. The dev users `alice`, `bob` and `carol` use their user name as their password.
+All of these are DEV ONLY. See [ADR 0012](docs/decisions/0012-review-and-human-identity.md).
+
+> **Upgrading from a basic-auth checkout (before M2b):** OpenMetadata needs a fresh data
+> volume, and the old `admin@open-metadata.org` login is gone. Run
+> `docker compose -f deploy/compose/docker-compose.yml down`, then
+> `docker volume rm lakeloom_om-db-data lakeloom_es-data`, then `up` again. This also resets
+> the dev Lakeloom state-store database.
 
 ### Call a tool from an agent
 

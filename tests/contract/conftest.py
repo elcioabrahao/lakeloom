@@ -58,17 +58,24 @@ def admin_agent_token() -> str:
     )
 
 
-def _human_token(username: str) -> str:
+def _human_token(username: str, scope: str = "openid lakeloom:read") -> str:
     # Deliberately no lakeloom:review / :propose: those must come from the group map.
+    # DEV ONLY: realm users have password = username.
     return _token(
         {
             "grant_type": "password",
             "client_id": "lakeloom-dev-cli",
             "username": username,
             "password": username,
-            "scope": "openid lakeloom:read",
+            "scope": scope,
         }
     )
+
+
+def _om_user_token(username: str) -> str:
+    """A Keycloak token OpenMetadata accepts as ``username`` (``aud`` has ``openmetadata``
+    via the optional scope ``openmetadata-audience``; ADR 0012)."""
+    return _human_token(username, "openid openmetadata-audience")
 
 
 @pytest.fixture(scope="session")
@@ -79,6 +86,18 @@ def human_token() -> str:
 @pytest.fixture(scope="session")
 def bob_token() -> str:
     return _human_token("bob")
+
+
+@pytest.fixture(scope="session")
+def carol_token() -> str:
+    """carol: group ontology-reviewers like alice, but no OM reviewer role (ADR 0012)."""
+    return _human_token("carol")
+
+
+@pytest.fixture(scope="session")
+def om_admin_token() -> str:
+    """OM's admin principal ``om-admin`` (DEV ONLY), as a token OpenMetadata accepts."""
+    return _om_user_token("om-admin")
 
 
 @pytest.fixture(scope="session")

@@ -82,6 +82,10 @@ Note the OM image is PostgreSQL **15.19**.
 
 ### Bot token (`om-bootstrap`)
 
+> **Superseded in part (M2b):** OM no longer uses basic auth; step 1 now gets an `om-admin`
+> token from Keycloak, and bootstrap also creates the OM users and the reviewer role. See
+> [ADR 0012](0012-review-and-human-identity.md). Steps 2–4 are unchanged.
+
 `om-bootstrap.sh` (endpoints checked against the committed spec):
 
 1. `POST /api/v1/users/login` with `{"email": "admin@open-metadata.org", "password": base64("admin")}`
