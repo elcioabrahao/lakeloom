@@ -40,7 +40,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "rdflib>=7.6.0",
     "sqlalchemy[asyncio]>=2.1.8",
-    "typer>=0.28.0",
+    "typer>=0.29.1",
     "uvicorn[standard]>=0.54.0",
 ]
 
