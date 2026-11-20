@@ -106,22 +106,33 @@ done
 # --- 3. reviewer role -----------------------------------------------------------------------
 # Least privilege for applying ontology change sets (glossary and native) on models the bot
 # created, as measured live on rc1 (ADR 0012 § Apply research):
-#   - EditAll on ontologyChangeSet: the authoring lease every apply needs;
+#   - EditAll + Create on ontologyChangeSet: the authoring lease every apply needs, and
+#     Create because the rebuild path (a stale native side behind the ontology's working
+#     revision) re-drafts the change set as the reviewer (review.py _rebuild -> _create_side),
+#     and rc1's EditAll does not include Create for this resource (measured live);
 #   - EditAll on glossary / ontology: applying a glossary / native change set;
 #   - Create, Delete on ontologyConcept / ontologyProperty / ontologyAxiom: native upserts of
-#     new definitions and native deletes.
-# Reading and tagging assets with glossary terms need nothing here: OM's default DataConsumer
-# role (every user) already grants ViewAll, EditTags and EditGlossaryTerms on all resources.
+#     new definitions and native deletes;
+#   - EditAll on glossaryTerm: taxonomy re-parenting. rc1 cannot move a term's parent through
+#     a change set (operations.py re-parent constraint), so the reconciliation step (re-parenting
+#     existing terms under their thematic parents) PATCHes glossaryTerms directly as the reviewer;
+#     rc1 demands EditAll for that endpoint (measured live: "operations [EditAll] not allowed").
+# Reading needs nothing here (term reads succeed for realm users without DataConsumer), and
+# tagging assets with glossary terms is covered by DataConsumer where it is granted; do not
+# rely on "every user has DataConsumer" — measured in the dev stack, alice holds only the
+# reviewer role (ADR 0012 Later findings).
 # On re-run the rules are converged: an older, broader rule set is replaced.
 policy="${OM_REVIEWER_ROLE}Policy"
 rules='[
   {"name": "LakeloomReviewerChangeSetLease", "effect": "allow",
-   "resources": ["ontologyChangeSet"], "operations": ["EditAll"]},
+   "resources": ["ontologyChangeSet"], "operations": ["EditAll", "Create"]},
   {"name": "LakeloomReviewerApplyTargets", "effect": "allow",
    "resources": ["glossary", "ontology"], "operations": ["EditAll"]},
   {"name": "LakeloomReviewerNativeDefinitions", "effect": "allow",
    "resources": ["ontologyConcept", "ontologyProperty", "ontologyAxiom"],
-   "operations": ["Create", "Delete"]}
+   "operations": ["Create", "Delete"]},
+  {"name": "LakeloomReviewerTermReparenting", "effect": "allow",
+   "resources": ["glossaryTerm"], "operations": ["EditAll"]}
 ]'
 # Rules compared without OM's bookkeeping fields and with lists sorted.
 normalize='[.[] | {name, effect, condition, resources: (.resources | sort), operations: (.operations | sort)}] | sort_by(.name)'
