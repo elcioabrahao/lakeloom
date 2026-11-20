@@ -192,16 +192,20 @@ def register_taxonomy_tools(mcp: MCPServer, deps: AppDeps) -> None:
                 if exc.code != "not_found" or "." in parent_name:
                     raise
                 exists = False
+            parent_description = (
+                UntrustedText(text=parent_definition, source="user")
+                if parent_definition
+                else UntrustedText(
+                    text=f"Child of {parent_name} in the taxonomy of model {model}.",
+                    source="user",
+                )
+            )
             if not exists:
                 ops.append(
                     AddConcept(
                         op="add_concept",
                         name=parent_name,
-                        description=(
-                            UntrustedText(text=parent_definition, source="user")
-                            if parent_definition
-                            else None
-                        ),
+                        description=parent_description,
                         rule_ids=["R-CV-DIRECT"],
                     )
                 )
@@ -211,6 +215,11 @@ def register_taxonomy_tools(mcp: MCPServer, deps: AppDeps) -> None:
                         op="add_concept",
                         name=child,
                         parent=parent,
+                        description=UntrustedText(
+                            text=f"Term added as a child of {parent_name} in the taxonomy of "
+                            f"model {model}.",
+                            source="user",
+                        ),
                         rule_ids=["R-CV-DIRECT"],
                     )
                 )

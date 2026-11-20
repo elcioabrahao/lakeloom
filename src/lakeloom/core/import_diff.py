@@ -22,8 +22,11 @@ from lakeloom.core.operations import (
     AddAttribute,
     AddAxiom,
     AddConcept,
+    AddHistoryNote,
     AddMapping,
     AddRelation,
+    AddScopeNote,
+    DeprecateConcept,
     Evidence,
     ProposalOperation,
     RemoveAttribute,
@@ -182,8 +185,40 @@ class _Diff:
                     **self.common(term.iri),
                 )
             )
+            for note in term.history_notes:
+                self.adds.append(
+                    AddHistoryNote(
+                        op="add_history_note",
+                        concept_fqn=name,
+                        note=note[:2000],
+                        lang="en",
+                        **self.common(term.iri),
+                    )
+                )
+            for note in term.scope_notes:
+                self.adds.append(
+                    AddScopeNote(
+                        op="add_scope_note",
+                        concept_fqn=name,
+                        note=note[:2000],
+                        lang="en",
+                        **self.common(term.iri),
+                    )
+                )
         for name in sorted(n for n in inc if n in cur):
-            self.update(cur[name], inc[name])
+            term = inc[name]
+            if term.deprecation and (reason := term.deprecation_reason):
+                self.adds.append(
+                    DeprecateConcept(
+                        op="deprecate_concept",
+                        fqn=name,
+                        base_version=self.version(name),
+                        reason=reason,
+                        successor=None,
+                        **self.common(term.iri),
+                    )
+                )
+            self.update(cur[name], term)
 
     def update(self, cur: ConceptTerm, inc: ConceptTerm) -> None:
         changes: dict[str, Any] = {}

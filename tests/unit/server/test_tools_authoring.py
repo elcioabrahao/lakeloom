@@ -52,10 +52,24 @@ def deps_with_fake_proposals(make_deps: DepsFactory) -> Any:
     return deps
 
 
+def deps_and_fake(make_deps: DepsFactory) -> tuple[Any, _ExtendedFakeProposals]:
+    """Deps wired with a FakeProposals that records the proposed operations."""
+
+    deps = fake_deps(make_deps)
+    fake = _ExtendedFakeProposals()
+    deps.proposals = fake  # pyright: ignore[reportAttributeAccessIssue]
+    return deps, fake
+
+
 class _ExtendedFakeProposals(FakeProposals):
     """FakeProposals extended with propose_operations (used by CV write tools)."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_operations: list[Any] = []
+
     async def propose_operations(self, model: str, operations: Any, **kw: Any) -> Any:
+        self.last_operations = list(operations)
         trail = current_audit()
         p = proposal()
         trail.model, trail.proposal_id, trail.change_set_id = p.model, p.id, "cs-n"
@@ -289,6 +303,34 @@ async def test_propose_add_hierarchy(make_deps: DepsFactory, kit: AuthKit) -> No
     )
     data = structured(result)
     assert data["status"] == "draft"
+
+
+async def test_propose_add_hierarchy_children_get_descriptions(
+    make_deps: DepsFactory,
+    kit: AuthKit,
+) -> None:
+    deps, fake = deps_and_fake(make_deps)
+    app = create_server_app(deps)
+    async with mcp_session(app, kit.token(scope=PROPOSE)) as session:
+        result = await session.call_tool(
+            "propose_add_hierarchy",
+            {
+                "model": "retail",
+                "parent_name": "PaymentMethod",
+                "children": ["CreditCard", "BankTransfer"],
+                "parent_definition": "A means of settling an invoice.",
+            },
+        )
+    data = structured(result)
+    assert data["status"] == "draft"
+    ops = fake.last_operations
+    children_ops = [
+        o for o in ops if o.op == "add_concept" and str(o.name) in {"CreditCard", "BankTransfer"}
+    ]
+    assert len(children_ops) == 2
+    for op in children_ops:
+        assert op.description is not None, f"add_concept {op.name} is missing a description"
+        assert op.description.text
 
 
 # ---------------------------------------------------------------------------

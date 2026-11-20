@@ -57,6 +57,7 @@ _CARDINALITIES: dict[Node, str] = {
 _CONCEPT_TYPES = {SKOS.Concept, OWL.Class}
 _SCHEME_TYPES = {OWL.Ontology, SKOS.ConceptScheme}
 _BOOKKEEPING = {SKOS.inScheme, SKOS.topConceptOf, SKOS.narrower, OM.fullyQualifiedName}
+_ANNOTATIONS = frozenset({SKOS.historyNote, SKOS.scopeNote, SKOS.changeNote, OWL.deprecated})
 _MAX_SHORT = 256  # operations.Short
 _MAX_LIST = 100  # operations.ShortList
 _MAX_UNIT = 64
@@ -76,6 +77,10 @@ class ConceptTerm:
     parent: str | None
     synonyms: tuple[str, ...]
     iri: str
+    history_notes: tuple[str, ...] = ()
+    scope_notes: tuple[str, ...] = ()
+    deprecation: bool = False
+    deprecation_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +213,10 @@ class _Reader:
         self.relations: dict[tuple[str, str, str], RelationTerm] = {}
         self.mappings: set[MappingTerm] = set()
         self.restrictions: dict[str, set[tuple[str, str, int]]] = {}
+        self.history: dict[str, list[str]] = {}
+        self.scope: dict[str, list[str]] = {}
+        self.deprecated: dict[str, bool] = {}
+        self.deprecation_reason: dict[str, str] = {}
 
     # helpers -------------------------------------------------------------------------------
 
@@ -422,6 +431,10 @@ class _Reader:
             parent=parent,
             synonyms=tuple(kept),
             iri=str(s),
+            history_notes=tuple(self.history.get(name, [])),
+            scope_notes=tuple(self.scope.get(name, [])),
+            deprecation=self.deprecated.get(name, False),
+            deprecation_reason=self.deprecation_reason.get(name),
         )
 
     def statement(self, name: str, s: URIRef, p: Node, o: Node, parent: str | None) -> None:
@@ -444,6 +457,8 @@ class _Reader:
                     self.class_axioms += 1
             elif parent is None or o != self.concept_nodes[parent]:
                 self.class_axioms += 1
+        elif p in _ANNOTATIONS:
+            self.annotate(name, s, p, o)
         elif isinstance(p, URIRef) and (
             p in (OM.relatedTo, SKOS.related) or not _vocabulary(str(p))
         ):
@@ -452,6 +467,25 @@ class _Reader:
                 self.use(s, p, o)
                 if target != name:
                     self.links.add(frozenset((name, target)))
+
+    def annotate(self, name: str, s: URIRef, p: Node, o: Node) -> None:
+        """Consume the editorial annotations Lakeloom records per concept (history, scope,
+        deprecation, change note) instead of reporting them as unrepresentable triples."""
+        if p in (SKOS.historyNote, SKOS.scopeNote):
+            if isinstance(o, Literal) and str(o).strip():
+                bucket = self.history if p == SKOS.historyNote else self.scope
+                bucket.setdefault(name, []).append(str(o))
+            self.use(s, p, o)
+        elif p == SKOS.changeNote:
+            if isinstance(o, Literal) and str(o).strip():
+                self.deprecation_reason[name] = str(o)
+            self.use(s, p, o)
+        elif p == OWL.deprecated:
+            deprecated = isinstance(o, Literal) and str(o).strip().lower() in {"true", "1"}
+            if deprecated:
+                self.deprecated[name] = True
+                self.deprecation_reason.setdefault(name, "")
+            self.use(s, p, o)
 
     def closure(self, node: BNode) -> set[Triple]:
         out: set[Triple] = set()

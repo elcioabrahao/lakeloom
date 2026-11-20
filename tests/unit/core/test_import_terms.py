@@ -128,6 +128,25 @@ def test_extract_m3b_release_fixture() -> None:
     }
 
 
+def test_concept_history_scope_and_deprecation_are_consumed() -> None:
+    graph = ttl("""
+        ex:Series a skos:Concept ; skos:prefLabel "Series" ;
+            skos:definition "A series of episodes." ;
+            skos:historyNote "Recast in 2024." ;
+            skos:scopeNote "Editorial scope." ;
+            owl:deprecated true ; skos:changeNote "Series will move." .
+    """)
+    terms = extract_terms(graph, EX)
+    assert terms.concepts["Series"].history_notes == ("Recast in 2024.",)
+    assert terms.concepts["Series"].scope_notes == ("Editorial scope.",)
+    assert terms.concepts["Series"].deprecation is True
+    assert (
+        terms.concepts["Series"].deprecation_reason
+        == "Series will move."
+    )
+    assert terms.warnings == []
+
+
 def test_glossary_links_explained_by_object_property_are_ignored() -> None:
     graph = ttl("""
         ex:A a skos:Concept ; om:relatedTo ex:B ; skos:related ex:B .

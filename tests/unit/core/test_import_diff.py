@@ -23,6 +23,9 @@ from lakeloom.core.operations import (
     AddAttribute,
     AddAxiom,
     AddConcept,
+    AddHistoryNote,
+    AddScopeNote,
+    DeprecateConcept,
     Evidence,
     OMContext,
     OMOps,
@@ -146,6 +149,54 @@ def test_import_into_empty_model_adds_everything_in_order() -> None:
         "add_axiom": 1,
     }
     assert result.warnings == []
+
+
+def test_import_emits_history_scope_and_deprecation_ops() -> None:
+    current = terms()
+    incoming = terms(
+        [
+            concept(
+                "Series",
+                description="A series of episodes.",
+                history_notes=("Recast in 2024.",),
+                scope_notes=("Editorial scope.",),
+                deprecation=True,
+                deprecation_reason="Series modelling will move to a dedicated model.",
+            ),
+        ]
+    )
+    result = run(current, incoming)
+    assert [o.op for o in result.operations] == [
+        "add_concept",
+        "add_history_note",
+        "add_scope_note",
+    ]
+    assert isinstance(result.operations[1], AddHistoryNote)
+    assert result.operations[1].concept_fqn == "Series"
+    assert result.operations[1].note == "Recast in 2024."
+    assert isinstance(result.operations[2], AddScopeNote)
+    assert result.operations[2].concept_fqn == "Series"
+    assert result.operations[2].note == "Editorial scope."
+
+
+def test_import_deprecates_existing_concept_with_base_version() -> None:
+    current = terms([concept("Series", description="A series of episodes.")])
+    incoming = terms(
+        [
+            concept(
+                "Series",
+                description="A series of episodes.",
+                deprecation=True,
+                deprecation_reason="Series modelling will move to a dedicated model.",
+            ),
+        ]
+    )
+    result = run(current, incoming, versions={"Series": 0.2})
+    ops = result.operations
+    assert [o.op for o in ops] == ["deprecate_concept"]
+    (deprecation,) = [o for o in ops if isinstance(o, DeprecateConcept)]
+    assert deprecation.fqn == "Series" and deprecation.base_version == "0.2"
+    assert deprecation.reason == "Series modelling will move to a dedicated model."
 
 
 def test_import_of_current_export_is_empty() -> None:
