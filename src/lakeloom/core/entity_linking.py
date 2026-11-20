@@ -154,7 +154,8 @@ async def lookup_wikidata(
     }
     try:
         data = await fetch(_WIKIDATA_SEARCH_URL, params)
-    except Exception:
+    except Exception as exc:  # surfaced in logs: an empty result is indistinguishable otherwise
+        _log.warning("Wikidata search failed for %r: %s", term_name, type(exc).__name__)
         return []
 
     results: list[WikidataMatch] = []
