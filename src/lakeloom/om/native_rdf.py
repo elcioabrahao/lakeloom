@@ -6,7 +6,10 @@ read path rebuilds the asserted triples from them, with the same shapes OM's rel
 uses: ``owl:Class``, ``owl:DatatypeProperty`` / ``owl:ObjectProperty`` /
 ``owl:AnnotationProperty`` with ``rdfs:domain`` and ``rdfs:range``, ``rdfs:label`` (the
 display name when set) and ``rdfs:comment``; enum values (strings or ``OntologyLiteral``
-objects) as ``owl:oneOf``, the unit as ``qudt:unit``. Descriptions and names are
+objects) as ``owl:oneOf``, the unit as ``qudt:unit``. Axioms render class-level:
+``SUBCLASS_OF`` restrictions as ``rdfs:subClassOf`` blank-node restrictions,
+``DISJOINT_WITH`` / ``EQUIVALENT_CLASS`` as ``owl:disjointWith`` / ``owl:equivalentClass``
+links to each named class in the axiom's expressions. Descriptions and names are
 untrusted text and only ever become literals.
 
 A member that cannot be expressed (no absolute IRI, wrong shape) is skipped with a WARNING
@@ -19,7 +22,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, cast
 from urllib.parse import urlparse
 
-from rdflib import BNode, Graph, Literal, URIRef
+from rdflib import BNode, Graph, Literal, Node, URIRef
 from rdflib.collection import Collection
 from rdflib.namespace import OWL, RDF, RDFS, XSD
 
@@ -31,6 +34,16 @@ _KINDS = {
     "DATA": OWL.DatatypeProperty,
     "OBJECT": OWL.ObjectProperty,
     "ANNOTATION": OWL.AnnotationProperty,
+}
+# Class-level axiom renderings. SUBCLASS_OF takes restrictions (below) or named classes;
+# DISJOINT_WITH / EQUIVALENT_CLASS link the subject to each named class in the expressions.
+# Assertion axiom types (CLASS_ASSERTION, *_PROPERTY_ASSERTION) are about individuals and
+# stay unrendered. DISJOINT_WITH was measured live on rc1 (cigars, 2026-11-20): before this
+# table the disjoint axiom applied in OM never reached the merged graph or any export.
+_AXIOM_PREDICATES = {
+    "SUBCLASS_OF": RDFS.subClassOf,
+    "DISJOINT_WITH": OWL.disjointWith,
+    "EQUIVALENT_CLASS": OWL.equivalentClass,
 }
 _CARDINALITY = {
     "EXACT": (OWL.qualifiedCardinality, OWL.cardinality),
@@ -172,14 +185,22 @@ def build_graph(
         if subject is None:
             _skip("axiom", axiom)
             continue
-        if axiom.get("axiomType") != "SUBCLASS_OF":
-            continue
+        predicate = _AXIOM_PREDICATES.get(str(axiom.get("axiomType", "")))
+        if predicate is None:
+            continue  # assertions and unknown types have no class-level rendering yet
         expressions = axiom.get("expressions")
         exprs = cast("list[object]", expressions) if isinstance(expressions, list) else []
         for expr in exprs:
-            target = _restriction(g, expr)
+            if predicate is RDFS.subClassOf:
+                target: Node | None = _restriction(g, expr)
+            else:
+                # class-level links (disjoint / equivalent) take named classes only
+                target = None
+                if isinstance(expr, dict) and expr.get("kind") == "NAMED_CLASS":
+                    iri = _valid_iri(expr.get("classIri"))
+                    target = None if iri is None else URIRef(iri)
             if target is None:
                 _skip("axiom expression", axiom)
             else:
-                g.add((URIRef(subject), RDFS.subClassOf, target))
+                g.add((URIRef(subject), predicate, target))
     return g
