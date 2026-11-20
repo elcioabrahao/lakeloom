@@ -70,6 +70,22 @@ AXIOM = {
         }
     ],
 }
+GADGET = {
+    "id": "b0d5b2fa-1b64-4c67-9d05-64d7ac2eb001",
+    "name": "Gadget",
+    "fullyQualifiedName": "pair.Gadget",
+    "description": "A gadget",
+    "iri": f"{IRI}Gadget",
+    "conceptType": "OWL_CLASS",
+}
+DISJOINT_AXIOM = {
+    "id": "2f1b4ac3-9714-4a52-8c0e-1e3f5a7b9c02",
+    "name": "widgetDisjointWithGadget",
+    "fullyQualifiedName": "pair.widgetDisjointWithGadget",
+    "axiomType": "DISJOINT_WITH",
+    "subjectIri": f"{IRI}Widget",
+    "expressions": [{"kind": "NAMED_CLASS", "classIri": f"{IRI}Gadget"}],
+}
 
 
 def state(rev: int) -> dict[str, Any]:
@@ -153,7 +169,7 @@ def mock_members(
 async def test_export_native_ontology_builds_rdf_from_working_members(client: OMClient) -> None:
     respx.get(f"{API}/ontologies/name/pair").respond(200, json=ONTOLOGY)
     respx.get(f"{API}/ontologies/{OID}/state").respond(200, json=state(3))
-    routes = mock_members([CONCEPT], [PROPERTY], [AXIOM])
+    routes = mock_members([CONCEPT, GADGET], [PROPERTY], [AXIOM, DISJOINT_AXIOM])
     export = await client.export_native_ontology("pair")
     assert export is not None and export.working_revision == 3
     assert routes[0].calls[0].request.url.params["ontology"] == "pair"
@@ -175,6 +191,10 @@ async def test_export_native_ontology_builds_rdf_from_working_members(client: OM
     restrictions = [o for o in g.objects(widget, RDFS.subClassOf)]
     assert len(restrictions) == 1
     assert (restrictions[0], OWL.onProperty, weight) in g
+    # The disjoint axiom becomes an owl:disjointWith link to the named class.
+    gadget = URIRef(f"{IRI}Gadget")
+    assert (gadget, RDF.type, OWL.Class) in g
+    assert (widget, OWL.disjointWith, gadget) in g
 
 
 @respx.mock
