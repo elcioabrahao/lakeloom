@@ -81,7 +81,7 @@ dev = [
     "ruff>=0.17.4",
     "snowflake-connector-python>=5.1.0",
     "types-jmespath>=1.1.0.20260724",
-    "types-pyyaml>=6.0.12.20261103",
+    "types-pyyaml>=6.0.12.20261113",
 ]
 
 [tool.hatch.build.targets.wheel]
