@@ -261,10 +261,15 @@ submitted.
 | … `DELETE_CONCEPT` / `DELETE_PROPERTY` / `DELETE_AXIOM` | `Delete` on that member type |
 | … `UPSERT_*` of an *existing* member (`targetId`) | `EditAll` on that member type |
 | tag a table or column with a term (JSON Patch on `/tags`) | `EditTags`/`EditGlossaryTerms` (DataConsumer) |
+| PATCH a term directly, outside a change set (JSON Patch `replace /parent`; *row added 2026-11-20*) | `EditAll` on `glossaryTerm` |
 
   `DELETE_TERM` needs no `Delete` (it is a soft delete under the glossary's `EditAll`).
-  `glossaryTerm` needs no rule. No `ViewAll` rule is needed, because DataConsumer grants
-  `ViewAll` on all resources.
+  `glossaryTerm` needs no rule *for change-set applies* — *amended 2026-11-20*: a direct
+  JSON Patch on a term (the taxonomy re-parenting reconciliation, below) demands `EditAll`
+  on `glossaryTerm` (403 measured live). No `ViewAll` rule is needed, because DataConsumer
+  grants `ViewAll` on all resources — *amended 2026-11-20*: in the dev stack alice holds
+  only `LakeloomOntologyReviewer` (no `DataConsumer` role at all), yet term reads succeed;
+  "every user has DataConsumer" does not hold there.
 - `APPLY_PERMISSIONS` (`lakeloom.om.models`) = `{"glossary": ("EditAll",), "ontology":
   ("EditAll",)}`: the per-target checks Task 5 can make in advance with
   `get_permissions`. The lease and member checks happen only at apply, and their failure is
@@ -275,13 +280,17 @@ probe-role run per variant):
 
 | Rule | Resources | Operations | Without it |
 |---|---|---|---|
-| `LakeloomReviewerChangeSetLease` | `ontologyChangeSet` | `EditAll` | every apply: lease 403 `[EditAll]` (carol) |
+| `LakeloomReviewerChangeSetLease` | `ontologyChangeSet` | `EditAll`, `Create` (`Create` *added 2026-11-20*) | every apply: lease 403 `[EditAll]` (carol); without `Create`: the rebuild path (`review.py` `_rebuild -> _create_side`, a stale native side behind the working revision) 403s re-drafting the change set as the reviewer — rc1's `EditAll` does not include `Create` for this resource (measured live) |
 | `LakeloomReviewerApplyTargets` | `glossary`, `ontology` | `EditAll` | without `glossary`: glossary apply 403 `[EditAll]`; without `ontology`: native apply 403 `[EditAll]` |
 | `LakeloomReviewerNativeDefinitions` | `ontologyConcept`, `ontologyProperty`, `ontologyAxiom` | `Create`, `Delete` | concept only: property/axiom upserts 403 `[Create]`; without `ontologyAxiom`: axiom 403 `[Create]`; `Delete` only on property: `DELETE_CONCEPT` 403 `[Delete]` |
+| `LakeloomReviewerTermReparenting` (*added 2026-11-20*) | `glossaryTerm` | `EditAll` | taxonomy re-parenting by direct PATCH: 403 `operations [EditAll] not allowed` without it (273/273 PATCHes failed before, all succeeded after; measured live) |
 
 Dropped from Task 1's rule: `ViewAll` (DataConsumer has it), `Create` on `glossary`,
 `glossaryTerm`, `ontology` and `ontologyChangeSet`, all of `glossaryTerm`, and `EditAll` on
-the native member types. `EditAll` on members would only be needed to update an existing
+the native member types. — *amended 2026-11-20*: two of these came back, both measured
+live: `Create` on `ontologyChangeSet` (the rebuild path re-drafts the change set as the
+reviewer; rc1's `EditAll` excludes `Create` for it) and `EditAll` on `glossaryTerm`
+(taxonomy re-parenting, below). `EditAll` on members would only be needed to update an existing
 native definition in place (403 `[EditAll]` measured). Lakeloom never drafts that: `to_om_all`
 emits `UPSERT_*` only for new definitions, and removals as `DELETE_*`. `DELETE_AXIOM` was
 measured only with `Delete` granted on all three member types. Requiring `Delete` on
@@ -294,6 +303,24 @@ Bootstrap converges the rules. When the policy exists, its rules (compared by na
 condition and sorted resources/operations) are replaced with JSON Patch `replace /rules` if
 they differ ("updated policy … rules"). Otherwise it logs "rules current". The first run on
 the Task 1 dev volume updated it; the second reported current.
+
+**Later findings (2026-11-20, taxonomy stage of the `cigars` model).**
+
+- **rc1 cannot move a term's parent through a change set** (the `operations.py` re-parent
+  constraint: `UPDATE_TERM` carries no parent). The taxonomy's reconciliation step —
+  moving 273 existing terms under their 10 new thematic parents — therefore PATCHes
+  `PATCH /v1/glossaryTerms/{id}` directly as the reviewer (`application/json-patch+json`,
+  `[{"op":"replace","path":"/parent","value":{"id":…,"type":"glossaryTerm"}}]`, no
+  `If-Match`). This is a recorded deviation from the proposal path (ADR 0017
+  reconciliation), accepted by design until OM change sets support parent moves.
+- That direct PATCH demands **`EditAll` on `glossaryTerm`**: 273/273 PATCHes returned 403
+  `operations [EditAll] not allowed` before the new `LakeloomReviewerTermReparenting`
+  rule; 273/273 succeeded after it was added to the live policy.
+- **alice holds no `DataConsumer` role** in the dev stack (her only OM role is
+  `LakeloomOntologyReviewer`), so the bootstrap's "DataConsumer grants
+  `EditGlossaryTerms` to every user" assumption does not hold there. Term reads still
+  succeed; direct term writes fall to the reviewer policy. The live policy was patched in
+  place to match, and `om-bootstrap.sh` carries the same rules so a redeploy converges.
 
 **Tags.** As alice, a JSON Patch `[{"op": "add", "path": "/columns/0/tags", "value": [...own
 tags, {tagFQN: <term>, source: Glossary, labelType: Manual, state: Confirmed}]}]` (content
@@ -554,7 +581,9 @@ Live findings of that run:
 - OM's default `DataConsumer` role (every user, through the Organization team) already
   grants `EditDescription` and `EditGlossaryTerms` on all resources. carol can therefore
   edit term descriptions directly in OM, outside change sets. Lakeloom cannot prevent
-  that. It is an OM-side governance setting.
+  that. It is an OM-side governance setting. — *amended 2026-11-20*: measured in the dev
+  stack, alice holds no `DataConsumer` role; direct term writes there fall to the reviewer
+  policy instead (see Later findings).
 - The OM UI login (browser, code + PKCE on client `openmetadata`) was checked on the
   Keycloak side only. A scripted authorization-code flow with PKCE to
   `http://localhost:8585/callback` returned ID and access tokens that OM accepts as

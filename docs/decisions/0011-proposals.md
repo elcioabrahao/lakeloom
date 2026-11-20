@@ -381,7 +381,15 @@ is applied.
   relationship types. Unpaired models get the glossary link only (with a warning).
   `RemoveRelation` also deletes the object property when the ontology has it. Dedupe treats a
   relation as present when an `owl:ObjectProperty` named after it has the source as
-  `rdfs:domain` and the target as `rdfs:range`.
+  `rdfs:domain` and the target as `rdfs:range`. — *amended 2026-11-20 (measured live,
+  applied on the `cigars` thesaurus)*: the property name `{Source}.{relationType}` is **not
+  unique per pair** — a second `AddRelation` from the same source (two RT links off one
+  concept) drafts fine and fails at apply with `Definition already exists:
+  cigars."Wrapper.related"`, and OM rolls the native change set back while the glossary
+  side applies and stays. Thesaurus RT links therefore go glossary-only:
+  `propose_add_relation` drafts `relatedTo` with `glossary_only: true` (an RT is a
+  term-to-term association, not a class-level property), and raw `add_relation` operations
+  on a paired model must do the same — or use a type unique per pair.
 - **Appending to a change set** that already creates a term: relations and mappings on it
   carry no `baseVersion` either (`to_om_all(..., in_change_set=...)`). A synonym or update
   of a concept the proposal itself creates is refused (`validation_error`).
