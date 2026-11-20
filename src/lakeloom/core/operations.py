@@ -21,6 +21,7 @@ from pydantic import AnyUrl, BaseModel, ConfigDict, Field, model_validator
 
 from lakeloom.core.model_policy import XSD_DATATYPE_PATTERN
 from lakeloom.errors import LakeloomError
+from lakeloom.om.models import OMConceptMapping
 from lakeloom.untrusted import UntrustedText
 
 __all__ = [
@@ -371,6 +372,9 @@ class TermSnapshot:
 
     UPDATE_TERM replaces the term (live check, ADR 0011: an omitted ``iri`` was dropped), so
     updates are always built from a full snapshot. ``description`` is required by OM.
+    ``concept_mappings`` is carried for the same reason: an UPDATE_TERM without it wipes the
+    term's external mappings (measured live on rc1, cigars 2026-11-20: an add_synonym update
+    dropped the exactMatch applied moments earlier — Nicotiana Tabacum lost Q181095).
     """
 
     description: str
@@ -379,6 +383,7 @@ class TermSnapshot:
     iri: str | None = None
     parent_id: str | None = None
     synonyms: tuple[str, ...] = ()
+    concept_mappings: tuple[OMConceptMapping, ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -915,6 +920,12 @@ def _update_term(
         term["displayName"] = display_name
     if snapshot.iri is not None:
         term["iri"] = snapshot.iri
+    if snapshot.concept_mappings:
+        # carried, not recomputed: UPDATE_TERM replaces the term, so an omitted
+        # conceptMappings list would drop the term's external mappings
+        term["conceptMappings"] = [
+            m.model_dump(by_alias=True, exclude_none=True) for m in snapshot.concept_mappings
+        ]
     if parent_id is not None:
         term["parent"] = {"id": parent_id, "type": "glossaryTerm"}
     return {

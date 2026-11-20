@@ -1185,6 +1185,7 @@ class ProposalService:
                     iri=term.iri,
                     parent_id=term.parent.id if term.parent else None,
                     synonyms=tuple(term.synonyms),
+                    concept_mappings=tuple(term.concept_mappings),
                 )
         relationship_types: dict[str, str] = {}
         if any(isinstance(op, AddRelation) for op in ops):

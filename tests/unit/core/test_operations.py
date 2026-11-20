@@ -30,6 +30,7 @@ from lakeloom.core.operations import (
     to_om_all,
 )
 from lakeloom.errors import LakeloomError
+from lakeloom.om.models import OMConceptMapping
 from lakeloom.untrusted import UntrustedText
 
 BASE = "http://localhost:8000/ontology/retail/"
@@ -426,6 +427,47 @@ def test_add_synonym_extends_existing() -> None:
         AddSynonym(op="add_synonym", concept_fqn="retail.Order", synonym="purchase"), CTX
     ).glossary[0]
     assert again["term"]["synonyms"] == ["Purchase"]
+
+
+def test_term_update_carries_concept_mappings() -> None:
+    """UPDATE_TERM replaces the term, so an update on a mapped term must carry its
+    mappings or they are dropped (measured live on rc1: an add_synonym update wiped
+    the exactMatch applied moments earlier)."""
+    ctx = replace(
+        CTX,
+        terms={
+            **CTX.terms,
+            "retail.Order": TermSnapshot(
+                description="An order",
+                version=0.3,
+                display_name="Order X",
+                iri=BASE + "Order",
+                parent_id="t-thing",
+                synonyms=("Purchase",),
+                concept_mappings=(
+                    OMConceptMapping(
+                        conceptIri="http://www.wikidata.org/entity/Q181095",
+                        mappingType="EXACT_MATCH",
+                    ),
+                ),
+            ),
+        },
+    )
+    (g,) = to_om(
+        AddSynonym(op="add_synonym", concept_fqn="retail.Order", synonym="Sale"), ctx
+    ).glossary
+    assert g["operationType"] == "UPDATE_TERM"
+    assert g["term"]["conceptMappings"] == [
+        {
+            "conceptIri": "http://www.wikidata.org/entity/Q181095",
+            "mappingType": "EXACT_MATCH",
+        }
+    ]
+    # a snapshot without mappings sends no conceptMappings key (nothing to carry)
+    (bare,) = to_om(
+        AddSynonym(op="add_synonym", concept_fqn="retail.Customer", synonym="Buyer"), CTX
+    ).glossary
+    assert "conceptMappings" not in bare["term"]
 
 
 def test_realizations_map_to_nothing() -> None:
