@@ -39,7 +39,7 @@ dependencies = [
     "pyjwt[crypto]>=2.15.1",
     "pyyaml>=6.0.3",
     "rdflib>=7.6.0",
-    "sqlalchemy[asyncio]>=2.1.8",
+    "sqlalchemy[asyncio]>=2.1.9",
     "typer>=0.29.1",
     "uvicorn[standard]>=0.54.0",
 ]
